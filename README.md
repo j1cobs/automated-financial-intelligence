@@ -23,7 +23,9 @@ A modular, end-to-end, serverless-ready personal finance platform in Python. The
 
 ## Configuration & Secrets
 
-Use environment variables or `.streamlit/secrets.toml`.
+Use environment variables, `.env`, or `.streamlit/secrets.toml`.
+
+For local development, create a `.env` file in the repository root.  You can use the `.env.example` as a template. `config.py` loads it automatically through `python-dotenv`, and the same environment variable names are used in GitHub Actions.
 
 ### Required
 
@@ -53,6 +55,17 @@ Use environment variables or `.streamlit/secrets.toml`.
 ```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+Example `.env` entries:
+
+```env
+DATABASE_URL=postgresql://...
+INGESTION_SOURCE=plaid
+PLAID_CLIENT_ID=...
+PLAID_SECRET=...
+PLAID_ACCESS_TOKENS=access-token-1,access-token-2
+PLAID_BASE_URL=https://sandbox.plaid.com
 ```
 
 ## Run Pipeline
