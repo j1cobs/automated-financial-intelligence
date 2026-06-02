@@ -14,16 +14,20 @@ from core.google_oauth import (
     is_authorized_identity,
 )
 
+_google_oauth_pending_sessions: dict[str, str] = {}
+
 
 def query_param(name: str) -> str | None:
-    values = st.experimental_get_query_params().get(name)
-    if not values:
+    value = st.query_params.get(name)
+    if value is None:
         return None
-    return values[0]
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
 
 
 def clear_query_params() -> None:
-    st.experimental_set_query_params()
+    st.query_params.clear()
 
 
 def sign_out() -> None:
@@ -31,8 +35,6 @@ def sign_out() -> None:
         "authenticated",
         "authenticated_user",
         "authenticated_at",
-        "google_oauth_state",
-        "google_oauth_code_verifier",
     ):
         st.session_state.pop(key, None)
     clear_query_params()
@@ -54,8 +56,7 @@ def is_authenticated() -> bool:
 def start_google_sign_in(settings) -> str:
     code_verifier, code_challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(32)
-    st.session_state.google_oauth_state = state
-    st.session_state.google_oauth_code_verifier = code_verifier
+    _google_oauth_pending_sessions[state] = code_verifier
     return build_authorization_url(
         client_id=settings.google_oauth_client_id,
         redirect_uri=settings.google_oauth_redirect_uri,
@@ -70,15 +71,9 @@ def consume_google_callback(settings) -> bool:
     if not code or not state:
         return False
 
-    expected_state = st.session_state.get("google_oauth_state")
-    code_verifier = st.session_state.get("google_oauth_code_verifier")
-    if not expected_state or not code_verifier:
+    code_verifier = _google_oauth_pending_sessions.pop(state, None)
+    if not code_verifier:
         st.error("Google sign-in session expired. Please try again.")
-        clear_query_params()
-        return False
-
-    if state != expected_state:
-        st.error("Google sign-in state check failed.")
         clear_query_params()
         return False
 
@@ -109,8 +104,6 @@ def consume_google_callback(settings) -> bool:
         "picture": identity.picture,
         "subject": identity.subject,
     }
-    st.session_state.pop("google_oauth_state", None)
-    st.session_state.pop("google_oauth_code_verifier", None)
     clear_query_params()
     st.rerun()
     return True
