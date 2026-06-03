@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+# import sys
+# from pathlib import Path
 
-# Adds the root directory (one level up from 'app') to the Python path
-root_path = Path(__file__).resolve().parent.parent
-if str(root_path) not in sys.path:
-    sys.path.append(str(root_path))
+# # Adds the root directory (one level up from 'app') to the Python path
+# root_path = Path(__file__).resolve().parent.parent
+# if str(root_path) not in sys.path:
+#     sys.path.append(str(root_path))
 
 import streamlit as st
 
