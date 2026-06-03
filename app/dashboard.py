@@ -40,7 +40,7 @@ def render_dashboard(frame: pd.DataFrame) -> None:
         burn["rolling_30d"] = burn["amount"].rolling(30, min_periods=1).sum()
         st.plotly_chart(
             px.line(burn, x="date", y="rolling_30d", title="Rolling 30-day Burn Rate"),
-            use_container_width=True,
+            width="stretch",
         )
 
     with col2:
@@ -50,7 +50,7 @@ def render_dashboard(frame: pd.DataFrame) -> None:
             .mark_bar()
             .encode(x="month:N", y="amount:Q", color="account_key:N")
             .properties(title="Combined vs Individual Budget Breakdown"),
-            use_container_width=True,
+            width="stretch",
         )
 
     dist = frame.groupby(["month", "category"], as_index=False)["amount"].sum()
@@ -62,7 +62,7 @@ def render_dashboard(frame: pd.DataFrame) -> None:
             color="category",
             title="Monthly Category Distribution",
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     st.subheader("Flagged Outliers")
@@ -77,6 +77,22 @@ def render_dashboard(frame: pd.DataFrame) -> None:
                 "outlier_score",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("Transactions")
+    st.dataframe(
+        frame[
+            [
+                "date",
+                "account_key",
+                "description",
+                "amount",
+                "category",
+                "outlier_score",
+            ]
+        ],
+        width="stretch",
         hide_index=True,
     )
