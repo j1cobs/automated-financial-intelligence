@@ -42,6 +42,46 @@ class DatabaseClient:
                 cursor.execute(sql)
             connection.commit()
 
+    def upsert_plaid_accounts(self, accounts: list[dict[str, Any]]) -> None:
+        sql = """
+        INSERT INTO accounts (
+            account_key, account_name, owner_name, official_name,
+            account_type, account_subtype,
+            balance_available, balance_current, balance_limit, iso_currency_code,
+            source
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (account_key) DO UPDATE
+        SET account_name      = EXCLUDED.account_name,
+            owner_name        = EXCLUDED.owner_name,
+            official_name     = EXCLUDED.official_name,
+            account_type      = EXCLUDED.account_type,
+            account_subtype   = EXCLUDED.account_subtype,
+            balance_available = EXCLUDED.balance_available,
+            balance_current   = EXCLUDED.balance_current,
+            balance_limit     = EXCLUDED.balance_limit,
+            iso_currency_code = EXCLUDED.iso_currency_code,
+            source            = EXCLUDED.source,
+            updated_at        = NOW()
+        """
+        rows = [
+            (
+                a["account_key"],
+                a["account_name"],
+                a.get("owner_name"),
+                a.get("official_name"),
+                a.get("account_type"),
+                a.get("account_subtype"),
+                a.get("balance_available"),
+                a.get("balance_current"),
+                a.get("balance_limit"),
+                a.get("iso_currency_code"),
+                a["source"],
+            )
+            for a in accounts
+        ]
+        if rows:
+            self._execute_many(sql, rows)
+
     def upsert_accounts(self, frame: pd.DataFrame) -> None:
         sql = """
         INSERT INTO accounts (account_key, account_name, source)
@@ -92,7 +132,7 @@ class DatabaseClient:
         rows = []
         for record in frame.to_dict("records"):
             transaction_hash = build_transaction_hash(record)
-            account_key = f"{record.get('source', 'unknown')}:{record.get('account_name', 'unknown')}"
+            account_key = record.get("account_key") or f"{record.get('source', 'unknown')}:{record.get('account_name', 'unknown')}"
             rows.append(
                 (
                     record.get("transaction_id") or None,
