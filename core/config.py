@@ -53,6 +53,7 @@ class Settings:
     plaid_client_id: str | None
     plaid_secret: str | None
     plaid_access_tokens: list[str]
+    plaid_access_token_owners: list[str]
     plaid_base_url: str
     csv_paths: list[str]
     database_url: str
@@ -88,11 +89,15 @@ def load_settings() -> Settings:
     plaid_client_id: str | None = None
     plaid_secret: str | None = None
     plaid_access_tokens: list[str] = []
+    plaid_access_token_owners: list[str] = []
     if ingestion_source == "plaid":
         plaid_client_id = _read_value("PLAID_CLIENT_ID", secrets)
         plaid_secret = _read_value("PLAID_SECRET", secrets)
         plaid_access_tokens = _split_csv(
             _read_value("PLAID_ACCESS_TOKENS", secrets, "")
+        )
+        plaid_access_token_owners = _split_csv(
+            _read_value("PLAID_ACCESS_TOKEN_OWNERS", secrets, "")
         )
         if not plaid_client_id or not plaid_secret:
             raise ConfigError(
@@ -120,6 +125,7 @@ def load_settings() -> Settings:
         plaid_client_id=plaid_client_id,
         plaid_secret=plaid_secret,
         plaid_access_tokens=plaid_access_tokens,
+        plaid_access_token_owners=plaid_access_token_owners,
         plaid_base_url=_read_value(
             "PLAID_BASE_URL", secrets, "https://sandbox.plaid.com"
         )
