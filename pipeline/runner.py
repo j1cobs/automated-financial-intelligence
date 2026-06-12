@@ -47,7 +47,14 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
 
     database = DatabaseClient(settings.database_url)
     database.ensure_schema()
-    database.upsert_accounts(transactions)
+
+    if settings.ingestion_source == "plaid":
+        owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners))
+        accounts = ingestor.fetch_accounts(owner_by_token)
+        database.upsert_plaid_accounts(accounts)
+    else:
+        database.upsert_accounts(transactions)
+
     database.upsert_categories(transactions["category"].dropna().astype(str).tolist())
     database.upsert_transactions(transactions)
     LOGGER.info("Pipeline completed successfully")
