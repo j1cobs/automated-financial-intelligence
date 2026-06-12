@@ -12,7 +12,7 @@ import streamlit as st
 
 from core.config import load_settings
 from app.auth import render_sidebar, render_sign_in
-from app.dashboard import load_transactions, render_dashboard
+from app.dashboard import load_financial_data, render_dashboard
 
 st.set_page_config(page_title="Automated Financial Intelligence", layout="wide")
 
@@ -26,12 +26,12 @@ def main() -> None:
         return
 
     try:
-        data = load_transactions(settings.database_url)
+        tx_data, acct_data = load_financial_data(settings.database_url)
     except Exception as error:
         st.error(f"Failed to load dashboard data: {error}")
         return
 
-    render_dashboard(data)
+    render_dashboard(tx_data, acct_data)
 
 
 if __name__ == "__main__":
