@@ -158,6 +158,11 @@ ENV/
 env.bak/
 venv.bak/
 
+artifacts/
+data/
+labeled_transactions.csv
+*.joblib
+
 # VSCode settings
 .vscode/
 

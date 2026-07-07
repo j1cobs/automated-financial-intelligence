@@ -1,14 +1,18 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=70"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "automated-financial-intelligence"
 version = "0.1.0"
-dependencies = [
-    "plaid-python",
-    "streamlit"
-]
+description = "Modular personal-finance platform: ingest → classify → persist → dashboard"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
-where = ["."]
+include = ["analytics*", "app*", "core*", "database*", "ingestion*", "pipeline*"]
