@@ -3,6 +3,11 @@
 > Working plan to make this repo publishable on GitHub (interview showcase + self-host template) **and** expand the dashboard with meaningful financial insights.
 > Status: **not started** — tick checkboxes as work lands. Safe to delete once all phases complete.
 > Implement phases in order. Phase 3 (dashboard) is the largest; it has strict internal ordering.
+>
+> **Decision (2026-07-07): ingestion is Plaid-only.** Phase 2 deletes the CSV ingestor and everything that
+> served it. The zero-credential demo path is a **DB seed script** that writes curated sample data directly
+> into Postgres via `DatabaseClient` — no ingestion involved. Plaid credentials are enforced by the
+> *pipeline*, never by `load_settings()`, so the seed demo and dashboard-only deployments need no Plaid keys.
 
 ---
 
@@ -30,7 +35,7 @@ data/
 labeled_transactions.csv
 *.joblib
 ```
-Rationale: `artifacts/` is the default `MODEL_PATH` dir; `data/` is where real bank CSVs and generated sample data live; ignoring the whole `data/` directory is safe because sample data is produced by a committed *generator* script (Phase 2b).
+Rationale: `artifacts/` is the default `MODEL_PATH` dir; `data/` is reserved for locally generated files (e.g. the Phase 7 labeled dataset) and must never be committed.
 
 ### 1b. `.env.example`
 **Delete** lines 17-23 (the 7 dead `PLAID_LINK_*` variables — nothing in `core/config.py` reads them):
@@ -44,10 +49,12 @@ PLAID_LINK_WEBHOOK=...
 PLAID_LINK_REDIRECT_URI=...
 ```
 
-**Change** the demo defaults so the file works out-of-the-box with docker (Phase 2c):
+**Delete** the `INGESTION_SOURCE` and `CSV_PATHS` lines — CSV ingestion is removed in Phase 2a and the
+config keys go with it.
+
+**Change** the demo default so the file works out-of-the-box with docker (Phase 2c):
 ```env
 DATABASE_URL=postgresql://finance:finance@localhost:5432/finance
-CSV_PATHS=data/sample/transactions.csv
 ```
 
 **Add** these missing optional vars (both read by `core/config.py:119-120`):
@@ -61,11 +68,7 @@ CSV_PATHS=data/sample/transactions.csv
 # ── Required ────────────────────────────────────────────────────────────────
 DATABASE_URL=postgresql://finance:finance@localhost:5432/finance
 
-# ── Ingestion ────────────────────────────────────────────────────────────────
-INGESTION_SOURCE=csv
-CSV_PATHS=data/sample/transactions.csv
-
-# ── Plaid (only when INGESTION_SOURCE=plaid) ────────────────────────────────
+# ── Plaid (required to run the pipeline; NOT needed for the seed demo or dashboard) ──
 # PLAID_CLIENT_ID=...
 # PLAID_SECRET=...
 # PLAID_ACCESS_TOKENS=token1,token2
@@ -92,7 +95,7 @@ Replace the entire file with:
 ```toml
 [build-system]
 requires = ["setuptools>=70"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "automated-financial-intelligence"
@@ -114,148 +117,78 @@ include = ["analytics*", "app*", "core*", "database*", "ingestion*", "pipeline*"
 Remove the `altair` line (never imported anywhere in the codebase — verified). Keep everything else exactly as-is.
 
 ### 1e. `CLAUDE.md`
-Make these targeted edits (do NOT rewrite; only fix the wrong parts):
+Make these targeted edits (do NOT rewrite; only fix the wrong parts). Apply them **after** Phase 2a so the
+Plaid-only descriptions are true when written:
 
-- **Line 35** (Plaid sandbox bootstrap): change `python scripts/generate_public_token.py sandbox --append` → `python scripts/generate_sample_data.py` and `python scripts/create_sandbox_access_token.py --append`.
+- **Line 35** (Plaid sandbox bootstrap): change `python scripts/generate_public_token.py sandbox --append` → `python scripts/create_sandbox_access_token.py --append`; add `python scripts/seed_sample_data.py` as the demo-data command.
 - **Lines 11-12** (Phase 1 status paragraph): remove "rolling burn-rate" and "household combined-vs-individual breakdowns" from the "not built" list. Rewrite to: "The dashboard implements all core views. Only ML is stubbed — the pipeline uses placeholders."
-- **Lines 55-56** (Configuration section): remove `PlaidLinkConfig` (doesn't exist). Should read: `core/` — shared helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`, `google_oauth.py`.
-- **Line 59** (scripts bullet): remove `scripts/generate_public_token.py` reference; replace with `scripts/generate_sample_data.py` (Phase 2b).
+- **Architecture / ingestion bullet**: remove `CSVIngestor` and `runner._build_ingestor` source-switching description — `PlaidIngestor` is the only implementation; `BaseIngestor` remains as the interface seam for future sources.
+- **Configuration section**: remove `PlaidLinkConfig` (doesn't exist) and the `INGESTION_SOURCE`/`CSV_PATHS` description. Plaid vars are required *to run the pipeline* but optional at config-load time. Should read: `core/` — shared helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`, `google_oauth.py`.
+- **Scripts bullet**: remove `scripts/generate_public_token.py` reference; replace with `scripts/seed_sample_data.py` (Phase 2b).
 - **Lines 72-75** (Automation section): replace "still on the dev branch and uncommitted" with "committed but inert until required Secrets are populated on the default branch."
 - **Line 58** (dashboard description): remove "Altair" — the dashboard uses Plotly only.
 
 ---
 
-## Phase 2 — Demo path
+## Phase 2 — Plaid-only refactor + demo path
 
-### 2a. CSV account enrichment (implement first — the dashboard is completely empty without this)
+### 2a. Remove the CSV ingestion path (implement first — everything downstream assumes Plaid-only)
 
-**Why this is critical**: `app/dashboard.py:328-331` builds the owner multiselect from `df["owner_name"].dropna().unique()`. When CSV data has NULL `owner_name`, the list is empty, and the mask at line 371 (`df["owner_name"].isin([])`) filters every row → the dashboard renders nothing.
+CSV ingestion is dropped entirely. Plaid already delivers everything the CSV path needed bolted on:
+`upsert_plaid_accounts` persists `owner_name`, `account_type`, `account_subtype`, and balances, so the
+dashboard's owner filter and account metadata work out of the box.
 
-#### File: `ingestion/csv_ingestor.py`
+**Delete outright:**
+- `ingestion/csv_ingestor.py`
+- `tests/test_csv_ingestor.py`
+- `database/db.py::upsert_accounts` (lines 85-100) — dead code once the runner's csv branch is gone; the
+  Plaid path uses `upsert_plaid_accounts`.
 
-Add three new entries to `COLUMN_ALIASES` (after the existing `transaction_id` entry):
-```python
-COLUMN_ALIASES = {
-    "date": ["date", "transaction_date", "posted_date", "posting_date"],
-    "description": ["description", "name", "merchant", "memo"],
-    "amount": ["amount", "transaction_amount", "value", "debit", "credit"],
-    "balance": ["balance", "running_balance", "available_balance", "current_balance"],
-    "account_name": ["account", "account_name", "account_id", "card_name"],
-    "transaction_id": ["transaction_id", "id", "fitid", "reference", "unique_id"],
-    # NEW — optional enrichment columns
-    "owner_name": ["owner_name", "owner", "holder", "account_holder"],
-    "account_type": ["account_type", "type"],
-    "account_subtype": ["account_subtype", "subtype"],
-}
-```
+**Keep** `ingestion/base.py` (`BaseIngestor`) — it documents the ingestor interface and costs nothing.
 
-In `_normalize_frame`, after the existing optional-column lookups (lines 42-44), add:
-```python
-owner_col = self._find_column(frame, "owner_name")
-account_type_col = self._find_column(frame, "account_type")
-account_subtype_col = self._find_column(frame, "account_subtype")
-```
+#### File: `core/config.py`
 
-In the `pd.DataFrame({...})` constructor, extend the dict:
-```python
-"owner_name":      frame[owner_col].astype(str)        if owner_col        else pd.NA,
-"account_type":    frame[account_type_col].astype(str)  if account_type_col  else pd.NA,
-"account_subtype": frame[account_subtype_col].astype(str) if account_subtype_col else pd.NA,
-```
+- Remove `ingestion_source` and `csv_paths` from `Settings`.
+- Remove the `INGESTION_SOURCE` read + validation and the entire `csv_paths` block from `load_settings()`.
+- Read the Plaid values **unconditionally but optionally**: `plaid_client_id`, `plaid_secret` may be `None`;
+  `plaid_access_tokens` / `plaid_access_token_owners` may be empty lists. **Do NOT raise `ConfigError` for
+  missing Plaid vars in `load_settings()`** — the dashboard and the seed script (2b) only need
+  `DATABASE_URL`, and a hard requirement here would break both. Required-ness moves to the pipeline (below).
 
-Update the empty-frame fallback (line 80):
-```python
-return pd.DataFrame(columns=[
-    "transaction_id", "date", "description", "amount", "balance",
-    "account_name", "owner_name", "account_type", "account_subtype", "source"
-])
-```
+#### File: `pipeline/runner.py`
 
-**Note**: Do NOT add `owner_name`, `account_type`, or `account_subtype` to `dropna(subset=...)` — they are optional and absent from plain bank exports.
+- Delete the `CSVIngestor` import and `_build_ingestor`'s csv fallback. `_build_ingestor` always returns a
+  `PlaidIngestor` and raises `ConfigError` when `plaid_client_id`, `plaid_secret`, or `plaid_access_tokens`
+  is missing/empty (same messages as today, minus the "when INGESTION_SOURCE=plaid" suffix). Also raise
+  `ConfigError` if `plaid_access_token_owners` is non-empty but its length differs from
+  `plaid_access_tokens` — a silent misalignment mislabels account owners.
+- In `run_pipeline`, delete the `if settings.ingestion_source == "plaid"` / `else` branch (lines 51-56):
+  always `fetch_accounts(owner_by_token)` + `upsert_plaid_accounts(accounts)`.
 
-#### File: `database/db.py` — `upsert_accounts` method (lines 85-100)
+### 2b. Sample data seed script
 
-Replace the entire method with a version that persists the enrichment columns:
-```python
-def upsert_accounts(self, frame: pd.DataFrame) -> None:
-    sql = """
-    INSERT INTO accounts (
-        account_key, account_name, owner_name,
-        account_type, account_subtype, balance_current, source
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (account_key) DO UPDATE
-    SET account_name    = EXCLUDED.account_name,
-        owner_name      = COALESCE(EXCLUDED.owner_name,      accounts.owner_name),
-        account_type    = COALESCE(EXCLUDED.account_type,    accounts.account_type),
-        account_subtype = COALESCE(EXCLUDED.account_subtype, accounts.account_subtype),
-        balance_current = COALESCE(EXCLUDED.balance_current, accounts.balance_current),
-        source          = EXCLUDED.source,
-        updated_at      = NOW()
-    """
-    cols = ["account_name", "source", "owner_name", "account_type", "account_subtype"]
-    for col in cols:
-        if col not in frame.columns:
-            frame = frame.copy()
-            frame[col] = pd.NA
+**Create `scripts/seed_sample_data.py`**
 
-    if "balance" in frame.columns and "date" in frame.columns:
-        latest_balance = (
-            frame.sort_values("date")
-            .groupby("account_name", as_index=False)["balance"]
-            .last()
-            .rename(columns={"balance": "balance_current"})
-        )
-        accounts = (
-            frame[cols]
-            .drop_duplicates(subset=["account_name"])
-            .merge(latest_balance, on="account_name", how="left")
-        )
-    else:
-        accounts = frame[cols].drop_duplicates(subset=["account_name"]).copy()
-        accounts["balance_current"] = pd.NA
-
-    def _or_none(v):
-        try:
-            return None if pd.isna(v) else str(v)
-        except (TypeError, ValueError):
-            return str(v)
-
-    rows = []
-    for record in accounts.to_dict("records"):
-        account_name = str(record["account_name"])
-        source = str(record["source"])
-        account_key = f"{source}:{account_name}"
-        bal = record.get("balance_current")
-        try:
-            balance_current = None if pd.isna(bal) else float(bal)
-        except (TypeError, ValueError):
-            balance_current = None
-        rows.append((
-            account_key,
-            account_name,
-            _or_none(record.get("owner_name")),
-            _or_none(record.get("account_type")),
-            _or_none(record.get("account_subtype")),
-            balance_current,
-            source,
-        ))
-    if rows:
-        self._execute_many(sql, rows)
-```
-
-`COALESCE(EXCLUDED.col, accounts.col)` ensures a plain bank CSV (no owner column) never nulls out metadata that was previously stored.
-
-### 2b. Sample data generator
-
-**Create `scripts/generate_sample_data.py`**
-
-This is a deterministic generator (not a static committed CSV) because `run_pipeline` only fetches the trailing 90 days — a static CSV goes stale within weeks.
+Writes curated demo data **directly into Postgres via `DatabaseClient`** — no ingestion, no CSV file, no
+Plaid credentials. This is the zero-credential demo path: `docker compose up -d` + this script + the
+dashboard. It stays a deterministic *generator* (not a static SQL dump) because the dashboard shows the
+trailing window relative to today — a static dump goes stale within weeks.
 
 ```
-Usage: python scripts/generate_sample_data.py [--days 120] [--out data/sample]
-Output: <out>/transactions.csv
+Usage: python scripts/seed_sample_data.py [--days 120]
+Requires: DATABASE_URL only (via load_settings())
 Seed: random.seed(42)  — deterministic across runs
 ```
+
+**Flow:**
+1. `load_settings()` → `DatabaseClient(settings.database_url)` → `ensure_schema()`.
+2. Generate transactions (patterns below) into a DataFrame, tracking running balances.
+3. `upsert_plaid_accounts(accounts)` — list-of-dicts, one per account in the table below, with
+   `account_key=f"sample:{account_name}"`, `source="sample"`, `iso_currency_code="CAD"`, and
+   `balance_current` = the final running balance after generation.
+4. `upsert_categories(frame["category"].dropna().unique())` then `upsert_transactions(frame)` —
+   `upsert_transactions` derives `account_key = "sample:{account_name}"` automatically from the
+   `source`/`account_name` columns.
 
 **Owners and accounts:**
 | owner_name | account_name              | account_type | account_subtype |
@@ -268,19 +201,25 @@ Seed: random.seed(42)  — deterministic across runs
 
 **Sign convention**: positive amount = outflow (money leaving the account). This is the Plaid convention and is what `app/dashboard.py:387` assumes (`adjusted_amount = -amount`). State this clearly in the module docstring.
 
-**Transaction patterns to generate:**
-- Biweekly payroll: `amount = -2800` (negative = inflow), `description = "Payroll - Direct Deposit"`, on the 1st and 15th of each month. Alex → Alex Chequing, Sam → Sam Chequing.
-- Monthly rent: `amount = 1350`, `description = "Rent"`, on the 1st, from Alex Chequing.
-- Monthly utilities: `amount = 85`, `description = "Hydro - Utility Payment"`, on the 5th, from Sam Chequing.
-- Monthly Netflix: `amount = 17.99`, `description = "Netflix.com"`, on the 12th, from Alex Rewards Visa.
-- Monthly Spotify: `amount = 11.99`, `description = "Spotify Premium"`, on the 14th, from Sam Chequing.
-- Biweekly groceries: `amount = uniform(80, 220)`, `description` = random choice of `["Whole Foods Market", "IGA Supermarché", "Provigo"]`, 2-3x per month per owner.
-- Weekly restaurant/coffee: `amount = uniform(12, 65)`, `description` = random choice of `["Tim Hortons", "Starbucks Coffee", "Restaurant St-Denis", "Brasserie locale"]`, 1-2x per week per owner.
-- Monthly transit: `amount = 100`, `description = "STM Opus Card"`, on the 2nd, from Sam Chequing.
-- Weekly Uber: `amount = uniform(8, 35)`, `description = "Uber"`, 1x per week for Alex from Alex Rewards Visa.
-- ATM withdrawals: `amount = choice([40, 60, 80, 100, 120])`, `description = "ATM Withdrawal"`, once or twice per month from chequing accounts.
-- Monthly credit-card payment pair: On the 20th, post `amount = -350` to Alex Rewards Visa with `description = "Payment - Thank You"` AND `amount = 350` to Alex Chequing with `description = "Credit Card Payment"`. This exercises transfer-exclusion logic.
-- 3 anomaly purchases spread across 120 days: amounts of $450, $890, $1200, descriptions like `"Electronics Store"`, `"Travel Agency"`, `"Appliance Purchase"`.
+**Transaction patterns to generate** (each stamps a `category` — the placeholder ML can't categorize, so the
+seed data must, or the Budget tab and category charts render empty. Names MUST match the Phase 3c canonical
+title-case list):
+- Biweekly payroll: `amount = -2800` (negative = inflow), `description = "Payroll - Direct Deposit"`, on the 1st and 15th of each month. Alex → Alex Chequing, Sam → Sam Chequing. Category `Income`.
+- Monthly rent: `amount = 1350`, `description = "Rent"`, on the 1st, from Alex Chequing. Category `Housing`.
+- Monthly utilities: `amount = 85`, `description = "Hydro - Utility Payment"`, on the 5th, from Sam Chequing. Category `Utilities`.
+- Monthly Netflix: `amount = 17.99`, `description = "Netflix.com"`, on the 12th, from Alex Rewards Visa. Category `Subscriptions`.
+- Monthly Spotify: `amount = 11.99`, `description = "Spotify Premium"`, on the 14th, from Sam Chequing. Category `Subscriptions`.
+- Biweekly groceries: `amount = uniform(80, 220)`, `description` = random choice of `["Whole Foods Market", "IGA Supermarché", "Provigo"]`, 2-3x per month per owner. Category `Groceries`.
+- Weekly restaurant/coffee: `amount = uniform(12, 65)`, `description` = random choice of `["Tim Hortons", "Starbucks Coffee", "Restaurant St-Denis", "Brasserie locale"]`, 1-2x per week per owner. Category `Dining`.
+- Monthly transit: `amount = 100`, `description = "STM Opus Card"`, on the 2nd, from Sam Chequing. Category `Transport`.
+- Weekly Uber: `amount = uniform(8, 35)`, `description = "Uber"`, 1x per week for Alex from Alex Rewards Visa. Category `Transport`.
+- ATM withdrawals: `amount = choice([40, 60, 80, 100, 120])`, `description = "ATM Withdrawal"`, once or twice per month from chequing accounts. Category `ATM`.
+- Monthly credit-card payment pair: On the 20th, post `amount = -350` to Alex Rewards Visa with `description = "Payment - Thank You"` AND `amount = 350` to Alex Chequing with `description = "Credit Card Payment"`. This exercises transfer-exclusion logic. Category `Transfer` (both rows).
+- 3 anomaly purchases spread across 120 days: amounts of $450, $890, $1200, descriptions `"Electronics Store"`, `"Travel Agency"`, `"Appliance Purchase"`. Categories `Shopping`, `Travel`, `Shopping`.
+
+**Outlier flags**: the 3 anomaly rows get `is_outlier = True`, `outlier_score = 0.9`; every other row gets
+`is_outlier = False`, `outlier_score = 0.0`. (This is data the CSV path could never carry — it makes the
+dashboard's anomaly section demo-able before ML activates.)
 
 **Balance tracking**: maintain a running balance per account. Seed balances:
 - Alex Chequing: 3500
@@ -289,14 +228,18 @@ Seed: random.seed(42)  — deterministic across runs
 - Sam Chequing: 4200
 - Sam High-Interest Savings: 9800
 
-After each transaction, update balance: `balance = prev_balance - amount` (for depository/investment); credit: `balance = prev_balance + amount` (positive purchases increase owed balance). Write current balance to `balance` column for each row.
+After each transaction, update balance: `balance = prev_balance - amount` (for depository/investment); credit: `balance = prev_balance + amount` (positive purchases increase owed balance). Write current balance to `balance` column for each row. Sort by `date` ascending **before** computing balances.
 
-**Output columns**: `date,description,amount,balance,account_name,owner,account_type,account_subtype,transaction_id`
-- `date`: ISO format `YYYY-MM-DD`
-- `transaction_id`: `f"SAMPLE-{i:05d}"` (zero-padded sequential)
-- `owner` (not `owner_name`) — `COLUMN_ALIASES` maps `owner` → canonical `owner_name`
+**DataFrame columns** (what `upsert_transactions` consumes):
+`date, description, amount, balance, account_name, source, transaction_id, category, outlier_score, is_outlier`
+- `date`: `datetime.date` (ISO `YYYY-MM-DD` when stringified)
+- `source`: literal `"sample"` on every row
+- `transaction_id`: `f"SAMPLE-{i:05d}"` (zero-padded sequential, assigned after the date sort)
 
-Sort by `date` ascending before writing.
+**Idempotency**: re-running on the same day is a no-op — `random.seed(42)` makes amounts identical, so
+`build_transaction_hash` collides and `ON CONFLICT (transaction_hash) DO UPDATE` rewrites the same rows.
+Re-running on a later day shifts the window and inserts the newly covered days. Note both behaviors in the
+module docstring.
 
 ### 2c. `docker-compose.yml` (repo root)
 
@@ -1052,11 +995,11 @@ Structure (link to `docs/` for depth; keep each section skimmable):
 <!-- Capture after running on sample data -->
 
 ## Architecture
-[Mermaid or ASCII: CSV/Plaid → pipeline/runner.py → DB → dashboard]
+[Mermaid or ASCII: Plaid → pipeline/runner.py → DB → dashboard; seed script → DB (demo path)]
 
 | Layer | Path | Responsibility |
 |-------|------|----------------|
-| Ingestion | ingestion/ | Fetch + normalize (CSV or Plaid) |
+| Ingestion | ingestion/ | Fetch + normalize (Plaid; `BaseIngestor` seam for future sources) |
 | Database | database/ | Idempotent upserts via sha256 hash; auto-run migrations |
 | Analytics | analytics/ | ML classifier + outlier detector (placeholder in Phase 1) |
 | Core | core/ | Config, Google OAuth/PKCE, session |
@@ -1065,21 +1008,22 @@ Structure (link to `docs/` for depth; keep each section skimmable):
 
 Key design decisions (interview talking points):
 - Hash-based idempotent upserts: sha256(account_name|date|description|amount) → safe to re-run daily
+- Config-load vs. pipeline-run validation split: load_settings() never requires Plaid creds, so dashboard-only and seed-demo deployments run credential-free; the pipeline enforces them at build time
 - Runtime migrations: ensure_schema() runs all database/migrations/*.sql sorted — no migration tooling
 - Two-column category design: pipeline writes `category`; user edits write `user_category`; dashboard reads COALESCE
 - OAuth+PKCE: full Google sign-in without a heavyweight framework; 4-hour session expiry
 - Config precedence: env → .streamlit/secrets.toml → default via load_settings()
 - Placeholder seam: swap build_placeholder_models() → build_models(settings) with no orchestration changes
 
-## Quickstart (local with docker)
-[verbatim from Phase 2 quickstart sequence]
-Python 3.11+ required. Run all commands from repo root.
+## Quickstart (local with docker — no Plaid account needed)
+`docker compose up -d` → `python scripts/seed_sample_data.py` → `streamlit run app/streamlit_app.py`
+Python 3.11+ required. Run all commands from repo root. Plaid credentials are only needed to ingest real data via `python main.py`.
 
 ## Configuration reference
 [Table from core/config.py — ONLY real vars, grouped]
 
 ## Ingesting your own data
-CSV format + column aliases → docs/setup-database.md and docs/setup-plaid.md
+Plaid setup (sandbox + production) → docs/setup-plaid.md; database options → docs/setup-database.md
 
 ## Project status & roadmap
 ✅ Data path: ingest → persist → dashboard
@@ -1119,7 +1063,6 @@ GitHub Actions Secrets table:
 | Secret | Notes |
 |--------|-------|
 | `DATABASE_URL` | Required |
-| `INGESTION_SOURCE` | `plaid` or `csv` |
 | `PLAID_CLIENT_ID` | |
 | `PLAID_SECRET` | |
 | `PLAID_ACCESS_TOKENS` | Comma-separated |
@@ -1178,7 +1121,7 @@ No DB, network, or secrets needed — all tests are pure (mock everything).
    ```yaml
    PLAID_ACCESS_TOKEN_OWNERS: ${{ secrets.PLAID_ACCESS_TOKEN_OWNERS }}
    ```
-4. Remove `CSV_PATHS` and `LABELED_DATASET_PATH` from env (no CSVs on runner; ML not wired).
+4. Remove `CSV_PATHS`, `INGESTION_SOURCE`, and `LABELED_DATASET_PATH` from env (`CSV_PATHS`/`INGESTION_SOURCE` no longer exist as config keys after Phase 2a; ML not wired).
 
 ---
 
@@ -1188,10 +1131,9 @@ All tests must be pure — no live DB, no network. Mock seam for DB: `@patch("da
 
 ### 6a. `tests/test_db_upserts.py`
 
-- `test_upsert_accounts_dedup` — frame with two rows for same account → one DB row.
-- `test_upsert_accounts_key_derivation` — account_key = `"source:account_name"`.
-- `test_upsert_accounts_owner_enrichment` — frame with owner/type/subtype/balance → SQL params include all four.
-- `test_upsert_accounts_no_owner_is_none` — frame without `owner_name` column → owner param is `None`.
+- `test_upsert_plaid_accounts_full_row` — dict with all fields (owner/official_name/type/subtype/balances/currency) → SQL params include every value in order.
+- `test_upsert_plaid_accounts_missing_optionals_are_none` — dict with only `account_key`/`account_name`/`source` → optional params are `None`, no exception.
+- `test_upsert_plaid_accounts_empty_list_skips` — empty list → `_execute_many` not called.
 - `test_upsert_transactions_hash_stable` — same dict input → same hash every call.
 - `test_upsert_transactions_empty_id_to_none` — `transaction_id = ""` → `external_id = None`.
 - `test_upsert_transactions_account_key_fallback` — no `account_key` column → `"unknown:unknown"`.
@@ -1205,28 +1147,29 @@ All tests must be pure — no live DB, no network. Mock seam for DB: `@patch("da
 
 ### 6b. `tests/test_pipeline_runner.py`
 
-Patches: `pipeline.runner.load_settings`, `pipeline.runner.CSVIngestor`, `pipeline.runner.PlaidIngestor`, `pipeline.runner.DatabaseClient`.
+Patches: `pipeline.runner.load_settings`, `pipeline.runner.PlaidIngestor`, `pipeline.runner.DatabaseClient`.
 
-- `test_build_ingestor_csv` — source `csv` → `CSVIngestor`.
-- `test_build_ingestor_plaid` — source `plaid` → `PlaidIngestor`.
-- `test_build_ingestor_plaid_missing_creds` — plaid + no client_id → `ConfigError`.
+- `test_build_ingestor_returns_plaid` — full creds → `PlaidIngestor` constructed with client_id/secret/tokens/base_url.
+- `test_build_ingestor_missing_client_id` — no client_id → `ConfigError`.
+- `test_build_ingestor_missing_secret` — no secret → `ConfigError`.
+- `test_build_ingestor_empty_tokens` — `plaid_access_tokens=[]` → `ConfigError`.
+- `test_build_ingestor_owner_token_mismatch` — 2 tokens, 1 owner → `ConfigError` (misalignment would mislabel account owners).
 - `test_run_pipeline_happy_path` — non-empty frame → `upsert_categories` and `upsert_transactions` called; frame has `category` (str) and `is_outlier` (bool) columns.
 - `test_run_pipeline_empty_frame` — empty frame → no DB calls; returns empty DataFrame.
-- `test_run_pipeline_csv_calls_upsert_accounts` — csv source → `upsert_accounts` called, `upsert_plaid_accounts` not called.
-- `test_run_pipeline_plaid_calls_upsert_plaid_accounts` — plaid source → `upsert_plaid_accounts` called, `upsert_accounts` not called.
+- `test_run_pipeline_calls_upsert_plaid_accounts` — `fetch_accounts` called with the owner-by-token map; result passed to `upsert_plaid_accounts`.
 
 ### 6c. `tests/test_config.py`
 
 Use `@patch("core.config.load_dotenv")` + `@patch.dict(os.environ, {...}, clear=True)`.
 
 - `test_database_url_required` — no `DATABASE_URL` → `ConfigError`.
-- `test_ingestion_source_default` — no `INGESTION_SOURCE` → `"csv"`.
-- `test_invalid_ingestion_source` — `INGESTION_SOURCE=ftp` → `ConfigError`.
-- `test_csv_paths_required_for_csv` — csv + no `CSV_PATHS` → `ConfigError`.
-- `test_csv_paths_split` — `CSV_PATHS=a.csv,b.csv` → `["a.csv", "b.csv"]`.
+- `test_plaid_optional_at_load` — only `DATABASE_URL` set → `load_settings()` succeeds; `plaid_client_id`/`plaid_secret` are `None`, token lists empty. (Guards the seed-demo / dashboard-only path.)
+- `test_plaid_values_read` — all Plaid vars set → populated on `Settings`.
+- `test_plaid_base_url_default` — unset → `https://sandbox.plaid.com`.
 - `test_env_over_secrets_precedence` — env value beats secrets.toml value.
 - `test_google_allowed_emails_split` — `GOOGLE_ALLOWED_EMAILS=a@b.com,c@d.com` → list of two.
 - `test_plaid_access_token_owners_split` — comma-separated → list.
+- `test_plaid_access_tokens_split` — `PLAID_ACCESS_TOKENS=t1,t2` → `["t1", "t2"]`.
 
 ### 6d. `tests/test_outlier_detector.py`
 
@@ -1259,25 +1202,18 @@ Pure pandas — no Streamlit runtime. Import `_classify_tx_type`, `_label_subtyp
 - `test_unknown_subtype_titlecased` — `"brokerage"` → `"Brokerage"`.
 - `test_none_subtype` — `None` → `"Other"`.
 
-### 6f. `tests/test_sample_data.py`
+### 6f. `tests/test_seed_sample_data.py`
 
-```python
-import tempfile, subprocess, sys
-from pathlib import Path
-from datetime import date, timedelta
-```
+Pure — patch `DatabaseClient` where the seed script imports it (e.g. `@patch("scripts.seed_sample_data.DatabaseClient")`). Structure the script with a `generate(days) -> (accounts, frame)` function separate from `main()` so generation is testable without any DB mock.
 
-- `test_generator_produces_output` — run generator into tempdir; assert CSV exists and has >100 rows.
-- `test_generator_both_owners_present` — load CSV; assert `{"Alex", "Sam"}` ⊆ unique values in `owner` column.
-- `test_generator_output_survives_csv_ingestor` — feed through `CSVIngestor.fetch_transactions(start=today-125d, end=today)`; result not empty; `"owner_name"` in columns; at least one non-null owner.
-- `test_generator_idempotent` — run twice into separate dirs; file contents identical.
-
-### 6g. Extend `tests/test_csv_ingestor.py`
-
-- `test_normalize_with_owner_column` — CSV with `owner` column → normalized has `owner_name` with values.
-- `test_normalize_with_account_type_column` — `account_type` preserved.
-- `test_normalize_without_optional_columns` — only date/description/amount → `owner_name` is `pd.NA`, no exception.
-- `test_missing_required_column_raises` — CSV missing `description` → `ValueError`.
+- `test_generate_produces_rows` — `generate(120)` → frame has >100 rows; all required columns present (`date, description, amount, balance, account_name, source, transaction_id, category, outlier_score, is_outlier`).
+- `test_generate_both_owners_present` — accounts list contains all 5 accounts; `owner_name` values include both `Alex` and `Sam`.
+- `test_generate_anomalies_flagged` — exactly 3 rows with `is_outlier=True`, each with `outlier_score == 0.9`.
+- `test_generate_categories_canonical` — set of `category` values ⊆ the Phase 3c seed list (title case).
+- `test_generate_transfer_pair` — the monthly credit-card payment posts as a −350/+350 pair, both `category="Transfer"`.
+- `test_generate_source_is_sample` — every row has `source == "sample"`.
+- `test_generate_deterministic` — two calls with the same `days` → identical frames (`assert_frame_equal`).
+- `test_main_calls_db_in_order` — mocked client: `ensure_schema`, `upsert_plaid_accounts`, `upsert_categories`, `upsert_transactions` all called.
 
 ---
 
@@ -1289,7 +1225,7 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 - [ ] Create `analytics/models.py::build_models(settings) -> ModelBundle`: returns placeholder or `TransactionClassifier(settings.model_path)` + `OutlierDetector()` — both share the same duck-type interface (`categorize(Series)` / `score(DataFrame)`).
 - [ ] `pipeline/runner.py:44`: `build_placeholder_models()` → `build_models(settings)`.
 - [ ] Create `scripts/train_classifier.py`: loads settings, calls `TransactionClassifier.train(labeled_dataset_path)`, prints holdout accuracy. Rule-based fallback means `ML_MODE=real` degrades gracefully untrained.
-- [ ] Implement `scripts/generate_sample_data.py --labeled` flag: writes `data/sample/labeled_transactions.csv` (`description,category`) from the same merchant pool → train → pipeline → categorized dashboard in 3 commands.
+- [ ] Implement `scripts/seed_sample_data.py --labeled` flag: writes `data/sample/labeled_transactions.csv` (`description,category`) from the same merchant pool — the seed script already pairs every description with its canonical category, so this is a two-column dump → train → pipeline → categorized dashboard in 3 commands.
 - [ ] Tests: extend `test_classifier.py` (train on synthetic, assert accuracy > 0.5); add `tests/test_models_builder.py` (mode switch).
 - [ ] Update README roadmap.
 
@@ -1297,26 +1233,29 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 
 ## Ordering constraints / risks
 
-1. Phase 2a (CSV enrichment) **before** running the sample data generator.
-2. `.gitignore data/` (Phase 1a) **before** generating anything into `data/`.
+1. Phase 2a (CSV removal, incl. config/runner refactor) **before** 2b (seed script) — the seed script relies on `load_settings()` succeeding with only `DATABASE_URL` set.
+2. Phase 3c migrations (budgets, user_category, category seed) should land **before** demoing the seed data — the seed categories match the 3c canonical list, and `ensure_schema` (3d) must pick up all migration files. The seed script itself only needs 001, but run it after 3c/3d to avoid a re-seed.
 3. Phase 3a (`_classify_tx_type` fix) **before** all other Phase 3 sections.
 4. Phase 3b (DB methods) **before** Phases 3k and 3l.
 5. Phase 3c (migrations) **before** Phase 3d (`ensure_schema` iteration) — 3d relies on the files existing.
 6. Phase 3e (SELECT query with COALESCE + `transaction_hash`) **before** Phase 3l (ledger edit).
 7. Fix case in `analytics/placeholders.py` (`"uncategorized"` → `"Uncategorized"`) **alongside** Phase 3c, before running the pipeline against the seeded categories.
 8. **Never** change `build_transaction_hash` inputs — re-ingest idempotency depends on them.
-9. Sample data must use Plaid sign convention (positive = outflow) or cash flow inverts.
-10. Cron goes live only after merge to `main` + GitHub Secrets — Phase 0 owner action, not code.
+9. Seed data must use Plaid sign convention (positive = outflow) or cash flow inverts.
+10. `load_settings()` must never hard-require Plaid credentials — that would break the seed demo and dashboard-only deployments. Plaid validation lives only in `pipeline/runner.py::_build_ingestor`.
+11. Cron goes live only after merge to `main` + GitHub Secrets — Phase 0 owner action, not code.
 
 ---
 
 ## Verification
 
 1. `python -m unittest discover -s tests -v` — all green on Python 3.11 and 3.12.
-2. `docker compose up -d && python scripts/generate_sample_data.py && python main.py` — no errors; rows in DB.
-3. Run `python main.py` a second time — row count unchanged (idempotency).
-4. `streamlit run app/streamlit_app.py` — sign in with Google; all 4 tabs render; Overview/Net worth/Cash flow/Budget sections populate; Transactions tab shows ledger with category dropdown populated from DB canonical list; category edit persists on page refresh; anomaly section shows empty-state (expected — placeholders).
-5. Filter the sidebar to a past month → Budget tab shows that month's spending; "Projected EOM" is replaced by "Actual".
-6. `pip install -e .` in a fresh venv → same deps as `pip install -r requirements.txt`.
-7. Push branch → CI runs green on 3.11 + 3.12.
-8. `git grep -E "jacos|jacosse|lapointe|gmail\.com|C:\\\\Users"` → no matches.
+2. `docker compose up -d && python scripts/seed_sample_data.py` — no errors; rows in DB with owners, categories, and 3 outlier flags. **No Plaid env vars set** — proves the zero-credential demo path.
+3. Run `python scripts/seed_sample_data.py` a second time (same day) — row count unchanged (idempotency via `transaction_hash`).
+4. `python main.py` with no Plaid creds → fails fast with a clear `ConfigError` naming the missing Plaid vars (pipeline-level enforcement, not a stack trace from deep inside PlaidIngestor).
+5. `streamlit run app/streamlit_app.py` — sign in with Google; all 4 tabs render; Overview/Net worth/Cash flow/Budget sections populate with categorized data; Transactions tab shows ledger with category dropdown populated from DB canonical list; category edit persists on page refresh; anomaly section shows the 3 seeded outliers.
+6. Filter the sidebar to a past month → Budget tab shows that month's spending; "Projected EOM" is replaced by "Actual".
+7. `pip install -e .` in a fresh venv → same deps as `pip install -r requirements.txt`.
+8. Push branch → CI runs green on 3.11 + 3.12.
+9. `git grep -iE "csv_paths|ingestion_source|csv_ingestor"` → no matches outside PLAN.md (CSV fully removed).
+10. `git grep -E "jacos|jacosse|lapointe|gmail\.com|C:\\\\Users"` → no matches.
