@@ -45,7 +45,6 @@ def _split_csv(raw_value: str | None) -> list[str]:
 class Settings:
     ingestion_source: str
     supabase_url: str | None
-    supabase_service_role_key: str | None
     google_oauth_client_id: str | None
     google_oauth_client_secret: str | None
     google_oauth_redirect_uri: str | None
@@ -117,7 +116,6 @@ def load_settings() -> Settings:
     return Settings(
         ingestion_source=ingestion_source,
         supabase_url=_read_value("SUPABASE_URL", secrets),
-        supabase_service_role_key=_read_value("SUPABASE_SERVICE_ROLE_KEY", secrets),
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         google_oauth_redirect_uri=google_oauth_redirect_uri,
