@@ -8,6 +8,12 @@
 > served it. The zero-credential demo path is a **DB seed script** that writes curated sample data directly
 > into Postgres via `DatabaseClient` — no ingestion involved. Plaid credentials are enforced by the
 > *pipeline*, never by `load_settings()`, so the seed demo and dashboard-only deployments need no Plaid keys.
+>
+> **Security (2026-07-07): Phase 2.5 is a publish blocker.** A full security review challenged the current
+> implementation (findings inline in Phase 2.5); the hardening work lives in Phase 2.5 (code), plus
+> amendments in Phases 0, 1f (lockfile), 4 (docs), and 5 (CI). Phase 2.5, Phase 5, and 1f must all land
+> before the `dev → main` publish merge — the dashboard is deployed on the public internet (mobile sign-in
+> for two allowlisted users), so internet-facing posture is not optional.
 
 ---
 
@@ -18,6 +24,10 @@ The local untracked `.env` holds **live production credentials**. Git history is
 - [ ] Rotate Supabase DB password; update local `.env` + GitHub Secrets.
 - [ ] Rotate Plaid production secret; re-issue all three access tokens.
 - [ ] Rotate (or recreate) the Google OAuth client secret.
+- [ ] Set the production Google OAuth redirect URI to the **HTTPS** public dashboard URL (mobile sign-in
+  depends on it); keep `http://localhost:8501/` only as a second, dev-only redirect in the Google console.
+- [ ] Confirm `GOOGLE_ALLOWED_EMAILS` in production secrets lists exactly the two authorized addresses.
+- [ ] Confirm the managed Postgres (Supabase/Neon) tier has encryption at rest enabled (both do by default — verify).
 - [ ] At publish time: merge `dev` → `main`, populate GitHub Secrets (cron only runs from the default branch).
 - [ ] Capture dashboard screenshots on sample data for the README (leave placeholder section, don't block merge).
 
@@ -54,19 +64,27 @@ config keys go with it.
 
 **Change** the demo default so the file works out-of-the-box with docker (Phase 2c):
 ```env
-DATABASE_URL=postgresql://finance:finance@localhost:5432/finance
+DATABASE_URL=postgresql://finance:finance@localhost:5433/finance
 ```
 
-**Add** these missing optional vars (both read by `core/config.py:119-120`):
+**Add** this missing optional var (read by `core/config.py:119`):
 ```env
 # SUPABASE_URL=https://yourproject.supabase.co
-# SUPABASE_SERVICE_ROLE_KEY=...
 ```
+Note: `SUPABASE_SERVICE_ROLE_KEY` was traced to zero usages in the codebase (2026-07-07) and is
+intentionally omitted; `SUPABASE_URL` is kept because `app/auth.py:142-143` uses it for a sidebar caption.
+
+Note: the docker Postgres service maps to host port **5433**, not 5432 — verified during Phase 2
+implementation (2026-07-07) that a native Postgres Windows service already occupies 5432 on the dev
+machine, silently swallowing connections meant for the container. `DATABASE_URL` and `docker-compose.yml`
+(2c) both use 5433 to avoid that conflict; adjust back to 5432 if your own machine has no such conflict.
 
 **Final group structure** for clarity:
 ```
 # ── Required ────────────────────────────────────────────────────────────────
-DATABASE_URL=postgresql://finance:finance@localhost:5432/finance
+DATABASE_URL=postgresql://finance:finance@localhost:5433/finance
+# Production example — TLS is auto-enforced for remote hosts (Phase 2.5a), but be explicit:
+# DATABASE_URL=postgresql://user:pass@host:5432/db?sslmode=require
 
 # ── Plaid (required to run the pipeline; NOT needed for the seed demo or dashboard) ──
 # PLAID_CLIENT_ID=...
@@ -79,11 +97,11 @@ DATABASE_URL=postgresql://finance:finance@localhost:5432/finance
 GOOGLE_OAUTH_CLIENT_ID=...
 GOOGLE_OAUTH_CLIENT_SECRET=...
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8501/
+# Production deployments MUST use an https:// redirect URI (mobile/public sign-in)
 GOOGLE_ALLOWED_EMAILS=email1@gmail.com,email2@gmail.com
 
 # ── Supabase (optional — only if using Supabase instead of docker) ──────────
 # SUPABASE_URL=https://yourproject.supabase.co
-# SUPABASE_SERVICE_ROLE_KEY=...
 
 # ── ML artifacts (used in Phase 7, deferred) ────────────────────────────────
 # MODEL_PATH=artifacts/classifier.joblib
@@ -127,6 +145,29 @@ Plaid-only descriptions are true when written:
 - **Scripts bullet**: remove `scripts/generate_public_token.py` reference; replace with `scripts/seed_sample_data.py` (Phase 2b).
 - **Lines 72-75** (Automation section): replace "still on the dev branch and uncommitted" with "committed but inert until required Secrets are populated on the default branch."
 - **Line 58** (dashboard description): remove "Altair" — the dashboard uses Plotly only.
+
+### 1f. Dependency lockfile with hashes (supply chain)
+
+`requirements.txt` is all `>=` floors — CI and every fresh install resolve to whatever is newest on PyPI at
+run time. For a secrets-bearing daily job (Plaid + `DATABASE_URL` in env) that is a supply-chain exposure:
+a hijacked release of any dependency executes with the credentials. Decision (2026-07-07): **lockfile with
+hashes** (chosen over bare `==` pins — hashes also defeat a re-uploaded/compromised artifact of the same
+version).
+
+- Keep `requirements.txt` as the loose *direct-deps* file (human-edited, unchanged role).
+- Add `pip-tools` as a dev-only tool (not in `requirements.txt`) and generate the lock:
+  ```bash
+  pip install pip-tools
+  pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+  ```
+- Commit `requirements.lock`. Local + CI installs become:
+  ```bash
+  pip install --require-hashes -r requirements.lock
+  ```
+- Upgrade flow (document in CONTRIBUTING.md, Phase 4f): edit `requirements.txt` → re-run `pip-compile
+  --generate-hashes` → commit both files.
+- `pyproject.toml` (1c) still reads `requirements.txt` for its dynamic deps — no change needed there; the
+  lock is an install-time artifact only.
 
 ---
 
@@ -252,7 +293,7 @@ services:
       POSTGRES_PASSWORD: finance
       POSTGRES_DB: finance
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -265,7 +306,164 @@ volumes:
   pgdata:
 ```
 
-No init SQL mount needed — `ensure_schema()` runs the migration DDL at runtime.
+No init SQL mount needed — `ensure_schema()` runs the migration DDL at runtime. Host port is 5433 (see the
+5b note above) — inside the docker network/other containers it's still plain 5432.
+
+**Security amendment (2.5f):** bind the published port to loopback so the demo Postgres (trivial
+`finance/finance` creds) is never reachable from the network:
+```yaml
+    ports:
+      - "127.0.0.1:5433:5432"  # loopback only — finance/finance is demo-grade, never front real data
+```
+
+---
+
+## Phase 2.5 — Security hardening (code) — PUBLISH BLOCKER
+
+Findings from the 2026-07-07 security review of the live code. What is already sound and needs **no** work:
+SQL is fully parameterized everywhere (`database/db.py` uses `%s`; dashboard filters are pandas-side — zero
+injection surface); OAuth uses PKCE S256 + random `state` popped once; the email allowlist fails closed
+(empty `GOOGLE_ALLOWED_EMAILS` → nobody signs in); data reads sit behind the auth gate; 4h session expiry;
+no secrets in git history (verified via `git ls-files` + `git log --all`); Plaid tokens logged only by
+6-char suffix; no `unsafe_allow_html`; no `st.cache_data` on financial data. Mobile sign-in needs no code
+change — only the HTTPS redirect URI (Phase 0).
+
+Implement after Phase 2 (the config/runner refactor must land first), before Phase 3.
+
+### 2.5a. Enforce TLS on remote DB connections
+
+`database/db.py:31,40` and `app/dashboard.py:180` pass the DSN through untouched — production
+Supabase/Neon traffic is unencrypted unless the operator remembers `?sslmode=require`. Enforce it in code.
+
+**File: `core/config.py`** — add a helper and apply it inside `load_settings()` so `DatabaseClient` and the
+dashboard get it for free (no other file changes):
+
+```python
+from urllib.parse import parse_qs, urlsplit
+
+_LOCAL_DB_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def enforce_tls(database_url: str) -> str:
+    """Append sslmode=require to remote DSNs that don't already specify an sslmode."""
+    parts = urlsplit(database_url)
+    host = (parts.hostname or "").lower()
+    if host in _LOCAL_DB_HOSTS:
+        return database_url
+    if "sslmode" in parse_qs(parts.query):
+        return database_url
+    separator = "&" if parts.query else "?"
+    return f"{database_url}{separator}sslmode=require"
+```
+
+In `load_settings()`: `database_url=enforce_tls(database_url)`. Localhost (docker demo) is exempt; an
+explicit `sslmode` in the URL always wins (e.g. `sslmode=verify-full` is preserved, never downgraded).
+
+### 2.5b. Require a verified email in the OAuth allowlist check
+
+`core/google_oauth.py:78-101` authorizes purely on `email in allowed_emails` — the `email_verified` claim
+is never read, so an unverified address could match the allowlist.
+
+**File: `core/google_oauth.py`:**
+- Add `email_verified: bool` to `GoogleIdentity`.
+- In `fetch_userinfo`: `email_verified=payload.get("email_verified") in (True, "true")` (Google returns a
+  bool in JSON but be tolerant of the string form).
+- In `is_authorized_identity`: require `identity.email_verified` in addition to the allowlist match:
+  ```python
+  if not identity.email or not identity.email_verified:
+      return False
+  return identity.email in allowed_emails
+  ```
+
+### 2.5c. Stop requesting an unused Google refresh token
+
+`build_authorization_url` (`core/google_oauth.py:44`) sends `access_type: "offline"`, so Google issues a
+long-lived **refresh token** the app never uses — it sits in the discarded `token_response` after the one
+userinfo call. Least-privilege: delete the `"access_type": "offline"` entry from the query dict. No other
+change; the short-lived access token is all the flow needs.
+
+### 2.5d. Harden the OAuth pending-state store
+
+`app/auth.py:17` — `_google_oauth_pending_sessions: dict[str, str]` is module-global with no TTL or size
+cap, and `render_sign_in` adds an entry on **every anonymous page view** (`start_google_sign_in` is called
+unconditionally at `app/auth.py:133`), so any bot hitting the public URL grows it without bound, and stale
+states stay valid forever. Note: the dict (not `st.session_state`) is the correct home — Streamlit session
+state does **not** survive the OAuth redirect. Keep the design; bound it:
+
+```python
+_PENDING_TTL_SECONDS = 600
+_PENDING_MAX_ENTRIES = 32
+_google_oauth_pending_sessions: dict[str, tuple[str, float]] = {}  # state -> (verifier, created_at)
+
+
+def _prune_pending_sessions(now: float) -> None:
+    expired = [
+        state
+        for state, (_, created_at) in _google_oauth_pending_sessions.items()
+        if now - created_at > _PENDING_TTL_SECONDS
+    ]
+    for state in expired:
+        del _google_oauth_pending_sessions[state]
+    while len(_google_oauth_pending_sessions) >= _PENDING_MAX_ENTRIES:
+        oldest = min(_google_oauth_pending_sessions, key=lambda s: _google_oauth_pending_sessions[s][1])
+        del _google_oauth_pending_sessions[oldest]
+```
+
+- `start_google_sign_in`: call `_prune_pending_sessions(time.time())`, then store
+  `(code_verifier, time.time())`.
+- `consume_google_callback`: unpack the tuple; reject (same "session expired" path) if the entry is older
+  than `_PENDING_TTL_SECONDS`. Entries stay one-time-use via the existing `pop`.
+
+### 2.5e. Error + information-disclosure hygiene
+
+Internal details currently leak to the browser and to CI logs:
+
+- **`app/streamlit_app.py:30-31`** — `st.error(f"Failed to load dashboard data: {error}")` renders raw
+  psycopg errors (DSN host/port/user) into the browser. Replace with a generic
+  `st.error("Failed to load dashboard data — check the server logs.")` + `LOGGER.exception(...)`
+  server-side (add a module logger).
+- **`app/auth.py:90`** — `st.error(f"Google sign-in failed: {error}")` → generic
+  `st.error("Google sign-in failed. Please try again.")` + log the detail server-side.
+- **`app/auth.py:141-143`** — the Supabase URL caption renders **before** the auth gate
+  (`render_sidebar` runs at `streamlit_app.py:23`, sign-in at :25). Move the caption inside the
+  `if st.session_state.get("authenticated_user"):` block (or drop it).
+- **`pipeline/runner.py:70-74`** — `LOGGER.exception("Pipeline failed")` + bare `raise` dumps the full
+  traceback (psycopg `OperationalError` embeds the DSN) into GitHub Actions logs. Replace `main()`'s
+  handler:
+  ```python
+  try:
+      run_pipeline()
+  except psycopg.OperationalError as error:
+      LOGGER.error("Pipeline failed: database connection error (%s)", type(error).__name__)
+      raise SystemExit(1)
+  except Exception:
+      LOGGER.exception("Pipeline failed")
+      raise
+  ```
+  (`SystemExit` keeps the job red without re-printing a DSN-bearing traceback; import `psycopg` in
+  `runner.py`.)
+
+### 2.5f. docker-compose loopback binding
+
+Folded into 2c above: publish `"127.0.0.1:5433:5432"` with the demo-only comment.
+
+### 2.5g. Mask the Plaid token in script output
+
+`scripts/create_sandbox_access_token.py:115-118` prints the full access token to stdout (terminal history,
+scrollback, screen shares). Change `main()`:
+- Default output: `print(f"Created access_token: ...{access_token[-6:]}")` (suffix only).
+- `--append` writes the full token to `.env` exactly as today (that file is the intended home, gitignored).
+- Add an explicit `--print-token` flag for the manual-copy case (no `--append`); without it, instruct the
+  user to re-run with `--append`.
+- Print a reminder that `.env` now holds a live credential — if it is ever exposed, rotate via Phase 0.
+
+### 2.5h. Encryption-at-rest posture (decision, no code)
+
+Data at rest is protected by the managed provider's disk encryption (Supabase and Neon both encrypt at
+rest); data in transit by enforced TLS (2.5a). **Application-level column encryption was considered and
+deliberately rejected**: it breaks SQL-side aggregation the dashboard depends on, adds key management, and
+buys nothing against the realistic threat model (a leaked DSN — which credential rotation covers).
+Document this in the README Security section (Phase 4a) so the posture is explicit, not accidental.
 
 ---
 
@@ -1030,6 +1228,15 @@ Plaid setup (sandbox + production) → docs/setup-plaid.md; database options →
 ✅ Dashboard: 4 tabs, bilingual EN/FR, budgets, inline category editing
 🔄 ML: classifier and outlier detector exist; pipeline uses placeholders (Phase 7)
 
+## Security
+- Auth: Google OAuth (PKCE S256) + verified-email allowlist, fails closed; 4-hour sessions
+- Transport: TLS enforced in code on all remote DB connections (sslmode=require auto-appended)
+- At rest: managed-Postgres disk encryption (Supabase/Neon); app-level column crypto deliberately
+  not used — see design decisions
+- Secrets: env vars / GitHub Secrets only, nothing committed; hash-locked dependencies
+  (--require-hashes); SHA-pinned CI actions
+- Public/mobile deployments: HTTPS redirect URI required; DB errors never rendered to the browser
+
 ## Contributing / License
 ```
 
@@ -1039,7 +1246,9 @@ Steps:
 1. GCP console → create project.
 2. APIs & Services → OAuth consent screen → External → add your email as a test user.
 3. Credentials → Create OAuth client ID → Web application.
-4. Authorized redirect URIs: exactly `http://localhost:8501/` (must match `GOOGLE_OAUTH_REDIRECT_URI`).
+4. Authorized redirect URIs: exactly `http://localhost:8501/` for local dev (must match
+   `GOOGLE_OAUTH_REDIRECT_URI`); for a public deployment add the **HTTPS** dashboard URL as a second
+   redirect URI and point the env var at it (required for mobile sign-in).
 5. Copy Client ID + Secret into `.env`.
 6. Set `GOOGLE_ALLOWED_EMAILS`.
 
@@ -1098,16 +1307,20 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@<full-commit-SHA>  # vX.Y.Z — resolve latest release SHA at implementation time
+      - uses: actions/setup-python@<full-commit-SHA>  # vX.Y.Z — resolve latest release SHA at implementation time
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install --require-hashes -r requirements.lock
       - run: python -m unittest discover -s tests -v
 ```
 
 No DB, network, or secrets needed — all tests are pure (mock everything).
+
+Security notes (2026-07-07 review): actions are pinned to **full commit SHAs** (with the tag in a trailing
+comment), not mutable tags — a compromised `v4` tag would otherwise execute in workflows, including the
+secrets-bearing daily job. Installs use the hash-locked `requirements.lock` (Phase 1f).
 
 ### 5b. Modify `.github/workflows/daily-finance-pipeline.yml`
 
@@ -1122,6 +1335,17 @@ No DB, network, or secrets needed — all tests are pure (mock everything).
    PLAID_ACCESS_TOKEN_OWNERS: ${{ secrets.PLAID_ACCESS_TOKEN_OWNERS }}
    ```
 4. Remove `CSV_PATHS`, `INGESTION_SOURCE`, and `LABELED_DATASET_PATH` from env (`CSV_PATHS`/`INGESTION_SOURCE` no longer exist as config keys after Phase 2a; ML not wired).
+5. Security hardening (2026-07-07 review):
+   - Pin `actions/checkout` and `actions/setup-python` to full commit SHAs (same as 5a).
+   - Install via `pip install --require-hashes -r requirements.lock` (Phase 1f).
+   - Add to the job: `timeout-minutes: 15` — a hung Plaid call would otherwise hold Plaid + DB secrets in a
+     live runner for GitHub's 6-hour default.
+   - Add a concurrency guard so a manual `workflow_dispatch` can't race the cron run's upserts:
+     ```yaml
+     concurrency:
+       group: daily-pipeline
+       cancel-in-progress: false
+     ```
 
 ---
 
@@ -1170,6 +1394,11 @@ Use `@patch("core.config.load_dotenv")` + `@patch.dict(os.environ, {...}, clear=
 - `test_google_allowed_emails_split` — `GOOGLE_ALLOWED_EMAILS=a@b.com,c@d.com` → list of two.
 - `test_plaid_access_token_owners_split` — comma-separated → list.
 - `test_plaid_access_tokens_split` — `PLAID_ACCESS_TOKENS=t1,t2` → `["t1", "t2"]`.
+- `test_enforce_tls_appends_sslmode_for_remote_host` — `postgresql://u:p@db.example.com/x` → ends with `?sslmode=require`.
+- `test_enforce_tls_skips_localhost` — `postgresql://u:p@localhost:5433/x` and `...@127.0.0.1/x` → unchanged.
+- `test_enforce_tls_preserves_existing_sslmode` — `...?sslmode=verify-full` → unchanged (never downgraded).
+- `test_enforce_tls_appends_with_ampersand` — remote DSN with an existing query param → `&sslmode=require`.
+- `test_load_settings_applies_enforce_tls` — remote `DATABASE_URL` env → `settings.database_url` contains `sslmode=require`.
 
 ### 6d. `tests/test_outlier_detector.py`
 
@@ -1215,6 +1444,18 @@ Pure — patch `DatabaseClient` where the seed script imports it (e.g. `@patch("
 - `test_generate_deterministic` — two calls with the same `days` → identical frames (`assert_frame_equal`).
 - `test_main_calls_db_in_order` — mocked client: `ensure_schema`, `upsert_plaid_accounts`, `upsert_categories`, `upsert_transactions` all called.
 
+### 6g. Auth security tests (extend `tests/test_app_auth.py`)
+
+Cover the Phase 2.5b/2.5d hardening. Mock `requests` at `core.google_oauth.requests`; drive
+`app.auth` with a fake `st.session_state` / `st.query_params` as the existing tests do.
+
+- `test_unverified_email_rejected` — userinfo payload with `email_verified: false` and an allowlisted email → `is_authorized_identity` returns `False`.
+- `test_verified_email_on_allowlist_accepted` — `email_verified: true` + allowlisted email → `True`.
+- `test_missing_email_verified_claim_rejected` — payload without the claim → `False` (fails closed).
+- `test_pending_state_expires_after_ttl` — insert a pending entry with `created_at` 601s in the past; callback with its state → rejected via the "session expired" path.
+- `test_pending_state_capped` — insert 32 entries; `start_google_sign_in` → oldest evicted, size ≤ 32.
+- `test_auth_url_has_no_offline_access` — `build_authorization_url(...)` output does not contain `access_type=offline` (2.5c).
+
 ---
 
 ## Phase 7 — DEFERRED: ML activation
@@ -1244,6 +1485,11 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 9. Seed data must use Plaid sign convention (positive = outflow) or cash flow inverts.
 10. `load_settings()` must never hard-require Plaid credentials — that would break the seed demo and dashboard-only deployments. Plaid validation lives only in `pipeline/runner.py::_build_ingestor`.
 11. Cron goes live only after merge to `main` + GitHub Secrets — Phase 0 owner action, not code.
+12. Phase 2.5 (security hardening) lands **after** Phase 2 (it edits the refactored `config.py`/`runner.py`)
+    and **before** the `dev → main` publish merge — it is a publish blocker, together with Phase 5 and 1f.
+13. 2.5a (`enforce_tls`) must land before any production `DATABASE_URL` is pointed at Supabase/Neon.
+14. The pending-state dict stays module-level (2.5d) — do NOT move it into `st.session_state`; session
+    state does not survive the OAuth redirect and the flow would break on every sign-in.
 
 ---
 
@@ -1259,3 +1505,10 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 8. Push branch → CI runs green on 3.11 + 3.12.
 9. `git grep -iE "csv_paths|ingestion_source|csv_ingestor"` → no matches outside PLAN.md (CSV fully removed).
 10. `git grep -E "jacos|jacosse|lapointe|gmail\.com|C:\\\\Users"` → no matches.
+11. TLS enforcement: `python -c "from core.config import enforce_tls; print(enforce_tls('postgresql://u:p@db.example.com/x'))"` → ends with `sslmode=require`; same call with `localhost` → unchanged.
+12. Sign in with a Google account **not** on `GOOGLE_ALLOWED_EMAILS` → rejected with the generic "not allowed" message.
+13. Stop the database, load the dashboard → browser shows the generic "check the server logs" error; no host/user/DSN fragment anywhere in the page.
+14. `pip install --require-hashes -r requirements.lock` succeeds in a fresh venv; `pip install -r requirements.txt` still works for loose installs.
+15. From a mobile browser, sign in via the HTTPS redirect URI with both allowlisted accounts → dashboard renders.
+16. `docker compose up -d` → `docker port <postgres-container>` shows `127.0.0.1:5433` (loopback only), and the seed + dashboard flow still works locally.
+17. Both workflow files: every `uses:` is a full 40-char commit SHA; the daily job has `timeout-minutes` and a `concurrency` group.
