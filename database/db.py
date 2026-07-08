@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import pathlib
 from collections.abc import Iterable
 from typing import Any
 
@@ -34,12 +35,12 @@ class DatabaseClient:
             connection.commit()
 
     def ensure_schema(self) -> None:
-        migration_path = "database/migrations/001_core_tables.sql"
-        with open(migration_path, "r", encoding="utf-8") as migration:
-            sql = migration.read()
+        migrations_dir = pathlib.Path("database/migrations")
+        sql_files = sorted(migrations_dir.glob("*.sql"))
         with psycopg.connect(self.database_url) as connection:
             with connection.cursor() as cursor:
-                cursor.execute(sql)
+                for sql_file in sql_files:
+                    cursor.execute(sql_file.read_text(encoding="utf-8"))
             connection.commit()
 
     def upsert_plaid_accounts(self, accounts: list[dict[str, Any]]) -> None:
@@ -81,6 +82,51 @@ class DatabaseClient:
         ]
         if rows:
             self._execute_many(sql, rows)
+
+    def get_categories(self) -> list[str]:
+        """Return all category names from the categories table, sorted."""
+        sql = "SELECT name FROM categories ORDER BY name"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [r[0] for r in rows]
+
+    def get_budgets(self) -> list[dict]:
+        """Return all budget rows as a list of dicts: {category, monthly_limit}."""
+        sql = "SELECT category, monthly_limit::double precision FROM budgets ORDER BY category"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [{"category": r[0], "monthly_limit": r[1]} for r in rows]
+
+    def upsert_budget(self, category: str, monthly_limit: float) -> None:
+        """Insert or update a budget row."""
+        sql = """
+        INSERT INTO budgets (category, monthly_limit)
+        VALUES (%s, %s)
+        ON CONFLICT (category) DO UPDATE
+        SET monthly_limit = EXCLUDED.monthly_limit,
+            updated_at    = NOW()
+        """
+        self._execute_many(sql, [(category, monthly_limit)])
+
+    def update_transaction_category(self, transaction_hash: str, category: str) -> None:
+        """Set user_category for a transaction (survives pipeline re-runs).
+        Also inserts the category into the categories table so it appears in future dropdowns.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING",
+                    (category,)
+                )
+                cur.execute(
+                    "UPDATE transactions SET user_category = %s, updated_at = NOW() WHERE transaction_hash = %s",
+                    (category, transaction_hash)
+                )
+            conn.commit()
 
     def upsert_categories(self, categories: Iterable[str]) -> None:
         sql = """
