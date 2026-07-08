@@ -82,23 +82,6 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
-    def upsert_accounts(self, frame: pd.DataFrame) -> None:
-        sql = """
-        INSERT INTO accounts (account_key, account_name, source)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (account_key) DO UPDATE
-        SET account_name = EXCLUDED.account_name,
-            source = EXCLUDED.source,
-            updated_at = NOW()
-        """
-        rows = []
-        for record in frame[["account_name", "source"]].drop_duplicates().to_dict("records"):
-            account_name = str(record["account_name"])
-            source = str(record["source"])
-            rows.append((f"{source}:{account_name}", account_name, source))
-        if rows:
-            self._execute_many(sql, rows)
-
     def upsert_categories(self, categories: Iterable[str]) -> None:
         sql = """
         INSERT INTO categories (name)

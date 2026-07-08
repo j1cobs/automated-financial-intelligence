@@ -43,7 +43,6 @@ def _split_csv(raw_value: str | None) -> list[str]:
 
 @dataclass(frozen=True)
 class Settings:
-    ingestion_source: str
     supabase_url: str | None
     google_oauth_client_id: str | None
     google_oauth_client_secret: str | None
@@ -54,7 +53,6 @@ class Settings:
     plaid_access_tokens: list[str]
     plaid_access_token_owners: list[str]
     plaid_base_url: str
-    csv_paths: list[str]
     database_url: str
     model_path: str
     labeled_dataset_path: str
@@ -62,11 +60,6 @@ class Settings:
 
 def load_settings() -> Settings:
     secrets = _load_secrets_file()
-    ingestion_source = (
-        _read_value("INGESTION_SOURCE", secrets, "csv") or "csv"
-    ).lower()
-    if ingestion_source not in {"csv", "plaid"}:
-        raise ConfigError("INGESTION_SOURCE must be either 'csv' or 'plaid'")
 
     database_url = _read_value("DATABASE_URL", secrets)
     if not database_url:
@@ -85,50 +78,22 @@ def load_settings() -> Settings:
         )
     ]
 
-    plaid_client_id: str | None = None
-    plaid_secret: str | None = None
-    plaid_access_tokens: list[str] = []
-    plaid_access_token_owners: list[str] = []
-    if ingestion_source == "plaid":
-        plaid_client_id = _read_value("PLAID_CLIENT_ID", secrets)
-        plaid_secret = _read_value("PLAID_SECRET", secrets)
-        plaid_access_tokens = _split_csv(
-            _read_value("PLAID_ACCESS_TOKENS", secrets, "")
-        )
-        plaid_access_token_owners = _split_csv(
-            _read_value("PLAID_ACCESS_TOKEN_OWNERS", secrets, "")
-        )
-        if not plaid_client_id or not plaid_secret:
-            raise ConfigError(
-                "PLAID_CLIENT_ID and PLAID_SECRET are required when INGESTION_SOURCE=plaid"
-            )
-        if not plaid_access_tokens:
-            raise ConfigError(
-                "PLAID_ACCESS_TOKENS is required when INGESTION_SOURCE=plaid"
-            )
-
-    csv_paths: list[str] = []
-    if ingestion_source == "csv":
-        csv_paths = _split_csv(_read_value("CSV_PATHS", secrets, ""))
-        if not csv_paths:
-            raise ConfigError("CSV_PATHS is required when INGESTION_SOURCE=csv")
-
     return Settings(
-        ingestion_source=ingestion_source,
         supabase_url=_read_value("SUPABASE_URL", secrets),
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         google_oauth_redirect_uri=google_oauth_redirect_uri,
         google_allowed_emails=google_allowed_emails,
-        plaid_client_id=plaid_client_id,
-        plaid_secret=plaid_secret,
-        plaid_access_tokens=plaid_access_tokens,
-        plaid_access_token_owners=plaid_access_token_owners,
+        plaid_client_id=_read_value("PLAID_CLIENT_ID", secrets),
+        plaid_secret=_read_value("PLAID_SECRET", secrets),
+        plaid_access_tokens=_split_csv(_read_value("PLAID_ACCESS_TOKENS", secrets, "")),
+        plaid_access_token_owners=_split_csv(
+            _read_value("PLAID_ACCESS_TOKEN_OWNERS", secrets, "")
+        ),
         plaid_base_url=_read_value(
             "PLAID_BASE_URL", secrets, "https://sandbox.plaid.com"
         )
         or "https://sandbox.plaid.com",
-        csv_paths=csv_paths,
         database_url=database_url,
         model_path=_read_value("MODEL_PATH", secrets, "artifacts/classifier.joblib")
         or "artifacts/classifier.joblib",
