@@ -1282,6 +1282,62 @@ already existing, and must land before 3n (tab layout) renders the final `render
 touch the Budget tab (3k) — budgets stay monthly-only by design, since a weekly budget limit isn't a
 meaningful personal-finance convention.
 
+### 3p. Recurring-transaction tagging — user-taggable `is_recurring` column
+
+**PLANNING ONLY — do not implement.** Captures the shape of the feature so a later phase can build it
+without re-deriving the design. No code, migration, or UI change lands as part of writing this section.
+
+**Goal**: let the user manually flag a transaction as recurring (rent, subscriptions, payroll — anything
+that repeats month to month), the same way `user_category` (3b/3c) lets them manually override a category.
+This is a **user-tagged boolean**, not an ML-detected one — no pattern-matching or auto-detection is in
+scope here, only the column and the tagging UI.
+
+**Migration** (new file, e.g. `database/migrations/004_recurring_transactions.sql`, added after the 3c/3o
+migrations land, following the same idempotent style):
+
+```sql
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE;
+```
+
+Defaults to `FALSE` so existing rows are unaffected; the pipeline never writes this column (mirrors the
+`user_category` split in 3b — ML/pipeline re-runs must never clobber a manual recurring flag).
+
+**DB method** (`database/db.py`, alongside `update_transaction_category`):
+
+```python
+def update_transaction_recurring(self, transaction_hash: str, is_recurring: bool) -> None:
+    """Set is_recurring for a transaction (survives pipeline re-runs)."""
+    sql = "UPDATE transactions SET is_recurring = %s, updated_at = NOW() WHERE transaction_hash = %s"
+    self._execute_many(sql, [(is_recurring, transaction_hash)])
+```
+
+**SELECT query** (3e's `tx_query`): add `t.is_recurring` to the selected columns so it flows into `tx_df`
+alongside `transaction_hash` and the coalesced `category`.
+
+**Ledger UI** (`_section_ledger`, 3l): add a checkbox column next to the existing category dropdown, using
+the same "only act on rows actually edited this cycle" pattern already used for category edits:
+
+```python
+T["col_recurring"]: st.column_config.CheckboxColumn(T["col_recurring"]),
+```
+
+then in the `edited_rows` loop, handle `T["col_recurring"]` the same way `T["col_cat"]` is handled today,
+calling `db.update_transaction_recurring(transaction_hash, bool(new_value))`.
+
+**New `_STRINGS` keys** (both "en" and "fr"):
+
+```python
+"col_recurring": "Recurring",
+```
+```python
+"col_recurring": "Récurrent",
+```
+
+**Explicitly out of scope for this column** (future phases, not this one): no automatic recurrence
+detection, no "recurring transactions" summary view, and no interaction with the weekly/monthly metrics in
+3o — `is_recurring` is a taggable attribute only; consuming it in a chart or metric is a separate, later
+decision.
+
 ---
 
 ## Phase 4 — Docs
@@ -1601,6 +1657,9 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
     state does not survive the OAuth redirect and the flow would break on every sign-in.
 15. Phase 3o (weekly metrics) lands after 3g/3i/3j and before 3n — it adds to the Overview and Cash-flow
     sections those tabs already assemble; it does not touch Budget (3k), which stays monthly-only.
+16. Phase 3p (`is_recurring` tagging) is planning-only for now — not implemented alongside 3o. If picked up
+    later, its migration lands after 3c/3o's migrations, and its ledger checkbox reuses the 3l edited-rows
+    pattern; it must not be conflated with ML-based recurrence detection, which is out of scope.
 
 ---
 
