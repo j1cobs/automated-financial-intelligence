@@ -1173,6 +1173,115 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
         _section_ledger(enriched, T, database_url)
 ```
 
+### 3o. Weekly metrics — add weekly averages alongside monthly (do not replace monthly)
+
+**Problem**: every aggregate added in Phase 3 (savings-rate trend, month-over-month comparison, monthly
+net-by-holder, monthly category distribution) buckets by calendar month only. There is no weekly view, so a
+user checking mid-month has no sense of *this week's* pace vs the monthly figure. Requirement: add weekly
+average metrics **next to** the existing monthly ones — do not fold everything into monthly, and do not
+remove any monthly metric.
+
+Implement after 3i/3j (needs `_enrich_transactions` and the Overview/Cash-flow sections to exist) and before
+3n (the tab layout must render the new panel).
+
+#### `_enrich_transactions` — add a `week` column
+
+In `app/dashboard.py`, alongside the existing `df["month"] = df["date"].dt.to_period("M").astype(str)` line,
+add an ISO-week key (Monday-start, matches `pandas` default week semantics):
+
+```python
+df["week"] = df["date"].dt.to_period("W-SUN").astype(str)  # e.g. "2026-07-06/2026-07-12"
+```
+
+Use `to_period("W-SUN")` (week ending Sunday) rather than raw ISO week numbers so each bucket carries its
+own date range in the label — avoids the year-boundary ambiguity of bare ISO week numbers (e.g. "week 1"
+meaning different things across December/January).
+
+#### New `_STRINGS` keys (both "en" and "fr")
+
+```python
+"metric_avg_weekly_spend":   "Avg. weekly spend",
+"metric_avg_monthly_spend":  "Avg. monthly spend",
+"metric_avg_weekly_income":  "Avg. weekly income",
+"metric_avg_monthly_income": "Avg. monthly income",
+"chart_weekly_trend":        "Income vs. expenses by week",
+"axis_week":                 "Week",
+```
+
+```python
+"metric_avg_weekly_spend":   "Dépense moy. hebdo",
+"metric_avg_monthly_spend":  "Dépense moy. mensuelle",
+"metric_avg_weekly_income":  "Revenu moy. hebdo",
+"metric_avg_monthly_income": "Revenu moy. mensuel",
+"chart_weekly_trend":        "Revenus vs. dépenses par semaine",
+"axis_week":                 "Semaine",
+```
+
+#### Overview tab (`_section_overview`) — weekly + monthly average row
+
+Add a new metrics row directly under the existing Row 1 KPIs (3i), computed from the same `real` frame
+(transfers excluded) already built there:
+
+```python
+weekly_totals = (
+    real.groupby(["week", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
+)
+monthly_totals = (
+    real.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
+)
+
+avg_weekly_expense = weekly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
+avg_monthly_expense = monthly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
+avg_weekly_income = weekly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+avg_monthly_income = monthly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+
+w1, w2, w3, w4 = st.columns(4)
+w1.metric(T["metric_avg_weekly_spend"], f"${avg_weekly_expense:,.2f}")
+w2.metric(T["metric_avg_monthly_spend"], f"${avg_monthly_expense:,.2f}")
+w3.metric(T["metric_avg_weekly_income"], f"${avg_weekly_income:,.2f}")
+w4.metric(T["metric_avg_monthly_income"], f"${avg_monthly_income:,.2f}")
+```
+
+`.groupby(...).unstack(fill_value=0)` means a week/month with zero expense (or zero income) rows still
+contributes a `0` to the average, rather than being silently dropped — averages stay honest about sparse
+periods instead of only averaging over active ones.
+
+#### Cash-flow tab (`_section_cash_flow`) — weekly trend chart
+
+Add a weekly counterpart to the existing monthly `chart_mom_bar` (3j.2), placed directly below it so weekly
+and monthly sit side by side in the same tab rather than replacing one another:
+
+```python
+week_summary = (
+    df[df["tx_type"] != "transfer"]
+    .groupby(["week", "tx_type"], as_index=False)["adjusted_amount"].sum()
+)
+week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = (
+    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"].abs()
+)
+fig_week = px.bar(week_summary, x="week", y="adjusted_amount", color="tx_type",
+                   barmode="group", title=T["chart_weekly_trend"], template="plotly_white",
+                   labels={"adjusted_amount": T["axis_amount"], "week": T["axis_week"]})
+st.plotly_chart(fig_week, use_container_width=True)
+```
+
+Chart reads left-to-right oldest-to-newest by default since `week` sorts lexicographically the same as
+chronologically (the `to_period("W-SUN")` string starts with the ISO date).
+
+#### Tests (extend `tests/test_dashboard_helpers.py`, 6e)
+
+- `test_enrich_transactions_adds_week_column` — one row per week over 3 weeks → 3 distinct `week` values,
+  each formatted as a `to_period("W-SUN")` string.
+- `test_weekly_average_zero_fills_inactive_weeks` — 3 weeks of data, one with no expense rows → average
+  expense divides by 3 (all weeks), not 2 (active weeks only).
+
+#### Ordering note (add to "Ordering constraints / risks")
+
+Phase 3o depends on `_enrich_transactions` (3g) and `_section_overview`/`_section_cash_flow` (3i/3j)
+already existing, and must land before 3n (tab layout) renders the final `render_dashboard`. It does not
+touch the Budget tab (3k) — budgets stay monthly-only by design, since a weekly budget limit isn't a
+meaningful personal-finance convention.
+
 ---
 
 ## Phase 4 — Docs
@@ -1490,6 +1599,8 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 13. 2.5a (`enforce_tls`) must land before any production `DATABASE_URL` is pointed at Supabase/Neon.
 14. The pending-state dict stays module-level (2.5d) — do NOT move it into `st.session_state`; session
     state does not survive the OAuth redirect and the flow would break on every sign-in.
+15. Phase 3o (weekly metrics) lands after 3g/3i/3j and before 3n — it adds to the Overview and Cash-flow
+    sections those tabs already assemble; it does not touch Budget (3k), which stays monthly-only.
 
 ---
 
