@@ -31,7 +31,7 @@ def main() -> None:
         st.error(f"Failed to load dashboard data: {error}")
         return
 
-    render_dashboard(tx_data, acct_data)
+    render_dashboard(tx_data, acct_data, settings.database_url)
 
 
 if __name__ == "__main__":
