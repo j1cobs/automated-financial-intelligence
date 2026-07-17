@@ -1173,6 +1173,94 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
         _section_ledger(enriched, T, database_url)
 ```
 
+### 3o. Default period filter — quick-range selector + all-time Overview
+
+**Problem** (found post-implementation, 2026-07-10): `_build_sidebar_filters` (`app/dashboard.py:415-489`)
+defaults its month multiselect to **every month in the data** — a fresh login shows full history with no
+scoping, and there's no quick way to land on "what happened recently" without manually narrowing the
+multiselect. Desired: sidebar defaults to a recent window (last 30 days) for the day-to-day tabs, while
+Overview keeps a full-history feel — but only where "full history" is actually meaningful.
+
+**Decisions** (resolved via discussion):
+- Trend-shaped charts (net worth, savings-rate trend, emergency fund) ignore the period filter entirely and
+  always show full history — that's their reason to exist.
+- Comparison-shaped charts (top-10 category bar, month-over-month) use a bounded recent window (last 12
+  months), not true all-time — otherwise they dilute/go stale as history accumulates over years.
+- Non-date filters (owner/category/account) still apply everywhere, including the all-time charts — only
+  the *date* restriction is bypassed for them.
+- Presets anchor to `df["date"].max()`, not `date.today()` — sample/demo data won't be "current", so the
+  quick-range must be relative to the latest transaction actually in the data.
+
+**1. Replace the month multiselect with a quick-range selectbox** in `_build_sidebar_filters`:
+```python
+_PERIOD_PRESETS = ["last_30_days", "current_month", "last_3_months", "last_6_months", "ytd", "all_time", "custom"]
+
+selected_preset = st.sidebar.selectbox(
+    T["period_range"],
+    options=_PERIOD_PRESETS,
+    format_func=lambda key: T[f"period_{key}"],
+    index=0,  # "last_30_days"
+)
+```
+- `custom` reveals the existing month multiselect (unchanged) for power users who want to hand-pick specific
+  months.
+- Each non-custom preset computes a `(start_date, end_date)` window anchored to `df["date"].max()` and
+  derives the matching `_month_key` set from it, reusing the existing month-key machinery so downstream code
+  doesn't change shape.
+- Add `_STRINGS` keys (both "en"/"fr"): `period_range`, `period_last_30_days`, `period_current_month`,
+  `period_last_3_months`, `period_last_6_months`, `period_ytd`, `period_all_time`, `period_custom`.
+
+**2. Split the combined mask into date vs. non-date components.** Currently one `mask` combines everything
+(`:479-488`). Refactor to:
+```python
+non_date_mask = (
+    df["owner_name"].isin(selected_owners)
+    & df["category"].isin(selected_cats)
+    & df["account_name"].isin(selected_accounts)
+    & (df["amount"].abs() >= amt_range[0])
+    & (df["amount"].abs() <= amt_range[1])
+    & desc_mask
+    & outlier_mask
+)
+date_mask = df["_month_key"].isin(selected_month_keys)
+```
+Return `(df[non_date_mask & date_mask], df[non_date_mask], selected_owners)` — the middle value is the new
+all-time-but-otherwise-filtered frame. Update the function's return type and its one call site in
+`render_dashboard`.
+
+**3. Thread the all-time frame into Overview only.** In `render_dashboard`:
+```python
+filtered, all_time_filtered, selected_owners = _build_sidebar_filters(tx, T)
+...
+enriched = _enrich_transactions(filtered)
+enriched_all_time = _enrich_transactions(all_time_filtered)
+...
+with tab_overview:
+    _section_net_worth(acct_df, T, lang, selected_owners)
+    st.divider()
+    _section_overview(enriched, enriched_all_time, acct_df, T, lang, selected_owners)
+```
+`_section_overview` gains an `all_time_df` parameter:
+- Net worth trend, savings-rate trend, emergency-fund indicator → use `all_time_df`.
+- Top-10 category bar chart, month-over-month comparison → use `all_time_df` filtered to the trailing 12
+  months from `all_time_df["date"].max()`, not the sidebar-selected window.
+- The 5 headline KPI metrics (row 1) keep using `df` (the date-scoped frame), so the top of the tab still
+  reacts to the quick-range selector.
+
+**4. No special-casing needed for short histories.** If the loaded data spans less than 30 days (fresh demo
+data), "Last 30 days" naturally includes everything — it's a date-range filter, not a row-count filter. The
+existing "no transactions in filtered set" empty state (`:964-966`) still covers a preset that produces zero
+rows (e.g. `Current month` on stale demo data).
+
+**Verification:**
+1. Fresh login on sample/demo data → sidebar defaults to "Last 30 days"; Cash flow/Budget/Transactions tabs
+   show only that window; Overview's net worth/savings-rate/emergency-fund charts still show full history.
+2. Switch to "All time" → the three scoped tabs match Overview's range (sanity-checks the date-mask boundary).
+3. Switch to "Custom" → month multiselect reappears and behaves exactly as before this change.
+4. Select "Current month" against demo data with no transactions in the current month → empty state, no crash.
+5. Apply an owner/account filter → confirm it narrows both the date-scoped and all-time frames identically
+   (only the date axis differs between the two).
+
 ---
 
 ## Phase 4 — Docs
@@ -1472,6 +1560,147 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 
 ---
 
+## Phase 8 — Code quality: modularity, comments, conventions (verification gate)
+
+A pass to confirm new code is modular, commented where non-obvious, and conventionally styled — enforced
+by a review checklist **and** automated tooling in CI.
+
+### 8a. Tooling — ruff + black
+
+- Dev-only tools (NOT added to `requirements.txt`; document in `CONTRIBUTING.md`, Phase 4f). Install:
+  `pip install ruff black`.
+- Add config to `pyproject.toml` (extends the 1c rewrite):
+  ```toml
+  [tool.black]
+  line-length = 110
+  target-version = ["py311"]
+
+  [tool.ruff]
+  line-length = 110
+  target-version = "py311"
+  extend-exclude = ["venv_automated_financial_intelligence"]
+
+  [tool.ruff.lint]
+  select = ["E", "F", "I", "UP", "B"]   # pyflakes, pycodestyle, isort, pyupgrade, bugbear
+  ```
+  (Confirm `line-length` against the current code before committing — pick the value that reformats least;
+  110 is a starting proposal, adjust to the repo's actual longest-common width.)
+- Add a **lint job** to `.github/workflows/ci.yml` (Phase 5a), parallel to the test job:
+  ```yaml
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<full-commit-SHA>      # SHA-pinned, per Phase 5 security note
+      - uses: actions/setup-python@<full-commit-SHA>
+        with: { python-version: "3.12" }
+      - run: pip install ruff black                    # dev tools; not hash-locked runtime deps
+      - run: ruff check .
+      - run: black --check .
+  ```
+  Actions stay SHA-pinned (Phase 5). Keep this non-blocking-optional at first if a full reformat is noisy;
+  make it required once the tree is clean.
+
+### 8b. Review checklist (manual gate before `dev → main`)
+
+- **Layer boundaries:** no DB access outside `database/`; no Streamlit outside `app/`; config read only via
+  `core/config.py`. A change in one layer does not reach into another (`CLAUDE.md` convention).
+- **Single responsibility:** new dashboard sections are one `_section_*` function each; DB access is one
+  method each; no multi-purpose helpers.
+- **Docstrings:** every new public function/method has a one-line docstring; non-obvious invariants get a
+  comment — especially the **Plaid sign convention** (positive = outflow) and **why `user_*` columns exist**
+  (pipeline never writes them). Match the existing comment density; don't over-comment obvious code.
+- **Naming:** matches the existing concise style (`_section_budget`, `upsert_budget`, `T[...]` i18n keys).
+- **No personal data / no inline config:** no hardcoded emails, tokens, paths; new tunables go through
+  `Settings` + `.env.example`.
+- **i18n parity:** every new UI string exists in both `en` and `fr` `_STRINGS`.
+
+### 8c. Verification
+- `ruff check .` and `black --check .` pass locally and in CI.
+- `python -m unittest discover -s tests -v` still green (formatting changed nothing behavioral).
+- `git grep -E "jacos|jacosse|gmail\.com|C:\\\\Users"` → no matches (reaffirm the Phase-level rule).
+
+---
+
+## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
+
+> Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
+> notebook the two users can annotate and correct. Every item follows the **"pipeline never writes it"**
+> rule (like `user_category`), so edits survive `upsert_transactions`. Schedule after Phases 1–6 land;
+> several pair naturally with Phase 7 (the confirm/review workflow *produces* labeled training data).
+
+**Shared foundation (one migration + mirrored DB methods).** A single idempotent migration
+`database/migrations/004_interactivity.sql`, picked up automatically by `ensure_schema()` (3d):
+
+```sql
+-- Manual annotations + review flags. Pipeline never writes these columns.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS user_note        TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS category_status  TEXT;    -- NULL | 'confirmed' | 'review'
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS outlier_reviewed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE budgets      ADD COLUMN IF NOT EXISTS note             TEXT;
+```
+
+New `DatabaseClient` methods (mirror `update_transaction_category` in 3b — same single-`UPDATE`,
+`updated_at = NOW()` shape; all parameterized):
+- `update_transaction_note(transaction_hash, note)` — writes `transactions.user_note`.
+- `set_category_status(transaction_hash, status)` — writes `transactions.category_status`.
+- `set_outlier_reviewed(transaction_hash, reviewed)` — writes `transactions.outlier_reviewed`.
+- Extend `upsert_budget(category, monthly_limit, note=None)` to carry the note (keep the signature
+  backward-compatible with 3k).
+- `get_budgets` / the ledger SELECT (3e) must also select the new columns
+  (`COALESCE`-free — they're read as-is): add `user_note`, `category_status`, `outlier_reviewed` to
+  the `tx_query`, and `note` to `get_budgets`.
+
+Dashboard wiring reuses the existing `st.data_editor` + `edited_rows` change-detection (3l) so only
+cells the user actually changed trigger a DB write — no new pattern to invent.
+
+### A1. Budget notes / comments
+- Add an editable **Note** column to the 3k budget editor (`st.column_config.TextColumn`).
+- On save, pass the note through the extended `upsert_budget`.
+- Render each category's note as an `st.caption` under its budget progress bar.
+- *Why useful:* records the intent behind a limit ("summer travel fund", "cut after Q3") so the number
+  isn't context-free next month.
+
+### A2. Transaction notes
+- Add an editable **Note** column to the 3l ledger editor, persisted via `update_transaction_note`.
+- *Why useful:* "reimbursable", "gift for Sam", "one-off" — the context that makes a line item legible
+  weeks later, and the raw material for later exclude/split rules (A5/A9).
+
+### A3. Category confirm / review  (pairs with Phase 7)
+- Add a **Status** `SelectboxColumn` to the ledger: blank / `confirmed` / `review`, via `set_category_status`.
+- Surface a "Needs review" filter/count on the Transactions tab (`category_status = 'review'` or NULL on
+  placeholder-categorized rows).
+- *Why useful now:* a human-in-the-loop correctness signal. *Why useful for Phase 7:* every `confirmed`
+  row (description + effective category) is a **labeled training example** — extend the deferred
+  `seed_sample_data.py --labeled` export path to also dump confirmed real transactions, closing the
+  active-learning loop (classify → user confirms/corrects → retrain).
+
+### A4. Anomaly review / dismiss
+- In `_section_anomalies` (Transactions tab), add a **Reviewed** checkbox column, persisted via
+  `set_outlier_reviewed`; default the anomaly view to hide reviewed rows (with a "show all" toggle).
+- *Why useful:* the 3 seeded outliers (and real ones once ML is on) can be acknowledged so the section
+  reflects *open* items, not a static list.
+
+### Further ideas (lighter — capture, don't spec yet)
+- **A5. Exclude from analytics** — `transactions.excluded BOOLEAN` to drop reimbursements / mis-imports
+  from budgets and cash-flow without deleting the row.
+- **A6. Merchant → category rules** — a small `category_rules(pattern, category)` table applied
+  post-classification; "always map `Tim Hortons` → Dining". High leverage; also feeds Phase 7.
+- **A7. Savings goals** — a `goals` table (name, target, deadline) with an Overview progress tile.
+- **A8. Category management UI** — add / rename / merge categories from the app (extends the existing
+  `categories` table + `get_categories`).
+- **A9. Split transaction** — allocate one transaction across multiple categories (child-rows table).
+- **A10. Recurring / subscription tagging** — flag recurring charges; forecast upcoming bills.
+
+### Cross-cutting for any item above
+- New `_STRINGS` keys in **both** `en` and `fr` (follow the 3h pattern).
+- Tests (Phase 6 style, pure/mocked): extend `test_db_upserts.py` for each new DB method (assert SQL
+  targets the correct `user_*` / flag column, params in order); extend `test_dashboard_helpers.py` if any
+  pure helper is added. No live DB / network.
+- Ordering: land the shared migration + DB methods before wiring any tab; keep the pipeline oblivious to
+  every new column (verify `runner.py` / `upsert_transactions` never reference them).
+
+---
+
 ## Ordering constraints / risks
 
 1. Phase 2a (CSV removal, incl. config/runner refactor) **before** 2b (seed script) — the seed script relies on `load_settings()` succeeding with only `DATABASE_URL` set.
@@ -1512,3 +1741,5 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 15. From a mobile browser, sign in via the HTTPS redirect URI with both allowlisted accounts → dashboard renders.
 16. `docker compose up -d` → `docker port <postgres-container>` shows `127.0.0.1:5433` (loopback only), and the seed + dashboard flow still works locally.
 17. Both workflow files: every `uses:` is a full 40-char commit SHA; the daily job has `timeout-minutes` and a `concurrency` group.
+18. `ruff check . && black --check .` pass on the branch; the CI lint job (Phase 8a) is green.
+19. (When Appendix A items are built) each new user-edit column is pipeline-immune: edit a note/status/reviewed flag, then run `python main.py` (or re-`upsert` the same rows) → the edit is retained.
