@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Phase-1 build: the data path (ingest → process → persist → dashboard) is wired end-to-end first, ahead of
 the full feature set described in the original design brief. What this means concretely:
+
 - ML is stubbed — `pipeline/runner.py` uses `analytics/placeholders.py`, not the real `analytics/classifier.py` /
   `analytics/outlier_detector.py` yet (see Architecture).
-- The dashboard implements core views; some target views (e.g. rolling burn-rate, household combined-vs-individual
-  breakdowns) are not all built out.
+- The dashboard implements all core views. Only ML is stubbed — the pipeline uses placeholders.
 - Scheduled automation is not active yet — the GitHub Actions workflow is defined but does not run automatically (see
   Automation).
 
@@ -24,6 +24,10 @@ When extending, prefer wiring the existing real modules onto the live path over 
   core / pipeline) — a change in one layer should not reach into another. Match the existing concise style.
 - **Ask, don't guess.** When a requirement or design decision is genuinely ambiguous, ask the user rather than making
   an uncertain assumption.
+- **Never access, read, or print the `.env` file.** Do not open it, `cat`/`Get-Content` it, glob/grep into it, echo
+  its contents, or include it in any tool output — even for debugging. It holds live secrets (DB URL, Plaid keys,
+  OAuth secrets). If you need to confirm a variable is set, check `.env.example` for the key name or ask the user to
+  confirm the value themselves; never read the real file to find out.
 
 ## Commands
 
@@ -32,7 +36,8 @@ When extending, prefer wiring the existing real modules onto the live path over 
 - Run dashboard: `streamlit run app/streamlit_app.py`
 - Run all tests: `python -m unittest discover -s tests -v`
 - Run a single test: `python -m unittest tests.test_db_hash -v` (or `tests.test_db_hash.TestClass.test_method`)
-- Plaid sandbox bootstrap: `python scripts/generate_public_token.py sandbox --append`
+- Plaid sandbox bootstrap: `python scripts/create_sandbox_access_token.py --append`
+- Seed demo data (no Plaid credentials needed): `python scripts/seed_sample_data.py`
 
 Run all commands from the repo root: `database/db.py` reads the migration file via the relative path
 `database/migrations/001_core_tables.sql`, and config loads `.env` / `.streamlit/secrets.toml` relative to the CWD.
@@ -42,9 +47,9 @@ Run all commands from the repo root: `database/db.py` reads the migration file v
 Layered, single-direction data flow orchestrated by `pipeline/runner.py::run_pipeline()`:
 ingest → classify/score → persist. `main.py` is a thin entry point that calls it.
 
-- `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a *normalized* DataFrame
-  (`description`, `amount`, `account_name`, `source`, `date`, ...). `CSVIngestor` and `PlaidIngestor` are the two
-  implementations; `runner._build_ingestor` picks one based on `settings.ingestion_source`.
+- `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a _normalized_ DataFrame
+  (`description`, `amount`, `account_name`, `source`, `date`, ...). `PlaidIngestor` is the only implementation;
+  `BaseIngestor` remains as the interface seam for future sources.
 - `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
   but the pipeline currently uses `analytics/placeholders.py` (`build_placeholder_models`), which stamps
   `category="uncategorized"`, `outlier_score=0.0`, `is_outlier=False`. The data path is wired end-to-end before ML is
@@ -52,26 +57,28 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 - `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` executes the SQL migration file at runtime;
   upserts are idempotent via `build_transaction_hash` (sha256 of `account_name|date|description|amount`) with
   `ON CONFLICT (transaction_hash) DO UPDATE`. Postgres = Supabase/Neon (`DATABASE_URL`).
-- `core/` — shared, UI-agnostic helpers: `config.py` (`load_settings()`, `PlaidLinkConfig`, `ConfigError`),
-  `auth_session.py`, `google_oauth.py`, `plaid.py`.
+- `core/` — shared, UI-agnostic helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`,
+  `google_oauth.py`.
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
-  sign-out) and `dashboard.py` (DB reads + Plotly/Altair rendering).
-- `scripts/` — Plaid Link bootstrap helpers (`generate_public_token.py`, `create_sandbox_access_token.py`).
+  sign-out) and `dashboard.py` (DB reads + Plotly rendering).
+- `scripts/` — `create_sandbox_access_token.py` (Plaid sandbox bootstrap) and `seed_sample_data.py` (writes
+  deterministic demo data straight to Postgres — no ingestion, no credentials).
 
 ## Configuration
 
 `core/config.py::load_settings()` reads each key from, in precedence order: environment → `.streamlit/secrets.toml`
-→ default. Missing required values raise `ConfigError`. `INGESTION_SOURCE` (`csv` | `plaid`, default `csv`) decides
-which ingestor runs and which vars become required (`CSV_PATHS` for csv; `PLAID_CLIENT_ID`/`PLAID_SECRET`/
-`PLAID_ACCESS_TOKENS` for plaid). `DATABASE_URL` is always required. See `.env.example` and the README for the full
-variable list. The same env-var names are used by GitHub Actions secrets.
+→ default. `DATABASE_URL` is the only value `load_settings()` requires — it raises `ConfigError` if missing.
+Plaid vars (`PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ACCESS_TOKENS`) are read optionally at config-load time and
+only enforced by `pipeline/runner.py::_build_ingestor` when the pipeline actually runs — this keeps the dashboard
+and `scripts/seed_sample_data.py` usable with no Plaid credentials at all. See `.env.example` and the README for
+the full variable list. The same env-var names are used by GitHub Actions secrets.
 
 ## Automation
 
 `.github/workflows/daily-finance-pipeline.yml` is **defined but not yet live**: it declares a daily `cron`
 (07:00 UTC) and `workflow_dispatch` to run `python main.py` with credentials injected from GitHub Secrets, but
-automatic runs are not active yet — the workflow is still on the `dev` branch and uncommitted, and GitHub only
-schedules workflows from the default branch (`main`) once the required Secrets are populated. Treat scheduled
+automatic runs are not active yet — the workflow is committed but inert until required Secrets are populated on
+the default branch, and GitHub only schedules workflows from the default branch (`main`). Treat scheduled
 automation as a goal, not current behavior.
 
 ## Notes

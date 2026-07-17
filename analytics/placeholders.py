@@ -12,7 +12,7 @@ class PlaceholderModelBundle:
 
 
 class PlaceholderTransactionClassifier:
-    def __init__(self, default_category: str = "uncategorized") -> None:
+    def __init__(self, default_category: str = "Uncategorized") -> None:
         self.default_category = default_category
 
     def load(self) -> None:

@@ -23,7 +23,7 @@ class PlaceholderModelTests(unittest.TestCase):
         )
         scored = models.outlier_detector.score(categorized)
 
-        self.assertEqual(list(scored["category"]), ["uncategorized", "uncategorized"])
+        self.assertEqual(list(scored["category"]), ["Uncategorized", "Uncategorized"])
         self.assertTrue((scored["outlier_score"] == 0.0).all())
         self.assertTrue((scored["is_outlier"] == False).all())
 
