@@ -39,21 +39,32 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
     start_date = end_date - timedelta(days=days_back)
 
     ingestor = _build_ingestor(settings)
-    transactions = ingestor.fetch_transactions(start_date=start_date, end_date=end_date)
-    if transactions.empty:
-        LOGGER.info("No transactions fetched. Pipeline complete.")
-        return transactions
-
-    models = build_placeholder_models()
-    transactions["category"] = models.classifier.categorize(transactions["description"])
-    transactions = models.outlier_detector.score(transactions)
 
     database = DatabaseClient(settings.database_url)
     database.ensure_schema()
 
     owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners))
     accounts = ingestor.fetch_accounts(owner_by_token)
+
+    # Re-map each account onto its existing canonical account_key (if any) *before* persisting,
+    # so a Plaid Item re-link (new account_ids for the same physical accounts, e.g. after
+    # credential rotation) merges into existing history instead of creating a duplicate account.
+    key_remap = database.canonicalize_account_keys(accounts)
+    for account in accounts:
+        account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
+
+    transactions = ingestor.fetch_transactions(start_date=start_date, end_date=end_date)
+    if transactions.empty:
+        LOGGER.info("No transactions fetched. Pipeline complete.")
+        return transactions
+    transactions["account_key"] = transactions["account_key"].map(
+        lambda key: key_remap.get(key, key)
+    )
+
+    models = build_placeholder_models()
+    transactions["category"] = models.classifier.categorize(transactions["description"])
+    transactions = models.outlier_detector.score(transactions)
 
     database.upsert_categories(transactions["category"].dropna().astype(str).tolist())
     database.upsert_transactions(transactions)

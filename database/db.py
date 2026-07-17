@@ -15,7 +15,7 @@ LOGGER = logging.getLogger(__name__)
 def build_transaction_hash(transaction: dict[str, Any]) -> str:
     identity = "|".join(
         [
-            str(transaction.get("account_name", "")),
+            str(transaction.get("account_key", "")),
             str(transaction.get("date", "")),
             str(transaction.get("description", "")),
             str(transaction.get("amount", "")),
@@ -47,22 +47,24 @@ class DatabaseClient:
         sql = """
         INSERT INTO accounts (
             account_key, account_name, owner_name, official_name,
-            account_type, account_subtype,
+            account_type, account_subtype, persistent_account_id, mask,
             balance_available, balance_current, balance_limit, iso_currency_code,
             source
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (account_key) DO UPDATE
-        SET account_name      = EXCLUDED.account_name,
-            owner_name        = EXCLUDED.owner_name,
-            official_name     = EXCLUDED.official_name,
-            account_type      = EXCLUDED.account_type,
-            account_subtype   = EXCLUDED.account_subtype,
-            balance_available = EXCLUDED.balance_available,
-            balance_current   = EXCLUDED.balance_current,
-            balance_limit     = EXCLUDED.balance_limit,
-            iso_currency_code = EXCLUDED.iso_currency_code,
-            source            = EXCLUDED.source,
-            updated_at        = NOW()
+        SET account_name          = EXCLUDED.account_name,
+            owner_name            = EXCLUDED.owner_name,
+            official_name         = EXCLUDED.official_name,
+            account_type          = EXCLUDED.account_type,
+            account_subtype       = EXCLUDED.account_subtype,
+            persistent_account_id = EXCLUDED.persistent_account_id,
+            mask                  = EXCLUDED.mask,
+            balance_available     = EXCLUDED.balance_available,
+            balance_current       = EXCLUDED.balance_current,
+            balance_limit         = EXCLUDED.balance_limit,
+            iso_currency_code     = EXCLUDED.iso_currency_code,
+            source                = EXCLUDED.source,
+            updated_at            = NOW()
         """
         rows = [
             (
@@ -72,6 +74,8 @@ class DatabaseClient:
                 a.get("official_name"),
                 a.get("account_type"),
                 a.get("account_subtype"),
+                a.get("persistent_account_id"),
+                a.get("mask"),
                 a.get("balance_available"),
                 a.get("balance_current"),
                 a.get("balance_limit"),
@@ -82,6 +86,70 @@ class DatabaseClient:
         ]
         if rows:
             self._execute_many(sql, rows)
+
+    def canonicalize_account_keys(self, accounts: list[dict[str, Any]]) -> dict[str, str]:
+        """Map each incoming account's raw account_key to an existing account_key already
+        in the DB that represents the same physical account, so a Plaid Item re-link (which
+        issues new account_ids) merges into history instead of creating a duplicate account.
+
+        Matches on `persistent_account_id` first (Plaid's stable cross-relink identifier).
+        Falls back to an exact match on mask + official_name + account_subtype + owner_name
+        when `persistent_account_id` is unavailable (e.g. the existing row predates this
+        column, or the institution doesn't support it) and the match is unambiguous.
+        """
+        remap: dict[str, str] = {}
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                for a in accounts:
+                    raw_key = a["account_key"]
+                    canonical = None
+
+                    persistent_id = a.get("persistent_account_id")
+                    if persistent_id:
+                        cur.execute(
+                            "SELECT account_key FROM accounts "
+                            "WHERE persistent_account_id = %s AND account_key != %s",
+                            (persistent_id, raw_key),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            canonical = row[0]
+
+                    if canonical is None:
+                        mask = a.get("mask")
+                        official_name = a.get("official_name")
+                        subtype = a.get("account_subtype")
+                        owner_name = a.get("owner_name")
+                        if mask and official_name and subtype and owner_name:
+                            cur.execute(
+                                "SELECT account_key FROM accounts "
+                                "WHERE mask = %s AND official_name = %s AND account_subtype = %s "
+                                "AND owner_name = %s AND account_key != %s",
+                                (mask, official_name, subtype, owner_name, raw_key),
+                            )
+                            matches = cur.fetchall()
+                            if len(matches) == 1:
+                                canonical = matches[0][0]
+
+                    remap[raw_key] = canonical or raw_key
+        return remap
+
+    def merge_account(self, duplicate_key: str, canonical_key: str) -> int:
+        """Reassign transactions from duplicate_key onto canonical_key and delete the
+        duplicate accounts row. Returns the number of transactions reassigned."""
+        if duplicate_key == canonical_key:
+            return 0
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE transactions SET account_key = %s, updated_at = NOW() "
+                    "WHERE account_key = %s",
+                    (canonical_key, duplicate_key),
+                )
+                moved = cur.rowcount
+                cur.execute("DELETE FROM accounts WHERE account_key = %s", (duplicate_key,))
+            conn.commit()
+        return moved
 
     def get_categories(self) -> list[str]:
         """Return all category names from the categories table, sorted."""
@@ -127,6 +195,47 @@ class DatabaseClient:
                     (category, transaction_hash)
                 )
             conn.commit()
+
+    def rehash_transactions(self) -> tuple[int, int]:
+        """Recompute transaction_hash for every row using the current build_transaction_hash
+        formula (account_key-based). Needed once after merge_account calls, since rows
+        inserted before this fix hashed on the fragile account_name field. Two existing rows
+        that turn out to collide under the new formula (the same real transaction, inserted
+        twice under different account_keys) are deduplicated: the earliest row survives.
+        Returns (rows_rehashed, rows_deleted_as_duplicates).
+        """
+        rehashed = 0
+        deleted = 0
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, account_key, transaction_date, description, amount, "
+                    "transaction_hash FROM transactions ORDER BY id"
+                )
+                rows = cur.fetchall()
+                seen: dict[str, int] = {}
+                for row_id, account_key, tx_date, description, amount, old_hash in rows:
+                    new_hash = build_transaction_hash(
+                        {
+                            "account_key": account_key,
+                            "date": tx_date,
+                            "description": description,
+                            "amount": amount,
+                        }
+                    )
+                    if new_hash in seen:
+                        cur.execute("DELETE FROM transactions WHERE id = %s", (row_id,))
+                        deleted += 1
+                        continue
+                    seen[new_hash] = row_id
+                    if new_hash != old_hash:
+                        cur.execute(
+                            "UPDATE transactions SET transaction_hash = %s WHERE id = %s",
+                            (new_hash, row_id),
+                        )
+                        rehashed += 1
+            conn.commit()
+        return rehashed, deleted
 
     def upsert_categories(self, categories: Iterable[str]) -> None:
         sql = """
