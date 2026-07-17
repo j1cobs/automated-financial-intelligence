@@ -35,7 +35,7 @@ LOGGER = logging.getLogger(__name__)
 def _fetch_accounts(database_url: str) -> list[dict]:
     sql = (
         "SELECT account_key, persistent_account_id, mask, official_name, "
-        "account_subtype, owner_name, created_at FROM accounts ORDER BY created_at"
+        "account_type, account_subtype, owner_name, created_at FROM accounts ORDER BY created_at"
     )
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
@@ -45,6 +45,23 @@ def _fetch_accounts(database_url: str) -> list[dict]:
 
 
 def _group_duplicates(accounts: list[dict]) -> list[list[dict]]:
+    """Group accounts that represent the same physical account under different account_keys.
+
+    Primary signal: persistent_account_id (Plaid's stable cross-relink identifier). Rows
+    without it (e.g. inserted before that column existed, or from an institution that doesn't
+    support it) fall back to an exact match on (official_name, account_subtype, account_type,
+    owner_name) — deliberately excluding `mask`, since rows that predate the `mask` column have
+    it as NULL and NULL never equals another value, which would silently hide exactly the
+    historical duplicates this script exists to find.
+
+    A single (official_name, account_subtype, account_type, owner_name) bucket can legitimately
+    contain more than one *distinct* real account (e.g. two credit cards of the same product
+    for the same owner) — each independently duplicated by the re-link. So when a bucket has
+    two or more distinct known mask values, it is partitioned by mask first: each mask value's
+    rows form their own duplicate group. Rows with no mask (pre-mask-column rows) can't be
+    assigned to a specific mask partition by metadata alone; if the bucket has more than one
+    known mask, those unmasked rows are logged for manual review rather than guessed at.
+    """
     by_persistent_id: dict[str, list[dict]] = defaultdict(list)
     by_heuristic: dict[tuple, list[dict]] = defaultdict(list)
     unmatched: list[dict] = []
@@ -54,12 +71,12 @@ def _group_duplicates(accounts: list[dict]) -> list[list[dict]]:
             by_persistent_id[account["persistent_account_id"]].append(account)
         elif all(
             account[field]
-            for field in ("mask", "official_name", "account_subtype", "owner_name")
+            for field in ("official_name", "account_subtype", "account_type", "owner_name")
         ):
             key = (
-                account["mask"],
                 account["official_name"],
                 account["account_subtype"],
+                account["account_type"],
                 account["owner_name"],
             )
             by_heuristic[key].append(account)
@@ -67,7 +84,28 @@ def _group_duplicates(accounts: list[dict]) -> list[list[dict]]:
             unmatched.append(account)
 
     groups = [g for g in by_persistent_id.values() if len(g) > 1]
-    groups += [g for g in by_heuristic.values() if len(g) > 1]
+    for candidates in by_heuristic.values():
+        if len(candidates) < 2:
+            continue
+        known_masks = {a["mask"] for a in candidates if a["mask"]}
+        if len(known_masks) <= 1:
+            groups.append(candidates)
+            continue
+
+        unmasked = [a for a in candidates if not a["mask"]]
+        if unmasked:
+            LOGGER.warning(
+                "Bucket has %d distinct masks %s; leaving %d unmasked account(s) for "
+                "manual review (can't tell which mask they belong to): %s",
+                len(known_masks),
+                known_masks,
+                len(unmasked),
+                [a["account_key"] for a in unmasked],
+            )
+        for mask in known_masks:
+            same_mask = [a for a in candidates if a["mask"] == mask]
+            if len(same_mask) > 1:
+                groups.append(same_mask)
     return groups
 
 

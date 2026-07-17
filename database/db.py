@@ -93,9 +93,13 @@ class DatabaseClient:
         issues new account_ids) merges into history instead of creating a duplicate account.
 
         Matches on `persistent_account_id` first (Plaid's stable cross-relink identifier).
-        Falls back to an exact match on mask + official_name + account_subtype + owner_name
-        when `persistent_account_id` is unavailable (e.g. the existing row predates this
-        column, or the institution doesn't support it) and the match is unambiguous.
+        Falls back to an exact match on official_name + account_subtype + account_type +
+        owner_name when `persistent_account_id` is unavailable (e.g. the existing row predates
+        that column, or the institution doesn't support it) and the match is unambiguous.
+        `mask` is intentionally NOT a required field in that fallback: rows inserted before
+        the `mask` column existed have it as NULL, and NULL never equals another value in SQL,
+        so requiring it would silently block exactly the historical matches this exists for.
+        When `mask` is known on both sides, it is still used to veto a false match.
         """
         remap: dict[str, str] = {}
         with psycopg.connect(self.database_url) as conn:
@@ -116,20 +120,25 @@ class DatabaseClient:
                             canonical = row[0]
 
                     if canonical is None:
-                        mask = a.get("mask")
                         official_name = a.get("official_name")
                         subtype = a.get("account_subtype")
+                        account_type = a.get("account_type")
                         owner_name = a.get("owner_name")
-                        if mask and official_name and subtype and owner_name:
+                        if official_name and subtype and account_type and owner_name:
                             cur.execute(
-                                "SELECT account_key FROM accounts "
-                                "WHERE mask = %s AND official_name = %s AND account_subtype = %s "
-                                "AND owner_name = %s AND account_key != %s",
-                                (mask, official_name, subtype, owner_name, raw_key),
+                                "SELECT account_key, mask FROM accounts "
+                                "WHERE official_name = %s AND account_subtype = %s "
+                                "AND account_type = %s AND owner_name = %s AND account_key != %s",
+                                (official_name, subtype, account_type, owner_name, raw_key),
                             )
-                            matches = cur.fetchall()
+                            new_mask = a.get("mask")
+                            matches = [
+                                key
+                                for key, existing_mask in cur.fetchall()
+                                if not (new_mask and existing_mask and new_mask != existing_mask)
+                            ]
                             if len(matches) == 1:
-                                canonical = matches[0][0]
+                                canonical = matches[0]
 
                     remap[raw_key] = canonical or raw_key
         return remap
@@ -201,11 +210,18 @@ class DatabaseClient:
         formula (account_key-based). Needed once after merge_account calls, since rows
         inserted before this fix hashed on the fragile account_name field. Two existing rows
         that turn out to collide under the new formula (the same real transaction, inserted
-        twice under different account_keys) are deduplicated: the earliest row survives.
+        twice under different account_keys) are deduplicated: whichever row already carries
+        the correct new-formula hash survives (falling back to the lowest id if neither does),
+        so it needs no UPDATE.
+
+        Two passes are required: the UNIQUE constraint on transaction_hash is enforced against
+        the live table, not an in-memory "seen" set, so a single ORDER BY id pass can try to
+        UPDATE an earlier row onto a hash that a later row already holds, raising a
+        UniqueViolation depending on id order. Deleting every non-keeper duplicate first, then
+        updating only the surviving keepers, avoids that collision regardless of id order.
+
         Returns (rows_rehashed, rows_deleted_as_duplicates).
         """
-        rehashed = 0
-        deleted = 0
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -213,22 +229,34 @@ class DatabaseClient:
                     "transaction_hash FROM transactions ORDER BY id"
                 )
                 rows = cur.fetchall()
-                seen: dict[str, int] = {}
-                for row_id, account_key, tx_date, description, amount, old_hash in rows:
-                    new_hash = build_transaction_hash(
-                        {
-                            "account_key": account_key,
-                            "date": tx_date,
-                            "description": description,
-                            "amount": amount,
-                        }
-                    )
-                    if new_hash in seen:
+
+            target_hash_by_id: dict[int, str] = {}
+            keeper_by_hash: dict[str, int] = {}
+            old_hash_by_id: dict[int, str] = {}
+            for row_id, account_key, tx_date, description, amount, old_hash in rows:
+                new_hash = build_transaction_hash(
+                    {
+                        "account_key": account_key,
+                        "date": tx_date,
+                        "description": description,
+                        "amount": amount,
+                    }
+                )
+                target_hash_by_id[row_id] = new_hash
+                old_hash_by_id[row_id] = old_hash
+                current_keeper = keeper_by_hash.get(new_hash)
+                if current_keeper is None or old_hash == new_hash:
+                    keeper_by_hash[new_hash] = row_id
+
+            deleted = 0
+            rehashed = 0
+            with conn.cursor() as cur:
+                for row_id, new_hash in target_hash_by_id.items():
+                    if keeper_by_hash[new_hash] != row_id:
                         cur.execute("DELETE FROM transactions WHERE id = %s", (row_id,))
                         deleted += 1
-                        continue
-                    seen[new_hash] = row_id
-                    if new_hash != old_hash:
+                for row_id, new_hash in target_hash_by_id.items():
+                    if keeper_by_hash[new_hash] == row_id and new_hash != old_hash_by_id[row_id]:
                         cur.execute(
                             "UPDATE transactions SET transaction_hash = %s WHERE id = %s",
                             (new_hash, row_id),
