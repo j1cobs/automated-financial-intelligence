@@ -467,6 +467,57 @@ Document this in the README Security section (Phase 4a) so the posture is explic
 
 ---
 
+## Phase 2.6 — UX fix: Google sign-in opens a second tab
+
+**Problem** (found 2026-07-17): `render_sign_in()` in `app/auth.py:112-138` renders the sign-in link as
+plain Markdown — `st.markdown(f"[Continue with Google]({auth_url})")` (line 134). Streamlit forces
+`target="_blank"` (and strips any custom `target` attribute you try to set) on every link rendered through
+`st.markdown`/`st.link_button` — a known, unfixable Streamlit limitation (see streamlit/streamlit issues
+#3098, #4332, #7464, #11070). So clicking "Continue with Google" opens Google's consent screen in a *new*
+tab; when Google redirects back to `redirect_uri`, that new tab becomes the signed-in app tab while the
+original tab is left behind — the two-tabs annoyance.
+
+**Fix**: render the link inside a real (unsanitized) HTML snippet via
+`streamlit.components.v1.html`, using `<a href="..." target="_top">`. `target="_top"` tells the browser to
+navigate the *top-level browsing context* (the actual tab), not the sandboxed iframe hosting the component —
+so the whole tab navigates to Google and back, with no second tab ever opening.
+
+### File: `app/auth.py`
+
+1. Add imports: `html` (stdlib, for escaping the URL into an attribute) and
+   `streamlit.components.v1 as components`.
+2. Replace line 134:
+   ```python
+   st.markdown(f"[Continue with Google]({auth_url})")
+   ```
+   with:
+   ```python
+   safe_url = html.escape(auth_url)
+   components.html(
+       f'''
+       <a href="{safe_url}" target="_top"
+          style="display:inline-block;padding:0.5em 1em;background:#4285F4;color:white;
+                 border-radius:4px;text-decoration:none;font-family:sans-serif;">
+           Continue with Google
+       </a>
+       ''',
+       height=50,
+   )
+   ```
+   Keep the existing `st.caption(...)` line below it as-is.
+
+No changes needed to `core/google_oauth.py` or `consume_google_callback` — the redirect URI and query-param
+handling are unaffected; only how the *outbound* link is rendered changes.
+
+### Verification
+- `streamlit run app/streamlit_app.py`, load the sign-in page, confirm the "Continue with Google" button
+  renders correctly (styling/height, no scrollbar clipping from the iframe).
+- Click it and confirm the browser navigates *within the same tab* to Google's consent screen (no new tab),
+  and after granting consent, Google redirects back to the same tab and the dashboard loads signed in.
+- Sign out and sign in again to confirm the flow is stable on repeat.
+
+---
+
 ## Phase 3 — Dashboard improvements
 
 Implement the steps in the lettered order below. They build on each other. Do not skip ahead.
