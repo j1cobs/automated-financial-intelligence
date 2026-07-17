@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Phase-1 build: the data path (ingest → process → persist → dashboard) is wired end-to-end first, ahead of
 the full feature set described in the original design brief. What this means concretely:
+
 - ML is stubbed — `pipeline/runner.py` uses `analytics/placeholders.py`, not the real `analytics/classifier.py` /
   `analytics/outlier_detector.py` yet (see Architecture).
 - The dashboard implements all core views. Only ML is stubbed — the pipeline uses placeholders.
@@ -23,6 +24,10 @@ When extending, prefer wiring the existing real modules onto the live path over 
   core / pipeline) — a change in one layer should not reach into another. Match the existing concise style.
 - **Ask, don't guess.** When a requirement or design decision is genuinely ambiguous, ask the user rather than making
   an uncertain assumption.
+- **Never access, read, or print the `.env` file.** Do not open it, `cat`/`Get-Content` it, glob/grep into it, echo
+  its contents, or include it in any tool output — even for debugging. It holds live secrets (DB URL, Plaid keys,
+  OAuth secrets). If you need to confirm a variable is set, check `.env.example` for the key name or ask the user to
+  confirm the value themselves; never read the real file to find out.
 
 ## Commands
 
@@ -42,7 +47,7 @@ Run all commands from the repo root: `database/db.py` reads the migration file v
 Layered, single-direction data flow orchestrated by `pipeline/runner.py::run_pipeline()`:
 ingest → classify/score → persist. `main.py` is a thin entry point that calls it.
 
-- `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a *normalized* DataFrame
+- `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a _normalized_ DataFrame
   (`description`, `amount`, `account_name`, `source`, `date`, ...). `PlaidIngestor` is the only implementation;
   `BaseIngestor` remains as the interface seam for future sources.
 - `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
