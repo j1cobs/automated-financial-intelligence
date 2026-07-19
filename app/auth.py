@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+import logging
 import secrets
 import time
 
@@ -14,7 +16,24 @@ from core.google_oauth import (
     is_authorized_identity,
 )
 
-_google_oauth_pending_sessions: dict[str, str] = {}
+LOGGER = logging.getLogger(__name__)
+
+_PENDING_TTL_SECONDS = 600
+_PENDING_MAX_ENTRIES = 32
+_google_oauth_pending_sessions: dict[str, tuple[str, float]] = {}  # state -> (verifier, created_at)
+
+
+def _prune_pending_sessions(now: float) -> None:
+    expired = [
+        state
+        for state, (_, created_at) in _google_oauth_pending_sessions.items()
+        if now - created_at > _PENDING_TTL_SECONDS
+    ]
+    for state in expired:
+        del _google_oauth_pending_sessions[state]
+    while len(_google_oauth_pending_sessions) >= _PENDING_MAX_ENTRIES:
+        oldest = min(_google_oauth_pending_sessions, key=lambda s: _google_oauth_pending_sessions[s][1])
+        del _google_oauth_pending_sessions[oldest]
 
 
 def query_param(name: str) -> str | None:
@@ -56,7 +75,8 @@ def is_authenticated() -> bool:
 def start_google_sign_in(settings) -> str:
     code_verifier, code_challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(32)
-    _google_oauth_pending_sessions[state] = code_verifier
+    _prune_pending_sessions(time.time())
+    _google_oauth_pending_sessions[state] = (code_verifier, time.time())
     return build_authorization_url(
         client_id=settings.google_oauth_client_id,
         redirect_uri=settings.google_oauth_redirect_uri,
@@ -71,11 +91,12 @@ def consume_google_callback(settings) -> bool:
     if not code or not state:
         return False
 
-    code_verifier = _google_oauth_pending_sessions.pop(state, None)
-    if not code_verifier:
+    pending = _google_oauth_pending_sessions.pop(state, None)
+    if not pending or (time.time() - pending[1]) > _PENDING_TTL_SECONDS:
         st.error("Google sign-in session expired. Please try again.")
         clear_query_params()
         return False
+    code_verifier, _ = pending
 
     try:
         token_response = exchange_code(
@@ -87,7 +108,8 @@ def consume_google_callback(settings) -> bool:
         )
         identity = fetch_userinfo(token_response["access_token"])
     except Exception as error:
-        st.error(f"Google sign-in failed: {error}")
+        LOGGER.exception("Google sign-in failed")
+        st.error("Google sign-in failed. Please try again.")
         clear_query_params()
         return False
 
@@ -131,7 +153,16 @@ def render_sign_in(settings) -> bool:
         return False
 
     auth_url = start_google_sign_in(settings)
-    st.markdown(f"[Continue with Google]({auth_url})")
+    safe_url = html.escape(auth_url)
+    st.html(
+        f'''
+        <a href="{safe_url}" target="_top"
+           style="display:inline-block;padding:0.5em 1em;background:#4285F4;color:white;
+                  border-radius:4px;text-decoration:none;font-family:sans-serif;">
+            Continue with Google
+        </a>
+        '''
+    )
     st.caption(
         "Google handles the credential check; the app only accepts allowlisted identities."
     )
@@ -139,13 +170,13 @@ def render_sign_in(settings) -> bool:
 
 
 def render_sidebar(settings) -> None:
-    if settings.supabase_url:
-        st.sidebar.caption(f"Supabase: {settings.supabase_url}")
     st.sidebar.caption(f"Session timeout: {SESSION_TIMEOUT_SECONDS // 3600} hours")
 
     if st.session_state.get("authenticated_user"):
         user = st.session_state.authenticated_user
         st.sidebar.caption(f"Signed in as {user.get('email', 'Google user')}")
+        if settings.supabase_url:
+            st.sidebar.caption(f"Supabase: {settings.supabase_url}")
         if st.sidebar.button("Sign out"):
             sign_out()
             st.rerun()
