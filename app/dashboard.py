@@ -296,6 +296,52 @@ def _label_subtype(subtype: str | None, lang: str) -> str:
 
 _PAYMENT_KEYWORDS = r"payment|paiement|prélèvement|prelevement|transfer|xfer"
 _REFUND_KEYWORDS = r"cashback|cash.?back|remise|refund|rebate|return"
+_TRANSFER_MATCH_DAYS = 5
+
+
+def _detect_internal_transfers(df: pd.DataFrame) -> pd.Series:
+    """Flag both legs of a transfer between two of the user's own accounts.
+
+    A pair is an outflow (amount > 0) and an inflow (amount < 0) of the same
+    magnitude, on two *different* accounts, within _TRANSFER_MATCH_DAYS days.
+    Matching is greedy and one-to-one: each row can be consumed by one pair only,
+    so three $500 outflows never mark the same $500 inflow three times.
+
+    Money arriving with no matching outgoing leg in the data is left unflagged —
+    an inbound e-transfer from another person is income, not a transfer.
+    """
+    is_paired = pd.Series(False, index=df.index)
+    if df.empty:
+        return is_paired
+
+    abs_amount = df["amount"].abs().round(2)
+    for _, bucket in df.groupby(abs_amount).groups.items():
+        bucket_idx = list(bucket)
+        if len(bucket_idx) < 2:
+            continue
+        outflows = [i for i in bucket_idx if df.loc[i, "amount"] > 0]
+        inflows = [i for i in bucket_idx if df.loc[i, "amount"] < 0]
+        if not outflows or not inflows:
+            continue
+        unmatched_inflows = set(inflows)
+        outflows_sorted = sorted(outflows, key=lambda i: df.loc[i, "date"])
+        for out_idx in outflows_sorted:
+            out_date = df.loc[out_idx, "date"]
+            out_account = df.loc[out_idx, "account_name"]
+            candidates = [
+                in_idx
+                for in_idx in unmatched_inflows
+                if df.loc[in_idx, "account_name"] != out_account
+                and abs((df.loc[in_idx, "date"] - out_date).days) <= _TRANSFER_MATCH_DAYS
+            ]
+            if not candidates:
+                continue
+            best = min(candidates, key=lambda i: abs((df.loc[i, "date"] - out_date).days))
+            unmatched_inflows.discard(best)
+            is_paired.loc[out_idx] = True
+            is_paired.loc[best] = True
+
+    return is_paired
 
 
 def _classify_tx_type(df: pd.DataFrame) -> pd.Series:
@@ -303,6 +349,15 @@ def _classify_tx_type(df: pd.DataFrame) -> pd.Series:
 
     Sign convention (Plaid): positive amount = outflow; negative = inflow.
     adjusted_amount = -amount, so positive adjusted_amount = income/gain.
+
+    Invariant: no row on a credit account is ever classified 'income' — a
+    credit-account inflow is either a refund (netted against expense) or a
+    card payment (transfer), never new money. Internal transfers between the
+    user's own accounts (matched pairs via _detect_internal_transfers) are
+    excluded from both income and expense on both legs; unpaired inflows on
+    depository/investment accounts stay 'income' since they may be money from
+    someone else (e.g. an incoming e-transfer), which keyword matching alone
+    cannot distinguish from an internal transfer.
     """
     types = pd.Series("expense", index=df.index)
 
@@ -320,12 +375,12 @@ def _classify_tx_type(df: pd.DataFrame) -> pd.Series:
     ] = "transfer"
 
     # Credit card: positive = purchase = expense (default already set)
-    # Credit card: negative + refund keyword = cashback/rebate = income
+    # Credit card: negative + refund keyword = reversal of a purchase = expense (nets against spend)
     types[
         is_credit
         & (df["amount"] < 0)
         & df["description"].str.contains(_REFUND_KEYWORDS, case=False, na=False)
-    ] = "income"
+    ] = "expense"
     # Credit card: negative without refund keyword = payment received = transfer
     types[
         is_credit
@@ -335,6 +390,11 @@ def _classify_tx_type(df: pd.DataFrame) -> pd.Series:
 
     # Unknown account_type: treat negative amounts as income (conservative fallback)
     types[is_unknown & (df["amount"] < 0)] = "income"
+
+    # Internal transfers (matched pairs across the user's own accounts) override
+    # everything above — applied last so a paired inflow flips from income/expense
+    # to transfer on both legs.
+    types[_detect_internal_transfers(df)] = "transfer"
 
     return types
 
@@ -1082,6 +1142,9 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
 
     tx = tx_df.copy()
     tx["date"] = pd.to_datetime(tx["date"])
+    # Enrich once on the complete dataset so internal-transfer pair matching sees
+    # both legs regardless of which owner/account filters are later applied.
+    tx = _enrich_transactions(tx)
 
     filtered, all_time_filtered, selected_owners = _build_sidebar_filters(tx, T)
 
@@ -1089,9 +1152,8 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
         st.info(T["no_transactions"])
         return
 
-    # Enrich once so all tabs share adjusted_amount / month / week / tx_type
-    enriched = _enrich_transactions(filtered)
-    enriched_all_time = _enrich_transactions(all_time_filtered)
+    enriched = filtered
+    enriched_all_time = all_time_filtered
 
     tab_overview, tab_cashflow, tab_budget, tab_transactions = st.tabs(
         [T["tab_overview"], T["tab_cashflow"], T["tab_budget"], T["tab_transactions"]]
