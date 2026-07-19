@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: finance
       POSTGRES_DB: finance
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"  # loopback only — finance/finance is demo-grade, never front real data
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
