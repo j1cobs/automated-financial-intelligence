@@ -4,6 +4,7 @@ import logging
 from datetime import date, timedelta
 
 import pandas as pd
+import psycopg
 
 from analytics.placeholders import build_placeholder_models
 from core.config import ConfigError, load_settings
@@ -80,6 +81,9 @@ def main() -> None:
 
     try:
         run_pipeline()
+    except psycopg.OperationalError as error:
+        LOGGER.error("Pipeline failed: database connection error (%s)", type(error).__name__)
+        raise SystemExit(1)
     except Exception:
         LOGGER.exception("Pipeline failed")
         raise
