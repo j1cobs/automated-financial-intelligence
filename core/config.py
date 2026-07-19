@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from dotenv import load_dotenv
 
@@ -39,6 +40,21 @@ def _read_value(
 
 def _split_csv(raw_value: str | None) -> list[str]:
     return [item.strip() for item in (raw_value or "").split(",") if item.strip()]
+
+
+_LOCAL_DB_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def enforce_tls(database_url: str) -> str:
+    """Append sslmode=require to remote DSNs that don't already specify an sslmode."""
+    parts = urlsplit(database_url)
+    host = (parts.hostname or "").lower()
+    if host in _LOCAL_DB_HOSTS:
+        return database_url
+    if "sslmode" in parse_qs(parts.query):
+        return database_url
+    separator = "&" if parts.query else "?"
+    return f"{database_url}{separator}sslmode=require"
 
 
 @dataclass(frozen=True)
@@ -94,7 +110,7 @@ def load_settings() -> Settings:
             "PLAID_BASE_URL", secrets, "https://sandbox.plaid.com"
         )
         or "https://sandbox.plaid.com",
-        database_url=database_url,
+        database_url=enforce_tls(database_url),
         model_path=_read_value("MODEL_PATH", secrets, "artifacts/classifier.joblib")
         or "artifacts/classifier.joblib",
         labeled_dataset_path=_read_value(
