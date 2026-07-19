@@ -129,6 +129,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_savings_rate": "Monthly savings rate (%)",
         # Transactions tab
         "edit_cat_label": "Edit categories inline — changes persist across pipeline re-runs.",
+        # Quick-range period filter
+        "period_range": "Period",
+        "period_last_30_days": "Last 30 days",
+        "period_current_month": "Current month",
+        "period_last_3_months": "Last 3 months",
+        "period_last_6_months": "Last 6 months",
+        "period_ytd": "Year to date",
+        "period_all_time": "All time",
+        "period_custom": "Custom",
+        # Weekly metrics
+        "metric_avg_weekly_spend": "Avg. weekly spend",
+        "metric_avg_monthly_spend": "Avg. monthly spend",
+        "metric_avg_weekly_income": "Avg. weekly income",
+        "metric_avg_monthly_income": "Avg. monthly income",
+        "chart_weekly_trend": "Income vs. expenses by week",
+        "axis_week": "Week",
     },
     "fr": {
         "title": "Intelligence financière automatisée",
@@ -216,6 +232,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_mom_bar": "Revenus vs. dépenses par mois",
         "chart_savings_rate": "Taux d'épargne mensuel (%)",
         "edit_cat_label": "Modifiez les catégories en ligne — les changements survivent aux ré-exécutions du pipeline.",
+        "period_range": "Période",
+        "period_last_30_days": "30 derniers jours",
+        "period_current_month": "Mois en cours",
+        "period_last_3_months": "3 derniers mois",
+        "period_last_6_months": "6 derniers mois",
+        "period_ytd": "Depuis le début de l'année",
+        "period_all_time": "Depuis toujours",
+        "period_custom": "Personnalisé",
+        "metric_avg_weekly_spend": "Dépense moy. hebdo",
+        "metric_avg_monthly_spend": "Dépense moy. mensuelle",
+        "metric_avg_weekly_income": "Revenu moy. hebdo",
+        "metric_avg_monthly_income": "Revenu moy. mensuel",
+        "chart_weekly_trend": "Revenus vs. dépenses par semaine",
+        "axis_week": "Semaine",
     },
 }
 
@@ -310,10 +340,11 @@ def _classify_tx_type(df: pd.DataFrame) -> pd.Series:
 
 
 def _enrich_transactions(df: pd.DataFrame) -> pd.DataFrame:
-    """Add adjusted_amount, month, and tx_type columns. Call once before tabs."""
+    """Add adjusted_amount, month, week, and tx_type columns. Call once before tabs."""
     df = df.copy()
     df["adjusted_amount"] = -df["amount"]
     df["month"] = df["date"].dt.to_period("M").astype(str)
+    df["week"] = df["date"].dt.to_period("W-SUN").astype(str)
     df["tx_type"] = _classify_tx_type(df)
     return df
 
@@ -412,12 +443,44 @@ def _section_net_worth(
         st.info(T["no_credit"])
 
 
+_PERIOD_PRESETS = [
+    "last_30_days",
+    "current_month",
+    "last_3_months",
+    "last_6_months",
+    "ytd",
+    "all_time",
+    "custom",
+]
+
+
+def _preset_month_keys(preset: str, df: pd.DataFrame) -> pd.Index:
+    """Month keys touched by a quick-range preset, anchored to the latest transaction date."""
+    max_date = df["date"].max()
+    if preset == "all_time":
+        return df["_month_key"].unique()
+    if preset == "last_30_days":
+        start = max_date - pd.Timedelta(days=29)
+    elif preset == "current_month":
+        start = max_date.replace(day=1)
+    elif preset == "last_3_months":
+        start = max_date - pd.DateOffset(months=3)
+    elif preset == "last_6_months":
+        start = max_date - pd.DateOffset(months=6)
+    elif preset == "ytd":
+        start = max_date.replace(month=1, day=1)
+    else:
+        start = df["date"].min()
+    window_mask = (df["date"] >= start) & (df["date"] <= max_date)
+    return df.loc[window_mask, "_month_key"].unique()
+
+
 def _build_sidebar_filters(
     df: pd.DataFrame, T: dict[str, str]
-) -> tuple[pd.DataFrame, list[str]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     st.sidebar.header(T["filters"])
 
-    # Month multiselect
+    # Month bookkeeping (shared by the quick-range presets and the custom multiselect)
     df = df.copy()
     df["_month_key"] = df["date"].dt.to_period("M").astype(str)
     df["_month_label"] = df["date"].dt.strftime("%B %Y")
@@ -427,12 +490,23 @@ def _build_sidebar_filters(
         .sort_values("_month_key")["_month_label"]
         .tolist()
     )
-    selected_month_labels = st.sidebar.multiselect(
-        T["period"], options=month_options, default=month_options
+
+    # Quick-range period selector
+    selected_preset = st.sidebar.selectbox(
+        T["period_range"],
+        options=_PERIOD_PRESETS,
+        format_func=lambda key: T[f"period_{key}"],
+        index=0,
     )
-    selected_month_keys = df.loc[
-        df["_month_label"].isin(selected_month_labels), "_month_key"
-    ].unique()
+    if selected_preset == "custom":
+        selected_month_labels = st.sidebar.multiselect(
+            T["period"], options=month_options, default=month_options
+        )
+        selected_month_keys = df.loc[
+            df["_month_label"].isin(selected_month_labels), "_month_key"
+        ].unique()
+    else:
+        selected_month_keys = _preset_month_keys(selected_preset, df)
 
     # Owner multiselect
     owners = sorted(df["owner_name"].dropna().unique())
@@ -476,9 +550,8 @@ def _build_sidebar_filters(
     )
     outlier_mask = df["is_outlier"] if outliers_only else pd.Series(True, index=df.index)
 
-    mask = (
-        df["_month_key"].isin(selected_month_keys)
-        & df["owner_name"].isin(selected_owners)
+    non_date_mask = (
+        df["owner_name"].isin(selected_owners)
         & df["category"].isin(selected_cats)
         & df["account_name"].isin(selected_accounts)
         & (df["amount"].abs() >= amt_range[0])
@@ -486,11 +559,18 @@ def _build_sidebar_filters(
         & desc_mask
         & outlier_mask
     )
-    return df[mask].drop(columns=["_month_key", "_month_label"]), list(selected_owners)
+    date_mask = df["_month_key"].isin(selected_month_keys)
+
+    return (
+        df[non_date_mask & date_mask].drop(columns=["_month_key", "_month_label"]),
+        df[non_date_mask].drop(columns=["_month_key", "_month_label"]),
+        list(selected_owners),
+    )
 
 
 def _section_overview(
     df: pd.DataFrame,
+    all_time_df: pd.DataFrame,
     acct_df: pd.DataFrame,
     T: dict[str, str],
     lang: str,
@@ -517,10 +597,30 @@ def _section_overview(
     m4.metric(T["metric_savings_rate"], f"{savings_rate:.1f}%")
     m5.metric(T["metric_flags"], str(flagged))
 
+    # Weekly vs. monthly average pace — zero-filled so inactive weeks/months pull the average down
+    weekly_totals = real.groupby(["week", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
+    monthly_totals = real.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
+
+    avg_weekly_expense = weekly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
+    avg_monthly_expense = monthly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
+    avg_weekly_income = weekly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+    avg_monthly_income = monthly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+
+    w1, w2, w3, w4 = st.columns(4)
+    w1.metric(T["metric_avg_weekly_spend"], f"${avg_weekly_expense:,.2f}")
+    w2.metric(T["metric_avg_monthly_spend"], f"${avg_monthly_expense:,.2f}")
+    w3.metric(T["metric_avg_weekly_income"], f"${avg_weekly_income:,.2f}")
+    w4.metric(T["metric_avg_monthly_income"], f"${avg_monthly_income:,.2f}")
+
+    # Comparison-shaped charts: bounded to the trailing 12 months of all-time data,
+    # not the sidebar's quick-range window — otherwise they'd dilute/go stale over the years.
+    at_max_date = all_time_df["date"].max()
+    bounded_all_time = all_time_df[all_time_df["date"] >= at_max_date - pd.DateOffset(months=12)]
+
     c1, c2 = st.columns(2)
     with c1:
         top_cats = (
-            df[df["tx_type"] == "expense"]
+            bounded_all_time[bounded_all_time["tx_type"] == "expense"]
             .groupby("category", as_index=False)["adjusted_amount"]
             .sum()
             .assign(abs_amount=lambda x: x["adjusted_amount"].abs())
@@ -540,10 +640,13 @@ def _section_overview(
             st.plotly_chart(fig, use_container_width=True)
 
     with c2:
-        months_sorted = sorted(df["month"].unique())
+        months_sorted = sorted(bounded_all_time["month"].unique())
         if len(months_sorted) >= 2:
             this_m, last_m = months_sorted[-1], months_sorted[-2]
-            mom = df[df["month"].isin([this_m, last_m]) & (df["tx_type"] == "expense")]
+            mom = bounded_all_time[
+                bounded_all_time["month"].isin([this_m, last_m])
+                & (bounded_all_time["tx_type"] == "expense")
+            ]
             mom_grp = mom.groupby(["category", "month"], as_index=False)["adjusted_amount"].sum()
             mom_grp["abs_amount"] = mom_grp["adjusted_amount"].abs()
             mom_grp["period"] = mom_grp["month"].map(
@@ -569,8 +672,9 @@ def _section_overview(
         acct_df["account_type"].isin(["depository"]) & owner_mask
     ]["balance_current"].sum()
 
+    # Trend-shaped: always full history, ignoring the sidebar's quick-range window.
     monthly_expenses_series = (
-        df[df["tx_type"] == "expense"]
+        all_time_df[all_time_df["tx_type"] == "expense"]
         .groupby("month")["adjusted_amount"]
         .sum()
         .abs()
@@ -607,7 +711,7 @@ def _section_overview(
 
     with c4:
         monthly = (
-            df[df["tx_type"] != "transfer"]
+            all_time_df[all_time_df["tx_type"] != "transfer"]
             .groupby("month")
             .apply(
                 lambda g: pd.Series(
@@ -684,6 +788,26 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
         labels={"adjusted_amount": T["axis_amount"], "month": T["axis_month"]},
     )
     st.plotly_chart(fig_mom, use_container_width=True)
+
+    week_summary = (
+        df[df["tx_type"] != "transfer"]
+        .groupby(["week", "tx_type"], as_index=False)["adjusted_amount"]
+        .sum()
+    )
+    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = (
+        week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"].abs()
+    )
+    fig_week = px.bar(
+        week_summary,
+        x="week",
+        y="adjusted_amount",
+        color="tx_type",
+        barmode="group",
+        title=T["chart_weekly_trend"],
+        template="plotly_white",
+        labels={"adjusted_amount": T["axis_amount"], "week": T["axis_week"]},
+    )
+    st.plotly_chart(fig_week, use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -959,14 +1083,15 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
     tx = tx_df.copy()
     tx["date"] = pd.to_datetime(tx["date"])
 
-    filtered, selected_owners = _build_sidebar_filters(tx, T)
+    filtered, all_time_filtered, selected_owners = _build_sidebar_filters(tx, T)
 
     if filtered.empty:
         st.info(T["no_transactions"])
         return
 
-    # Enrich once so all tabs share adjusted_amount / month / tx_type
+    # Enrich once so all tabs share adjusted_amount / month / week / tx_type
     enriched = _enrich_transactions(filtered)
+    enriched_all_time = _enrich_transactions(all_time_filtered)
 
     tab_overview, tab_cashflow, tab_budget, tab_transactions = st.tabs(
         [T["tab_overview"], T["tab_cashflow"], T["tab_budget"], T["tab_transactions"]]
@@ -975,7 +1100,7 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
     with tab_overview:
         _section_net_worth(acct_df, T, lang, selected_owners)
         st.divider()
-        _section_overview(enriched, acct_df, T, lang, selected_owners)
+        _section_overview(enriched, enriched_all_time, acct_df, T, lang, selected_owners)
 
     with tab_cashflow:
         _section_cash_flow(enriched, T)
