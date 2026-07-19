@@ -16,6 +16,7 @@ class GoogleOAuthTests(unittest.TestCase):
             name="You",
             picture=None,
             subject="sub-123",
+            email_verified=True,
         )
 
         self.assertTrue(is_authorized_identity(identity, ["you@example.com"]))
@@ -26,6 +27,18 @@ class GoogleOAuthTests(unittest.TestCase):
             name="Other",
             picture=None,
             subject="sub-456",
+            email_verified=True,
+        )
+
+        self.assertFalse(is_authorized_identity(identity, ["you@example.com"]))
+
+    def test_blocks_unverified_email(self) -> None:
+        identity = GoogleIdentity(
+            email="you@example.com",
+            name="You",
+            picture=None,
+            subject="sub-123",
+            email_verified=False,
         )
 
         self.assertFalse(is_authorized_identity(identity, ["you@example.com"]))

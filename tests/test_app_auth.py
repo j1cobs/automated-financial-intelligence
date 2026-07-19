@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -37,6 +38,7 @@ class AppAuthTests(unittest.TestCase):
                 warning=Mock(),
                 title=Mock(),
                 markdown=Mock(),
+                html=Mock(),
                 caption=Mock(),
                 sidebar=SimpleNamespace(
                     caption=Mock(),
@@ -79,7 +81,9 @@ class AppAuthTests(unittest.TestCase):
             url = auth.start_google_sign_in(settings)
 
         self.assertEqual(url, "https://example.com/auth")
-        self.assertEqual(auth._google_oauth_pending_sessions["oauth-state"], "verifier")
+        self.assertEqual(
+            auth._google_oauth_pending_sessions["oauth-state"][0], "verifier"
+        )
         build_url.assert_called_once_with(
             client_id="client-id",
             redirect_uri="http://localhost:8501/",
@@ -88,7 +92,7 @@ class AppAuthTests(unittest.TestCase):
         )
 
     def test_consume_google_callback_uses_pending_session_after_redirect(self) -> None:
-        auth._google_oauth_pending_sessions["oauth-state"] = "verifier"
+        auth._google_oauth_pending_sessions["oauth-state"] = ("verifier", time.time())
 
         settings = SimpleNamespace(
             google_oauth_client_id="client-id",
@@ -101,6 +105,7 @@ class AppAuthTests(unittest.TestCase):
             name="You",
             picture=None,
             subject="subject-123",
+            email_verified=True,
         )
 
         with patch.object(
