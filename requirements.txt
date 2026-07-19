@@ -4,6 +4,6 @@ plotly>=5.22.0
 psycopg[binary]>=3.2.1
 requests>=2.32.3
 scikit-learn>=1.5.1
-streamlit>=1.37.0
+streamlit>=1.41.0
 python-dotenv>=1.0.1
 tomli>=2.0.1; python_version < '3.11'
