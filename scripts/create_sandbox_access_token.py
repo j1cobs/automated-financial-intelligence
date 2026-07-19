@@ -96,6 +96,11 @@ def main() -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--append", action="store_true", help="Append the token to the .env file")
     parser.add_argument("--env-file", default=".env", help="Path to .env file to update")
+    parser.add_argument(
+        "--print-token",
+        action="store_true",
+        help="Print the full access token to stdout (only needed for manual copy without --append)",
+    )
     args = parser.parse_args()
 
     client_id = os.environ.get("PLAID_CLIENT_ID")
@@ -112,14 +117,20 @@ def main() -> int:
         print("ERROR: Plaid API request failed:", exc)
         return 3
 
-    print("Created access_token:", access_token)
-    print()
-    print("Add this to your .env file (or use --append):")
-    print(f"PLAID_ACCESS_TOKENS={access_token}")
+    if args.print_token:
+        print("Created access_token:", access_token)
+        print()
+        print("Add this to your .env file (or use --append):")
+        print(f"PLAID_ACCESS_TOKENS={access_token}")
+    else:
+        print(f"Created access_token: ...{access_token[-6:]}")
+        if not args.append:
+            print("Re-run with --append to write the full token to .env, or add --print-token to print it.")
 
     if args.append:
         update_env_file(args.env_file, access_token)
         print(f"Appended token to {args.env_file}")
+        print(f"NOTE: {args.env_file} now holds a live credential. If it is ever exposed, rotate it.")
 
     return 0
 
