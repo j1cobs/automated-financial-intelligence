@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import logging
 import pathlib
 from collections.abc import Iterable
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -11,14 +13,45 @@ import psycopg
 
 LOGGER = logging.getLogger(__name__)
 
+_AMOUNT_QUANTUM = Decimal("0.01")  # matches transactions.amount NUMERIC(12, 2)
+
+
+def _canonical_amount(value: Any) -> str:
+    """Render an amount as a fixed 2-dp string regardless of input type.
+
+    float 100.0, Decimal("100.00"), int 100 and "100" must all produce "100.00" —
+    the hash must not change depending on whether a row came from the ingestor
+    (float) or was read back from the NUMERIC column (Decimal).
+    """
+    if value is None:
+        return ""
+    try:
+        quantized = Decimal(str(value)).quantize(_AMOUNT_QUANTUM, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError):
+        return str(value)
+    if quantized == 0:
+        quantized = abs(quantized)  # collapse Decimal("-0.00") onto "0.00"
+    return f"{quantized:.2f}"
+
+
+def _canonical_date(value: Any) -> str:
+    """Render a date as YYYY-MM-DD regardless of date / datetime / Timestamp / str input."""
+    if value is None:
+        return ""
+    if isinstance(value, dt.datetime):  # covers pd.Timestamp (a datetime subclass)
+        return value.date().isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return str(value)[:10]  # ISO-ish strings: "2026-07-01 00:00:00" -> "2026-07-01"
+
 
 def build_transaction_hash(transaction: dict[str, Any]) -> str:
     identity = "|".join(
         [
             str(transaction.get("account_key", "")),
-            str(transaction.get("date", "")),
+            _canonical_date(transaction.get("date", "")),
             str(transaction.get("description", "")),
-            str(transaction.get("amount", "")),
+            _canonical_amount(transaction.get("amount", "")),
         ]
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
@@ -207,12 +240,21 @@ class DatabaseClient:
 
     def rehash_transactions(self) -> tuple[int, int]:
         """Recompute transaction_hash for every row using the current build_transaction_hash
-        formula (account_key-based). Needed once after merge_account calls, since rows
-        inserted before this fix hashed on the fragile account_name field. Two existing rows
-        that turn out to collide under the new formula (the same real transaction, inserted
-        twice under different account_keys) are deduplicated: whichever row already carries
-        the correct new-formula hash survives (falling back to the lowest id if neither does),
-        so it needs no UPDATE.
+        formula (account_key-based, with type-canonicalized amount/date). Needed once after
+        merge_account calls, since rows inserted before this fix hashed on the fragile
+        account_name field. Also needed after the amount/date canonicalization fix (2026-07-19):
+        build_transaction_hash previously stringified amount/date with a bare str(), so the
+        same transaction hashed differently depending on whether it came from the pipeline
+        (float amount, e.g. "100.0") or was read back from Postgres (Decimal amount from the
+        NUMERIC column, e.g. "100.00") — every pipeline run after a rehash therefore inserted a
+        fresh duplicate instead of updating the existing row. This is the second sanctioned
+        change to the hash formula (see Phase 2.7 in PLAN.md for the first); per that amendment,
+        any future change to the hash inputs must ship together with a recompute-and-dedupe
+        method like this one, never a silent formula swap. Two existing rows that turn out to
+        collide under the new formula (the same real transaction, inserted twice under
+        different account_keys or different amount/date representations) are deduplicated:
+        whichever row already carries the correct new-formula hash survives (falling back to
+        the lowest id if neither does), so it needs no UPDATE.
 
         Two passes are required: the UNIQUE constraint on transaction_hash is enforced against
         the live table, not an in-memory "seen" set, so a single ORDER BY id pass can try to

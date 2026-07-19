@@ -114,10 +114,31 @@ def main() -> None:
     parser.add_argument(
         "--apply", action="store_true", help="Perform the merge and rehash (default: dry run)"
     )
+    parser.add_argument(
+        "--rehash-only",
+        action="store_true",
+        help=(
+            "Skip account grouping/merging and only run rehash_transactions() — use this "
+            "when accounts are already clean but transaction_hash values need recomputing "
+            "under the current build_transaction_hash formula (e.g. after a hash-formula "
+            "fix). Implies --apply; writes are always performed."
+        ),
+    )
     args = parser.parse_args()
 
     settings = load_settings()
     database = DatabaseClient(settings.database_url)
+
+    if args.rehash_only:
+        LOGGER.info("Rehashing transactions under the current hash formula...")
+        rehashed, deleted = database.rehash_transactions()
+        LOGGER.info(
+            "Rehash complete: %d transaction_hash values updated, %d duplicate transactions removed.",
+            rehashed,
+            deleted,
+        )
+        return
+
     accounts = _fetch_accounts(settings.database_url)
     groups = _group_duplicates(accounts)
 
