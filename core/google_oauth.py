@@ -20,6 +20,7 @@ class GoogleIdentity:
     name: str | None
     picture: str | None
     subject: str
+    email_verified: bool
 
 
 def generate_pkce_pair() -> tuple[str, str]:
@@ -41,7 +42,6 @@ def build_authorization_url(
             "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": "openid email profile",
-            "access_type": "offline",
             "prompt": "select_account",
             "state": state,
             "code_challenge": code_challenge,
@@ -88,6 +88,7 @@ def fetch_userinfo(access_token: str) -> GoogleIdentity:
         name=payload.get("name"),
         picture=payload.get("picture"),
         subject=str(payload.get("sub", "")),
+        email_verified=payload.get("email_verified") in (True, "true"),
     )
 
 
@@ -95,7 +96,7 @@ def is_authorized_identity(
     identity: GoogleIdentity,
     allowed_emails: list[str],
 ) -> bool:
-    if not identity.email:
+    if not identity.email or not identity.email_verified:
         return False
 
     return identity.email in allowed_emails
