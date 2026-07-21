@@ -1,8 +1,10 @@
 # Publish-Readiness + Dashboard Expansion Plan
 
 > Working plan to make this repo publishable on GitHub (interview showcase + self-host template) **and** expand the dashboard with meaningful financial insights.
-> Status: **not started** — tick checkboxes as work lands. Safe to delete once all phases complete.
-> Implement phases in order. Phase 3 (dashboard) is the largest; it has strict internal ordering.
+> Status: **in progress** — tick checkboxes as work lands. Safe to delete once all phases complete.
+> Phase numbers reflect the order things were *designed*, not the order they should now be *done* — see
+> "Where things stand" below for the current ranking. Phase 3 (dashboard) is the largest; it has strict
+> internal ordering.
 >
 > **Decision (2026-07-07): ingestion is Plaid-only.** Phase 2 deletes the CSV ingestor and everything that
 > served it. The zero-credential demo path is a **DB seed script** that writes curated sample data directly
@@ -14,6 +16,37 @@
 > amendments in Phases 0, 1f (lockfile), 4 (docs), and 5 (CI). Phase 2.5, Phase 5, and 1f must all land
 > before the `dev → main` publish merge — the dashboard is deployed on the public internet (mobile sign-in
 > for two allowlisted users), so internet-facing posture is not optional.
+
+---
+
+## Where things stand (updated 2026-07-20)
+
+**Complete:** Phases 1, 2, 2.5, 2.6, 2.7, 2.8, 3 (3a–3s, all), 4, 5.
+**Partial:** Phase 0 (credential rotations done; three owner actions left), Phase 6 (only
+`tests/test_db_upsert_counts.py` exists, covering part of 6a).
+**Not started:** Phases 8, 9, 10. **Deferred by choice:** Phase 7 (ML), Appendix A.
+
+Phase 2.5 closing (its last item, 2.5h, landed with Phase 4) means **no code-side publish blocker remains**.
+What is left before `dev → main` is owner actions and a quality gate, not features.
+
+### Recommended order of work
+
+Ranked by what unblocks the most, not by phase number.
+
+| # | Work | Why here | Effort |
+|---|---|---|---|
+| 1 | **Phase 10a** — root `streamlit_app.py` | Hard prerequisite for *any* deploy, and fixes a latent import bug that only hides behind the local editable install. Tiny change, unblocks all of Phase 10. | ~10 min |
+| 2 | **Phase 8** — ruff + black + review checklist | The stated pre-merge gate, and cheapest to fix *before* code is public. Catches formatting drift across the large Phase 3 surface. | Small |
+| 3 | **Phase 0** — merge `dev` → `main`, populate GitHub Secrets | One merge activates the Actions cron *and* gives SCC a stable branch to track (constraints 11, 21). | Owner action |
+| 4 | **Phase 10b–10i** — deploy to SCC, register HTTPS redirect URI | Produces the public URL, which is the only way to close Phase 0's last checkbox. | Medium |
+| 5 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists, so this is what makes the deploy actually useful (constraint 22). | Large |
+| 6 | **Phase 6** — test coverage expansion | Not a functional blocker (33 tests pass, CI green), but coverage is credibility for an interview showcase. Can proceed in parallel with anything above. | Medium |
+| 7 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
+| 8 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
+
+**What changed in this ranking:** Phase 10 is new and jumps near the top because 10a is both trivial and
+blocking. Phase 8 moved ahead of the merge because it is the gate for that merge. Phase 6 dropped below the
+deploy work — it improves confidence but blocks nothing, and CI is already green.
 
 ---
 
@@ -124,7 +157,7 @@ name = "automated-financial-intelligence"
 version = "0.1.0"
 description = "Modular personal-finance platform: ingest → classify → persist → dashboard"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dynamic = ["dependencies"]
 
@@ -332,6 +365,11 @@ No init SQL mount needed — `ensure_schema()` runs the migration DDL at runtime
 > tests (`test_google_oauth.py`, `test_app_auth.py`) updated for the new `GoogleIdentity.email_verified`
 > field and tuple-valued pending-session store; full suite passes. **2.5h is a docs-only decision**, still
 > to be written up in the README (Phase 4a).
+>
+> **Update (2026-07-20): Phase 2.5 is now complete.** 2.5h landed with Phase 4 — the encryption-at-rest
+> posture (managed-provider disk encryption + enforced TLS; application-level column encryption considered
+> and deliberately rejected) is documented in the README's Security section. This clears Phase 2.5 as a
+> publish blocker; the remaining blockers are the Phase 0 owner actions.
 
 Findings from the 2026-07-07 security review of the live code. What is already sound and needs **no** work:
 SQL is fully parameterized everywhere (`database/db.py` uses `%s`; dashboard filters are pandas-side — zero
@@ -1733,7 +1771,7 @@ Structure (link to `docs/` for depth; keep each section skimmable):
 > Modular personal-finance platform: ingest bank transactions → classify with ML →
 > persist in PostgreSQL → explore in a secure Streamlit dashboard. Built for self-hosting.
 
-[CI badge] [License badge] [Python 3.11+ badge]
+[CI badge] [License badge] [Python 3.12+ badge]
 
 ## Screenshots
 <!-- Capture after running on sample data -->
@@ -1761,7 +1799,7 @@ Key design decisions (interview talking points):
 
 ## Quickstart (local with docker — no Plaid account needed)
 `docker compose up -d` → `python scripts/seed_sample_data.py` → `streamlit run app/streamlit_app.py`
-Python 3.11+ required. Run all commands from repo root. Plaid credentials are only needed to ingest real data via `python main.py`.
+Python 3.12+ required. Run all commands from repo root. Plaid credentials are only needed to ingest real data via `python main.py`.
 
 ## Configuration reference
 [Table from core/config.py — ONLY real vars, grouped]
@@ -1862,8 +1900,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@<full-commit-SHA>  # vX.Y.Z — resolve latest release SHA at implementation time
       - uses: actions/setup-python@<full-commit-SHA>  # vX.Y.Z — resolve latest release SHA at implementation time
@@ -2312,6 +2351,152 @@ tall, and every filter change costs open → scroll → change → close.
 
 ---
 
+## Phase 10 — Free hosting: dashboard on Streamlit Community Cloud
+
+**Question that prompted this (2026-07-20):** can the dashboard *and* the pipeline both be hosted on GitHub,
+for free, in one place?
+
+**Answer: not entirely, for a structural reason.** GitHub Pages serves static files only — it cannot run a
+Python process or hold the WebSocket connection Streamlit depends on. No configuration changes that. GitHub
+Actions *can* run the pipeline, and already does (Phase 5). So the split is:
+
+| Component | Runs on | Cost |
+|---|---|---|
+| Code, issues, CI | GitHub | Free |
+| Daily pipeline (`main.py`) | GitHub Actions (`daily-finance-pipeline.yml`) | Free |
+| Dashboard (Streamlit) | Streamlit Community Cloud (SCC) | Free |
+| Postgres | Supabase / Neon (already in use) | Free tier |
+
+"One place" still holds where it matters: GitHub stays the single source of truth, and SCC deploys straight
+from this repo, auto-redeploying on every push to the tracked branch. Nothing is deployed by hand.
+
+**Blocker found during research (2026-07-20).** `app/streamlit_app.py:15-17` does `from core.config import
+...` and `from app.auth import ...`. That works locally *only* because the project is installed editable
+(`__editable__.automated_financial_intelligence-0.1.0.pth` in the venv's site-packages). Streamlit's
+launcher (`streamlit/web/bootstrap.py:59`) runs `sys.path.insert(0, os.path.dirname(main_script_path))` — it
+adds the **script's own directory**, not the repo root. On SCC there is no editable install, so `app/` lands
+on `sys.path`, `core` is not importable, and the app fails at import. This must be fixed regardless of host,
+and it is why the commented-out `sys.path` block at `app/streamlit_app.py:5-11` exists.
+
+### 10a. Root-level entry point (the blocker)
+
+Create `streamlit_app.py` at the **repo root** — also SCC's conventional default entrypoint filename:
+
+```python
+from __future__ import annotations
+
+from app.streamlit_app import main
+
+if __name__ == "__main__":
+    main()
+```
+
+Because the entry script now sits at the repo root, Streamlit inserts the repo root into `sys.path`, and
+`core` / `app` / `database` import normally with no `sys.path` manipulation anywhere. `app/streamlit_app.py`
+keeps `st.set_page_config()` at module scope — it runs on import, before any other Streamlit call, which is
+required.
+
+Same commit: delete the dead commented-out `sys.path` block at `app/streamlit_app.py:5-11`, and update the
+run command to `streamlit run streamlit_app.py` in `README.md`, `CONTRIBUTING.md`, and `CLAUDE.md`.
+
+### 10b. Dependency file and Python version on SCC
+
+No file changes needed. SCC selects **one** dependency file, in priority order: `uv.lock` → `Pipfile` →
+`environment.yml` → `requirements.txt` → `pyproject.toml`. This repo has `requirements.txt` and
+`pyproject.toml`, so `requirements.txt` wins — the desired outcome. `requirements.lock` is **not** in that
+list and is ignored.
+
+Record the consequence in `docs/deployment.md`: CI and the daily pipeline install from the hash-locked
+`requirements.lock` (`--require-hashes`, Phase 1f), but SCC installs the unpinned `>=` floors in
+`requirements.txt`. The dashboard process holds `DATABASE_URL` and the OAuth client secret, so this is the
+one place Phase 1f's supply-chain guarantee does not reach. Accepted for now; revisit if SCC adds lockfile
+support.
+
+Pin the interpreter in SCC's *Advanced settings* to **3.12** (inside the CI matrix; `pyproject.toml`
+requires `>=3.12`).
+
+### 10c. Secrets on SCC — no code change required
+
+`core/config.py::_load_secrets_file` already reads `.streamlit/secrets.toml`, which is exactly what SCC's
+secrets editor materializes. `_read_value` precedence is env → secrets → default, and SCC sets no env vars,
+so the TOML is used directly. This is an existing-design win, not new work.
+
+Keys to paste into SCC → *Settings → Secrets* (values copied by the owner from their own `.env`):
+
+```toml
+DATABASE_URL = "..."
+GOOGLE_OAUTH_CLIENT_ID = "..."
+GOOGLE_OAUTH_CLIENT_SECRET = "..."
+GOOGLE_OAUTH_REDIRECT_URI = "https://<your-app>.streamlit.app/"
+GOOGLE_ALLOWED_EMAILS = "email1@gmail.com,email2@gmail.com"
+```
+
+No `PLAID_*` key belongs here — the dashboard never ingests, `load_settings()` treats Plaid as optional, and
+only `pipeline/runner.py::_build_ingestor` enforces it. Plaid credentials live in GitHub Secrets (Phase 5)
+only. `.streamlit/secrets.toml` is already gitignored (`.gitignore:227`).
+
+### 10d. OAuth redirect URI — closes the outstanding Phase 0 item
+
+No code change: `app/auth.py:82,105` already pass `settings.google_oauth_redirect_uri` straight through.
+There is a deliberate chicken-and-egg — the URL does not exist until the first deploy — so the order is:
+deploy → read the assigned URL → register it in the Google console → set the secret → reboot the app.
+
+### 10e. Branch strategy
+
+Deploy SCC from **`main`**, not `dev`. `main` currently holds a single commit, so the existing Phase 0
+"merge `dev` → `main`" item is a prerequisite. Merging serves both needs at once: it activates the Actions
+cron (which only schedules from the default branch) and gives SCC a stable branch to track.
+
+### 10f. Docs
+
+- `README.md` — add the live app URL and a "Deployed on Streamlit Community Cloud" note under Quickstart;
+  update the run command to `streamlit run streamlit_app.py`.
+- `docs/deployment.md` — replace the short "Dashboard" paragraph with the full SCC walkthrough, the
+  dependency-file caveat from 10b, and the caveats below.
+
+### 10g. Caveats to document
+
+- **Idle sleep.** SCC hibernates inactive apps; the first visit after a while takes ~30s to wake.
+- **Sign-in after a restart.** The PKCE verifier lives in a module-global dict (`app/auth.py:17`,
+  deliberately — see ordering constraint 14). If SCC restarts the app between redirect-out and
+  redirect-back, sign-in fails with "session expired" and a retry fixes it. Already described in
+  `docs/setup-google-oauth.md`.
+- **Region.** SCC runs in US datacenters only. Supabase/Neon are reachable over the public internet and TLS
+  is enforced by `core/config.py::enforce_tls`, so no change is needed — but the database must not be
+  IP-allowlisted to a home address.
+
+### 10h. Owner actions (manual; no code)
+
+1. Merge `dev` → `main` and push (Phase 0 item; prerequisite for both SCC and the cron).
+2. At **share.streamlit.io**, sign in with the GitHub account owning the repo.
+3. *Create app* → repo `j1cobs/automated-financial-intelligence`, branch `main`, main file path
+   `streamlit_app.py`. Under *Advanced settings*, set Python to **3.12**.
+4. Choose the subdomain — this fixes the URL as `https://<subdomain>.streamlit.app/`.
+5. Deploy. **First boot will start but sign-in will fail** — expected; the redirect URI is not registered
+   yet.
+6. Google Cloud Console → *APIs & Services → Credentials → OAuth client* → add
+   `https://<subdomain>.streamlit.app/` to *Authorized redirect URIs*, keeping `http://localhost:8501/` as a
+   second entry for local dev. **The trailing slash must match exactly.**
+7. SCC → *Settings → Secrets* → paste the 10c TOML with `GOOGLE_OAUTH_REDIRECT_URI` set to that same URL.
+8. Reboot the app from the SCC menu so it picks up the new secrets.
+9. Tick the Phase 0 HTTPS-redirect-URI checkbox.
+
+### 10i. Verification
+
+1. `streamlit run streamlit_app.py` from the repo root works locally.
+2. Prove the entry-point fix is real and not masked by the editable install: in a scratch venv without
+   `pip install -e .`, `streamlit run streamlit_app.py` must still start. (`streamlit run
+   app/streamlit_app.py` is expected to fail with `ModuleNotFoundError: core` — that is the bug being fixed.)
+3. `python -m unittest discover -s tests -v` still green — this phase adds no logic.
+4. Desktop: the `.streamlit.app` URL renders the sign-in page, "Continue with Google" navigates in the
+   **same tab** (Phase 2.6), an allowlisted account reaches the dashboard, a non-allowlisted one is refused.
+5. Mobile: same URL, both allowlisted accounts — this is the case the HTTPS redirect URI exists for, and it
+   re-runs global verification item 15.
+6. The dashboard shows the same transactions the pipeline last wrote.
+7. Push a trivial commit to `main` → SCC auto-redeploys.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
@@ -2423,19 +2608,29 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 18. Phase 9 (mobile) lands **after** Phase 3 — it restyles the very sections 3i/3j/3k/3l assemble, so doing it
     earlier means restyling twice. It is **not** a publish blocker. Internally, 9a (the CSS mechanism) must
     land before 9b/9e/9f, which all write rules into `app/static/mobile.css`.
+19. Phase 10a (root `streamlit_app.py`) is a **hard prerequisite** for any deploy to Streamlit Community
+    Cloud — without it the app cannot import `core` on a host that has no editable install. It is
+    independent of Phases 6/8/9 and can land at any time.
+20. Phase 10's deploy sequence is order-locked by a chicken-and-egg: the app URL does not exist until the
+    first deploy, so the Google redirect URI cannot be registered before it. Deploy → read URL → register in
+    the Google console → set `GOOGLE_OAUTH_REDIRECT_URI` → reboot. Expect the first boot's sign-in to fail.
+21. Phase 10 requires the `dev → main` merge first (10e) — SCC should track a stable branch, and the same
+    merge is what activates the Actions cron (constraint 11). One merge satisfies both.
+22. Phase 9 (mobile) is best done **before** Phase 10's deploy is shared around, since mobile sign-in is the
+    main reason the public HTTPS URL exists — but it is not a technical blocker, and 10 can ship first.
 
 ---
 
 ## Verification
 
-1. `python -m unittest discover -s tests -v` — all green on Python 3.11 and 3.12.
+1. `python -m unittest discover -s tests -v` — all green on Python 3.12 and 3.13.
 2. `docker compose up -d && python scripts/seed_sample_data.py` — no errors; rows in DB with owners, categories, and 3 outlier flags. **No Plaid env vars set** — proves the zero-credential demo path.
 3. Run `python scripts/seed_sample_data.py` a second time (same day) — row count unchanged (idempotency via `transaction_hash`).
 4. `python main.py` with no Plaid creds → fails fast with a clear `ConfigError` naming the missing Plaid vars (pipeline-level enforcement, not a stack trace from deep inside PlaidIngestor).
 5. `streamlit run app/streamlit_app.py` — sign in with Google; all 4 tabs render; Overview/Net worth/Cash flow/Budget sections populate with categorized data; Transactions tab shows ledger with category dropdown populated from DB canonical list; category edit persists on page refresh; anomaly section shows the 3 seeded outliers.
 6. Filter the sidebar to a past month → Budget tab shows that month's spending; "Projected EOM" is replaced by "Actual".
 7. `pip install -e .` in a fresh venv → same deps as `pip install -r requirements.txt`.
-8. Push branch → CI runs green on 3.11 + 3.12.
+8. Push branch → CI runs green on 3.12 + 3.13.
 9. `git grep -iE "csv_paths|ingestion_source|csv_ingestor"` → no matches outside PLAN.md (CSV fully removed).
 10. `git grep -E "jacos|jacosse|lapointe|gmail\.com|C:\\\\Users"` → no matches.
 11. TLS enforcement: `python -c "from core.config import enforce_tls; print(enforce_tls('postgresql://u:p@db.example.com/x'))"` → ends with `sslmode=require`; same call with `localhost` → unchanged.
