@@ -1836,6 +1836,18 @@ Dev setup → test command → layer conventions (no personal data; config only 
 
 ## Phase 5 — CI / workflows
 
+> **Status (2026-07-20): implemented.** `.github/workflows/ci.yml` created per 5a, with `actions/checkout`
+> and `actions/setup-python` pinned to real full-commit SHAs (v7.0.1 and v7.0.0 respectively, resolved via
+> the GitHub API at implementation time, not the placeholder `<full-commit-SHA>` text in the spec below).
+> `.github/workflows/daily-finance-pipeline.yml` updated per 5b: header comment added, `ALLOWED_EMAILS` /
+> `DASHBOARD_PASSWORD` / `CSV_PATHS` / `INGESTION_SOURCE` / `LABELED_DATASET_PATH` removed from `env`,
+> `PLAID_ACCESS_TOKEN_OWNERS` added, both actions pinned to the same SHAs as 5a, install switched to
+> `pip install --require-hashes -r requirements.lock`, `timeout-minutes: 15` added to the job, and a
+> `concurrency` guard (`group: daily-pipeline`) added at the workflow level. `MODEL_PATH` was left in `env`
+> since the spec only calls out `CSV_PATHS`/`INGESTION_SOURCE`/`LABELED_DATASET_PATH` for removal. No secret
+> values were read or written as part of this work — Secret population on GitHub is a manual Phase 0 step
+> for the repo owner.
+
 ### 5a. Create `.github/workflows/ci.yml`
 
 ```yaml
