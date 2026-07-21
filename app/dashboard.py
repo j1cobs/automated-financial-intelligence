@@ -84,6 +84,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "col_desc": "Description",
         "col_amount": "Amount ($)",
         "col_cat": "Category",
+        "col_recurring": "Recurring",
         "col_score": "Outlier score",
         "no_anomalies": "No anomalies detected in the selected period.",
         # Section 5
@@ -194,6 +195,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "col_desc": "Description",
         "col_amount": "Montant ($)",
         "col_cat": "Catégorie",
+        "col_recurring": "Récurrent",
         "col_score": "Score d'anomalie",
         "no_anomalies": "Aucune anomalie détectée dans la période sélectionnée.",
         "s5_heading": "Transactions",
@@ -263,7 +265,8 @@ def load_financial_data(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         t.amount::double precision AS amount,
         COALESCE(t.user_category, t.category) AS category,
         t.outlier_score,
-        t.is_outlier
+        t.is_outlier,
+        t.is_recurring
     FROM transactions t
     JOIN accounts a ON t.account_key = a.account_key
     ORDER BY t.transaction_date DESC
@@ -1074,6 +1077,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
             "description",
             "adjusted_amount",
             "category",
+            "is_recurring",
         ]
     ].copy()
     display.columns = [
@@ -1084,6 +1088,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         T["col_desc"],
         T["col_amount"],
         T["col_cat"],
+        T["col_recurring"],
     ]
 
     editor_key = "ledger_editor"
@@ -1095,6 +1100,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
             T["col_cat"]: st.column_config.SelectboxColumn(
                 T["col_cat"], options=all_cats, required=False
             ),
+            T["col_recurring"]: st.column_config.CheckboxColumn(T["col_recurring"]),
         },
         disabled=[
             T["col_date"], T["col_owner"], T["col_account"],
@@ -1107,12 +1113,15 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
     # Only act on rows the user actually changed this render cycle
     editor_state = st.session_state.get(editor_key, {})
     for row_idx_str, col_changes in editor_state.get("edited_rows", {}).items():
+        row_idx = int(row_idx_str)
+        transaction_hash = display.iloc[row_idx]["hash"]
         if T["col_cat"] in col_changes:
-            row_idx = int(row_idx_str)
             new_cat = col_changes[T["col_cat"]]
             if new_cat:
-                transaction_hash = display.iloc[row_idx]["hash"]
                 db.update_transaction_category(str(transaction_hash), str(new_cat))
+        if T["col_recurring"] in col_changes:
+            new_recurring = col_changes[T["col_recurring"]]
+            db.update_transaction_recurring(str(transaction_hash), bool(new_recurring))
 
 
 def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: str) -> None:

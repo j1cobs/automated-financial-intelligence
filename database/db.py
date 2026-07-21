@@ -238,6 +238,11 @@ class DatabaseClient:
                 )
             conn.commit()
 
+    def update_transaction_recurring(self, transaction_hash: str, is_recurring: bool) -> None:
+        """Set is_recurring for a transaction (survives pipeline re-runs)."""
+        sql = "UPDATE transactions SET is_recurring = %s, updated_at = NOW() WHERE transaction_hash = %s"
+        self._execute_many(sql, [(is_recurring, transaction_hash)])
+
     def rehash_transactions(self) -> tuple[int, int]:
         """Recompute transaction_hash for every row using the current build_transaction_hash
         formula (account_key-based, with type-canonicalized amount/date). Needed once after
@@ -317,7 +322,10 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
-    def upsert_transactions(self, frame: pd.DataFrame) -> None:
+    def upsert_transactions(self, frame: pd.DataFrame) -> tuple[int, int]:
+        """Insert or refresh transactions. Returns (inserted, updated) counts, where
+        "updated" means a transaction_hash that already existed in the table before this
+        call (a category/outlier refresh), not a newly-persisted transaction."""
         sql = """
         INSERT INTO transactions (
             external_id,
@@ -338,8 +346,12 @@ class DatabaseClient:
             updated_at = NOW()
         """
         rows = []
+        seen_hashes: set[str] = set()
         for record in frame.to_dict("records"):
             transaction_hash = build_transaction_hash(record)
+            if transaction_hash in seen_hashes:
+                continue
+            seen_hashes.add(transaction_hash)
             account_key = record.get("account_key") or f"{record.get('source', 'unknown')}:{record.get('account_name', 'unknown')}"
             rows.append(
                 (
@@ -356,6 +368,23 @@ class DatabaseClient:
                 )
             )
 
-        if rows:
-            self._execute_many(sql, rows)
-            LOGGER.info("Upserted %s transactions", len(rows))
+        if not rows:
+            return 0, 0
+
+        with psycopg.connect(self.database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT transaction_hash FROM transactions WHERE transaction_hash = ANY(%s)",
+                    (list(seen_hashes),),
+                )
+                existing_hashes = {row[0] for row in cursor.fetchall()}
+                cursor.executemany(sql, rows)
+            connection.commit()
+
+        updated = len(existing_hashes)
+        inserted = len(rows) - updated
+        LOGGER.info(
+            "Upserted %s transactions (%s new, %s already present)",
+            len(rows), inserted, updated,
+        )
+        return inserted, updated
