@@ -226,9 +226,12 @@ def main() -> None:
     accounts, frame = generate(days=args.days)
     db.upsert_plaid_accounts(accounts)
     db.upsert_categories(frame["category"].dropna().unique().tolist())
-    db.upsert_transactions(frame)
+    inserted, updated = db.upsert_transactions(frame)
 
-    print(f"Seeded {len(accounts)} accounts and {len(frame)} transactions.")
+    print(
+        f"Seeded {len(accounts)} accounts and {len(frame)} transactions "
+        f"({inserted} new, {updated} already present)."
+    )
 
 
 if __name__ == "__main__":

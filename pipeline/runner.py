@@ -55,6 +55,9 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
         account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
 
+    LOGGER.info(
+        "Fetching transactions from %s to %s (%s days)", start_date, end_date, days_back
+    )
     transactions = ingestor.fetch_transactions(start_date=start_date, end_date=end_date)
     if transactions.empty:
         LOGGER.info("No transactions fetched. Pipeline complete.")
@@ -68,8 +71,8 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
     transactions = models.outlier_detector.score(transactions)
 
     database.upsert_categories(transactions["category"].dropna().astype(str).tolist())
-    database.upsert_transactions(transactions)
-    LOGGER.info("Pipeline completed successfully")
+    inserted, updated = database.upsert_transactions(transactions)
+    LOGGER.info("Pipeline completed: %s new transactions, %s already present", inserted, updated)
     return transactions
 
 

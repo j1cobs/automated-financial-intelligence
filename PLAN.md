@@ -21,14 +21,18 @@
 
 The local untracked `.env` holds **live production credentials**. Git history is verified clean but rotate as a precaution:
 
-- [ ] Rotate Supabase DB password; update local `.env` + GitHub Secrets.
-- [ ] Rotate Plaid production secret; re-issue all three access tokens.
-- [ ] Rotate (or recreate) the Google OAuth client secret.
+- [x] Rotate Supabase DB password; update local `.env` + GitHub Secrets.
+- [x] Rotate Plaid production secret; re-issue all three access tokens. Done 2026-07-17 — re-linking the
+  Item minted new `account_id`s for existing accounts, so `scripts/dedupe_accounts.py` was run (dry run,
+  then `--apply`) to merge the resulting duplicates (see Phase 2.7).
+- [x] Rotate (or recreate) the Google OAuth client secret.
 - [ ] Set the production Google OAuth redirect URI to the **HTTPS** public dashboard URL (mobile sign-in
   depends on it); keep `http://localhost:8501/` only as a second, dev-only redirect in the Google console.
-- [ ] Confirm `GOOGLE_ALLOWED_EMAILS` in production secrets lists exactly the two authorized addresses.
-- [ ] Confirm the managed Postgres (Supabase/Neon) tier has encryption at rest enabled (both do by default — verify).
-- [ ] At publish time: merge `dev` → `main`, populate GitHub Secrets (cron only runs from the default branch).
+- [x] Confirm `GOOGLE_ALLOWED_EMAILS` in production secrets lists exactly the two authorized addresses.
+- [x] Confirm the managed Postgres (Supabase/Neon) tier has encryption at rest enabled. **Confirmed** — all
+  customer data is encrypted at rest on the provider.
+- [ ] At publish time: merge `dev` → `main`, populate GitHub Secrets (cron only runs from the default
+  branch). **Not started.** Do this last, and only once the publish blockers below are actually true.
 - [ ] Capture dashboard screenshots on sample data for the README (leave placeholder section, don't block merge).
 
 ---
@@ -320,6 +324,15 @@ No init SQL mount needed — `ensure_schema()` runs the migration DDL at runtime
 
 ## Phase 2.5 — Security hardening (code) — PUBLISH BLOCKER
 
+> **Status (2026-07-18): 2.5a–2.5g implemented** — TLS enforcement (`core/config.py::enforce_tls`),
+> `email_verified` check + dropped offline `access_type` (`core/google_oauth.py`), bounded/TTL'd OAuth
+> pending-state store, generic user-facing errors with server-side logging (`app/streamlit_app.py`,
+> `app/auth.py`), `psycopg.OperationalError` handling in `pipeline/runner.py::main`, loopback-bound
+> `docker-compose.yml`, and masked Plaid token output in `scripts/create_sandbox_access_token.py`. Existing
+> tests (`test_google_oauth.py`, `test_app_auth.py`) updated for the new `GoogleIdentity.email_verified`
+> field and tuple-valued pending-session store; full suite passes. **2.5h is a docs-only decision**, still
+> to be written up in the README (Phase 4a).
+
 Findings from the 2026-07-07 security review of the live code. What is already sound and needs **no** work:
 SQL is fully parameterized everywhere (`database/db.py` uses `%s`; dashboard filters are pandas-side — zero
 injection surface); OAuth uses PKCE S256 + random `state` popped once; the email allowlist fails closed
@@ -477,15 +490,28 @@ plain Markdown — `st.markdown(f"[Continue with Google]({auth_url})")` (line 13
 tab; when Google redirects back to `redirect_uri`, that new tab becomes the signed-in app tab while the
 original tab is left behind — the two-tabs annoyance.
 
-**Fix**: render the link inside a real (unsanitized) HTML snippet via
-`streamlit.components.v1.html`, using `<a href="..." target="_top">`. `target="_top"` tells the browser to
-navigate the *top-level browsing context* (the actual tab), not the sandboxed iframe hosting the component —
-so the whole tab navigates to Google and back, with no second tab ever opening.
+**First attempt (2026-07-18, reverted — did not work)**: rendered the link via
+`streamlit.components.v1.html(...)` using `<a href="..." target="_top">`. This made the button
+*unresponsive* — clicking did nothing. Root cause, confirmed by reading the installed Streamlit frontend
+bundle (`streamlit/static/static/js/IFrameUtil.BaqCY7QW.js`): `components.v1.html()` renders inside a
+sandboxed `<iframe>` whose hardcoded sandbox attribute is
+`allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts allow-downloads`
+— it does **not** include `allow-top-navigation` / `allow-top-navigation-by-user-activation`, and
+`components.html()` has no parameter to add them. Per the HTML sandbox spec, an iframe missing that flag
+cannot navigate the top-level browsing context at all, by any means (click, script, form) — so
+`target="_top"` inside it is silently blocked by the browser.
+
+**Actual fix**: use `st.html()` instead (added in Streamlit 1.41.0). Its docstring states content is
+**not** iframed — it renders straight into the main app DOM via DOMPurify. Confirmed via the installed
+bundle (`streamlit/static/static/js/Html.xcp07OYh.js`) that its sanitizer only special-cases
+`target="_blank"` (adds `rel="noopener noreferrer"`) and does not touch other `target` values, so
+`target="_top"` passes through unmodified. Since the content isn't in an iframe to begin with, the click
+navigates the tab directly.
 
 ### File: `app/auth.py`
 
-1. Add imports: `html` (stdlib, for escaping the URL into an attribute) and
-   `streamlit.components.v1 as components`.
+1. Add import: `html` (stdlib, for escaping the URL into an attribute). No `streamlit.components.v1`
+   import needed — `st.html` is a top-level Streamlit function.
 2. Replace line 134:
    ```python
    st.markdown(f"[Continue with Google]({auth_url})")
@@ -493,28 +519,111 @@ so the whole tab navigates to Google and back, with no second tab ever opening.
    with:
    ```python
    safe_url = html.escape(auth_url)
-   components.html(
+   st.html(
        f'''
        <a href="{safe_url}" target="_top"
           style="display:inline-block;padding:0.5em 1em;background:#4285F4;color:white;
                  border-radius:4px;text-decoration:none;font-family:sans-serif;">
            Continue with Google
        </a>
-       ''',
-       height=50,
+       '''
    )
    ```
    Keep the existing `st.caption(...)` line below it as-is.
+
+### File: `requirements.txt`
+Bump `streamlit>=1.37.0` → `streamlit>=1.41.0` — `st.html` doesn't exist before that version.
 
 No changes needed to `core/google_oauth.py` or `consume_google_callback` — the redirect URI and query-param
 handling are unaffected; only how the *outbound* link is rendered changes.
 
 ### Verification
 - `streamlit run app/streamlit_app.py`, load the sign-in page, confirm the "Continue with Google" button
-  renders correctly (styling/height, no scrollbar clipping from the iframe).
+  renders correctly (no iframe box/scrollbar artifact).
 - Click it and confirm the browser navigates *within the same tab* to Google's consent screen (no new tab),
   and after granting consent, Google redirects back to the same tab and the dashboard loads signed in.
 - Sign out and sign in again to confirm the flow is stable on repeat.
+
+---
+
+## Phase 2.7 — Implemented (2026-07-17): account identity + post-rotation dedup
+
+**This phase documents work already shipped on `dev`**, done in response to the Phase 0 credential rotation
+— it wasn't planned ahead of time, but changes assumptions the rest of this plan makes, so it's recorded
+here rather than left undocumented.
+
+**Problem discovered during rotation**: re-issuing the Plaid access tokens re-links each Item, and Plaid
+mints a *new* `account_id` for every account on re-link — even though it's the same physical account. Since
+`account_key` was derived from `account_id`, this produced a second `accounts` row per real account, with
+its own parallel transaction history split off from the original.
+
+**What shipped:**
+- **`database/migrations/004_account_identity.sql`** — adds `persistent_account_id` (Plaid's stable
+  cross-relink identifier) and `mask` to `accounts`, with a unique index on `persistent_account_id`.
+- **`ingestion/plaid_ingestor.py`** — now captures `persistent_account_id` and `mask` from Plaid and folds
+  the mask into the display name (`"{name} (••••{mask})"`).
+- **`database/db.py`**:
+  - `build_transaction_hash` now hashes `account_key|date|description|amount` instead of
+    `account_name|date|description|amount` — `account_name` could collide across owners/accounts, and the
+    hash needed to key off something durable.
+  - New `merge_account(duplicate_key, canonical_key)` — reassigns a duplicate account's transactions onto
+    the canonical account_key, then deletes the duplicate `accounts` row.
+  - New `rehash_transactions()` — recomputes every row's `transaction_hash` under the new formula and
+    dedupes any rows that collide as a result (keeps the earliest row).
+- **`scripts/dedupe_accounts.py`** (new, one-off/on-demand) — groups existing accounts by
+  `persistent_account_id`, falling back to a `(mask, official_name, account_subtype, owner_name)` heuristic
+  for pre-`persistent_account_id` rows; merges each duplicate group via `merge_account`, then calls
+  `rehash_transactions()`. Dry-run by default; `--apply` performs the writes.
+
+**Status**: fully implemented and already run against production (`--apply`) as part of the 2026-07-17
+Plaid secret rotation (Phase 0).
+
+**Amendment to "Ordering constraints / risks" item 8** (below): the original rule — "never change
+`build_transaction_hash` inputs" — is superseded. This was the one sanctioned exception, and it shipped
+together with `rehash_transactions()` specifically so existing rows could migrate safely. Any *future*
+change to the hash inputs must ship the same way: a `DatabaseClient` method that recomputes and dedupes
+every existing row, never a silent formula swap.
+
+---
+
+## Phase 2.8 — Implemented (2026-07-19): transaction_hash type-independence fix
+
+**This phase documents work already shipped**, fixing a second, distinct duplication bug uncovered after
+Phase 2.7 landed: transactions kept duplicating on every pipeline run, even though accounts were already
+correctly merged. Root cause: `build_transaction_hash` (`database/db.py`) stringified `amount`/`date` with
+a bare `str()`. `upsert_transactions` feeds it a pipeline `float` (`str(100.0) == "100.0"`);
+`rehash_transactions` feeds it a Postgres `Decimal` read back from the `NUMERIC(12,2)` column
+(`str(Decimal("100.00")) == "100.00"`) — different strings, different hashes, for the *same* transaction.
+Since `dedupe_accounts.py --apply` ends with `rehash_transactions()`, every account-rotation cleanup left
+`transaction_hash` in the Decimal form; the next `python main.py` run then computed the float form for the
+same rows, found no `ON CONFLICT` match, and inserted an exact duplicate (differing only in
+`transaction_hash` and `created_at` — matching the reported symptom exactly).
+
+**What shipped:**
+- **`database/db.py`** — `build_transaction_hash` now routes `amount` through `_canonical_amount()`
+  (`Decimal(str(value)).quantize(Decimal("0.01"))`) and `date` through `_canonical_date()` (handles
+  `datetime.date`, `datetime.datetime`/`pd.Timestamp`, and ISO-ish strings uniformly), so the hash is
+  identical regardless of which call site's Python types produced it. This is the **second** sanctioned
+  change to the hash formula under the Phase 2.7 amendment above.
+- **`database/migrations/005_transaction_natural_key.sql`** — `CREATE UNIQUE INDEX
+  transactions_natural_key ON transactions (account_key, transaction_date, description, amount)`. Defence
+  in depth: Postgres now compares the natural key directly (`NUMERIC` to `NUMERIC`), so any *future*
+  hash-formatting drift raises a loud unique-violation instead of silently duplicating rows again.
+- **`tests/test_db_hash.py`** — added type-independence tests (`amount` as float/Decimal/int/str, `date` as
+  date/datetime/Timestamp/str) covering the exact values that diverged in production (`100`, `-2800`,
+  `12.5`), plus a differencing regression guard so canonicalization doesn't collapse genuinely distinct
+  transactions.
+- **`scripts/dedupe_accounts.py`** — added `--rehash-only`, which skips account grouping and calls
+  `database.rehash_transactions()` directly; the plain `--apply` path short-circuits on "no duplicate
+  accounts found" and never reaches the rehash once accounts are already clean, so this is now the correct
+  entry point for a hash-formula-only fix.
+
+No changes to `analytics/`, `app/dashboard.py`, or the ingestion layer — this was isolated to the hash
+formula and its DB-level backstop.
+
+**Status**: fully implemented — production cleanup (`python scripts/dedupe_accounts.py --rehash-only`) was
+run 2026-07-20, clearing pre-existing hash-formula duplicates before migration 005's unique index took
+effect. No further action needed for this phase.
 
 ---
 
@@ -522,7 +631,24 @@ handling are unaffected; only how the *outbound* link is rendered changes.
 
 Implement the steps in the lettered order below. They build on each other. Do not skip ahead.
 
+> **Status (2026-07-17): 3a–3n implemented on `dev`**, in `feat(dashboard): add tabs and overal better ux`
+> (commit `14072e9`). Verified against the code: `_classify_tx_type` (3a), the four new `DatabaseClient`
+> methods (3b), migrations 002/003 (3c), `ensure_schema` iterating all migration files (3d), the
+> `COALESCE(user_category, category)` + `transaction_hash` SELECT (3e), `render_dashboard(tx_df, acct_df,
+> database_url)` (3f), `_enrich_transactions` with the dead `return df` removed (3g), all four new
+> `_STRINGS` keys present in both `en`/`fr` (3h), `_section_overview` (3i), the savings-rate metric and
+> income-vs-expenses mom-bar addition in `_section_cash_flow` (3j), `_section_budget` (3k), inline category
+> editing in `_section_ledger` via the
+> `edited_rows` pattern (3l), anomalies inside the Transactions tab (3m), and the final tabbed
+> `render_dashboard` layout (3n) all match this plan's spec closely. **Update (2026-07-20): 3o, 3p, 3q, and
+> 3r are now all implemented** — see each section below for specifics (3q shipped its migration as `006_`,
+> not `005_`, since Phase 2.8 had already claimed `005_`). Phase 3 is complete.
+
 ### 3a. Fix `_classify_tx_type` in `app/dashboard.py`
+
+> **Superseded by Phase 3r** (below): the `_classify_tx_type` body shown here is no longer what ships —
+> credit-account refunds now net into `expense` instead of `income`, and a paired-transfer override was added.
+> See Phase 3r for the current rules.
 
 **Current problem** (line 194-208): NULL/unknown `account_type` defaults everything to "expense", including payroll deposits — income and net cash flow are wrong.
 
@@ -1427,10 +1553,14 @@ already existing, and on 3o (quick-range filter) having already changed those sa
 `render_dashboard`. It does not touch the Budget tab (3k) — budgets stay monthly-only by design, since a
 weekly budget limit isn't a meaningful personal-finance convention.
 
-### 3q. Recurring-transaction tagging — user-taggable `is_recurring` column
+### 3q. Recurring-transaction tagging — user-taggable `is_recurring` column — Implemented (2026-07-20)
 
-**PLANNING ONLY — do not implement.** Captures the shape of the feature so a later phase can build it
-without re-deriving the design. No code, migration, or UI change lands as part of writing this section.
+> **Status**: implemented as spec'd below, with one deviation — the migration shipped as
+> `database/migrations/006_recurring_transactions.sql`, not `005_...`, since `005_transaction_natural_key.sql`
+> (Phase 2.8) had already claimed that number. `update_transaction_recurring` was added to `database/db.py`,
+> `t.is_recurring` added to 3e's `tx_query`, and the ledger checkbox column + `edited_rows` handling added to
+> `_section_ledger`. `col_recurring` strings added to both `en`/`fr`. Existing tests
+> (`test_dashboard_classify.py`, `test_db_hash.py`) still pass unchanged.
 
 **Goal**: let the user manually flag a transaction as recurring (rent, subscriptions, payroll — anything
 that repeats month to month), the same way `user_category` (3b/3c) lets them manually override a category.
@@ -1482,6 +1612,104 @@ calling `db.update_transaction_recurring(transaction_hash, bool(new_value))`.
 detection, no "recurring transactions" summary view, and no interaction with the weekly/monthly metrics in
 3p — `is_recurring` is a taggable attribute only; consuming it in a chart or metric is a separate, later
 decision.
+
+---
+
+## Phase 3s — Implemented (2026-07-20): `upsert_transactions` returns insert/update counts
+
+**This phase documents work already shipped**, done outside the original plan — it wasn't spec'd ahead of
+time, but is recorded here (following the Phase 2.7/2.8/3r pattern) since it changes a shared method's
+signature.
+
+**Problem**: `upsert_transactions` previously returned `None` and logged only a flat row count
+(`"Upserted %s transactions"`), which conflates first-time inserts with no-op refreshes of rows already in
+the table (e.g. a category/outlier re-stamp on pipeline re-run). Neither the daily pipeline log nor the seed
+script's console output could distinguish "120 new transactions landed" from "120 already-seen rows got
+touched again."
+
+**What shipped:**
+- **`database/db.py::upsert_transactions`** — now returns `tuple[int, int]` (`inserted, updated`). Before
+  building the SQL rows, incoming records are deduped by `transaction_hash` within the batch itself (a
+  batch containing the same logical transaction twice — e.g. a script re-generating overlapping windows —
+  now counts and inserts it once, not twice). Before the `executemany` upsert, a `SELECT transaction_hash
+  FROM transactions WHERE transaction_hash = ANY(%s)` against the batch's hash set determines which hashes
+  already existed; `updated = len(existing_hashes)`, `inserted = len(rows) - updated`. Log line changed to
+  `"Upserted %s transactions (%s new, %s already present)"`.
+- **`pipeline/runner.py::run_pipeline`** — unpacks `inserted, updated = database.upsert_transactions(...)`;
+  final log line changed to `"Pipeline completed: %s new transactions, %s already present"`. Also added an
+  `INFO` log line before the Plaid fetch call (`"Fetching transactions from %s to %s (%s days)"`) for
+  visibility into the date window actually requested.
+- **`scripts/seed_sample_data.py::main`** — unpacks the same tuple; console output changed to `"Seeded N
+  accounts and M transactions (X new, Y already present)."`, making a same-day re-run's no-op behavior
+  visible instead of silent.
+- **`tests/test_db_upsert_counts.py`** (new) — covers: all-new batch against an empty table, all-updates on
+  a same-day rerun, a mixed batch, intra-batch duplicate rows counted/inserted once, and an empty input
+  frame short-circuiting before any DB connection is opened.
+
+**Note**: this satisfies part of Phase 6a's planned `tests/test_db_upserts.py` coverage
+(`test_upsert_transactions_*` cases) ahead of schedule, under a different filename/scope
+(`test_db_upsert_counts.py`, count-behavior only). Phase 6a's remaining cases (accounts, categories, budgets,
+`get_categories`, `ensure_schema` migration ordering) are still unimplemented — see Phase 6.
+
+---
+
+## Phase 3r — Implemented (2026-07-19): credit-account inflows are never income; pair-matched internal transfers
+
+**Problem**: `_classify_tx_type` (3a) produced two kinds of fake income. (1) A negative amount on a credit
+account matching `_REFUND_KEYWORDS` was classified `"income"` — a card inflow is almost always a payment from
+chequing, and even a genuine refund is a reversal of a purchase, not new money. (2) Every negative amount on a
+depository/investment account was `"income"`, including money moving from savings → chequing or the chequing
+leg of a card payment; the keyword rule only fired on outflows (`amount > 0`), so the two legs of one internal
+transfer classified inconsistently. Fixing (2) with keywords alone is wrong: an inbound "e-transfer"/"payment"
+on chequing is often money from *another person* — genuine income — so keyword matching can't tell the
+difference. The only reliable signal that money is moving inside the user's own accounts is that **both legs
+exist in the data**: an outflow on one account and an equal, opposite inflow on a different account within a
+few days.
+
+**What shipped:**
+- **`app/dashboard.py`** — new `_detect_internal_transfers(df)`, added above `_classify_tx_type`. Buckets rows
+  by `amount.abs().round(2)`, then within each bucket greedily pairs each outflow (`amount > 0`) with the
+  nearest-in-time unmatched inflow (`amount < 0`) on a *different* `account_name` within `_TRANSFER_MATCH_DAYS`
+  (5) days. Matching is one-to-one and consumes candidates as they're paired, so N identical outflows never
+  all claim the same inflow. An inflow with no matching outflow anywhere in the data is left alone.
+- **`_classify_tx_type` rewrite**: credit + negative + refund-keyword now maps to `"expense"` (was `"income"`)
+  — the refund's negative `adjusted_amount` nets against the purchase it reverses inside the same expense
+  bucket, rather than inflating income. Credit + negative + no refund keyword is unchanged (`"transfer"`, the
+  card-payment case). The `_detect_internal_transfers` mask is applied **last**, overriding every other rule,
+  so a paired chequing inflow flips from `income` to `transfer` on both legs while an unpaired inflow (money
+  from someone else) still counts as income. Net rule table:
+
+  | account_type | amount | condition | tx_type |
+  |---|---|---|---|
+  | depository / investment | `< 0` | — | income |
+  | depository / investment | `> 0` | payment keyword | transfer |
+  | depository / investment | `> 0` | otherwise | expense |
+  | credit | `< 0` | refund keyword | expense (nets against spend) |
+  | credit | `< 0` | otherwise | transfer |
+  | credit | `> 0` | — | expense |
+  | unknown/NULL | `< 0` | — | income |
+  | any | any | paired internal transfer | transfer (overrides all above) |
+
+- **`render_dashboard`** — moved the single `_enrich_transactions(tx)` call to run on the full unfiltered
+  frame *before* `_build_sidebar_filters`, instead of enriching the already-filtered `filtered`/
+  `all_time_filtered` frames. Pair matching needs to see both legs of a transfer regardless of which
+  owner/account the sidebar filters down to — enriching post-filter would silently turn a transfer back into
+  income if the other leg's account got filtered out. `_build_sidebar_filters` needed no change: it filters by
+  boolean mask and only drops its own `_month_key`/`_month_label` helper columns, so `adjusted_amount`/
+  `month`/`week`/`tx_type` pass through untouched.
+- **`tests/test_dashboard_classify.py`** (new) — covers: refund nets to expense (never income) on a credit
+  account; unlabelled and labelled credit-card payments stay transfer; unpaired chequing payroll/e-transfer
+  inflows stay income; paired cross-account legs (including the seed script's $350 card-payment pair) both
+  become transfer; same-account legs are not paired; out-of-window legs are not paired; one-to-one greediness
+  holds when multiple same-amount outflows compete for one inflow.
+
+**Known edge case, accepted as out of scope**: expense totals are computed as `abs(sum(...))` over each
+group (category/month/etc.), not per row, so refund netting is correct in aggregate — but if a category's
+refunds exceed its spend within the filtered period, the group sum goes negative and `abs()` renders it as
+positive spend for that category. Rare in practice; not worth restructuring every chart consumer for.
+
+**Amendment to 3a** (`PLAN.md:648-698`): that spec's `_classify_tx_type` body is superseded by this phase —
+see the rule table above for the current behavior.
 
 ---
 
@@ -1750,6 +1978,30 @@ Pure — patch `DatabaseClient` where the seed script imports it (e.g. `@patch("
 - `test_generate_anomalies_flagged` — exactly 3 rows with `is_outlier=True`, each with `outlier_score == 0.9`.
 - `test_generate_categories_canonical` — set of `category` values ⊆ the Phase 3c seed list (title case).
 - `test_generate_transfer_pair` — the monthly credit-card payment posts as a −350/+350 pair, both `category="Transfer"`.
+
+### 6g. (optional / not blocking) Adopt `pytest` as the test runner
+
+Found 2026-07-19: `pytest` already collects and runs the existing `unittest.TestCase`-based suite as-is —
+no rewrite required, it's a drop-in runner. The only friction seen was environmental (bare `pytest`, run
+outside the project venv and without a repo-root `conftest.py`/`pythonpath` config, can't resolve
+`from app import auth` etc.), not a framework incompatibility.
+
+If ever adopted:
+- Add `pytest` to dev dependencies (not `requirements.txt` proper — it's not a runtime dep).
+- Add to `pyproject.toml`:
+  ```toml
+  [tool.pytest.ini_options]
+  pythonpath = ["."]
+  testpaths = ["tests"]
+  ```
+  so bare `pytest` resolves imports without needing `python -m pytest` or a `conftest.py`.
+- Update the `CLAUDE.md` test commands (`python -m unittest discover -s tests -v` → `pytest`) and Phase 5
+  CI workflow's test step accordingly.
+- Optional follow-up, not required for pytest to work: convert `TestCase`/`assertEqual`-style bodies to
+  plain `assert` functions and use `@pytest.mark.parametrize` for the table-driven cases (e.g. the
+  `_classify_tx_type` matrix in 6e, the `google_oauth` allow/block cases) — nicer diffs and less
+  boilerplate, but with ~13-30 tests total the payoff is modest; only worth it if pytest fixtures/parametrize
+  end up used elsewhere too.
 - `test_generate_source_is_sample` — every row has `source == "sample"`.
 - `test_generate_deterministic` — two calls with the same `days` → identical frames (`assert_frame_equal`).
 - `test_main_calls_db_in_order` — mocked client: `ensure_schema`, `upsert_plaid_accounts`, `upsert_categories`, `upsert_transactions` all called.
@@ -1843,6 +2095,203 @@ by a review checklist **and** automated tooling in CI.
 
 ---
 
+## Phase 9 — Mobile-friendly dashboard (all fronts)
+
+> **Goal**: the dashboard is genuinely usable on a phone — every tab, chart, table, and filter — not merely
+> reachable from one. Status: **not started**. **Non-blocking** for the `dev → main` publish merge: the app
+> renders on mobile today, it is just cramped and sprawling. Schedule after Phase 3.
+>
+> Mobile is a primary use case, not an afterthought: Phase 0 requires an HTTPS redirect URI specifically so
+> the two allowlisted users can sign in from their phones, and verification item 15 already exercises that
+> path. But nothing has ever been *designed* for a small viewport — there is no `.streamlit/config.toml`, no
+> CSS of any kind, no `fig.update_layout` on any of the 12 Plotly figures, and no `column_config` sizing on
+> the two widest tables.
+
+**Decisions (2026-07-19), recorded so they are not re-litigated:**
+
+1. **CSS ships via `st.html()` pointed at a `.css` file — never `unsafe_allow_html`.** This preserves the
+   security posture recorded at the top of Phase 2.5.
+2. **Same content on mobile, reflowed.** No viewport detection, no divergent layouts, no charts hidden on
+   phones. One layout to build and test; a longer scroll on the Overview tab is accepted.
+3. **Non-blocking.** Lands after the publish merge, unlike 1f / 2.5 / 5.
+
+**Evidence gathered before writing this phase** (verified against the installed Streamlit 1.59.2, not
+assumed — re-verify if the `streamlit` floor in `requirements.txt` moves):
+
+- **Streamlit already stacks columns on phones.** Its frontend sets, on every column element,
+  ``[`@media (max-width: ${e.breakpoints.columns})`]: { minWidth: `calc(100% - ${e.spacing.twoXL})` }``, with
+  breakpoints `sm: 576px`, `columns: 640px`, `md: 768px`. Below 640px every column goes full width and stacks.
+  **So the problem is not squashed metrics — it is vertical sprawl**: the 6-wide row at `app/dashboard.py:818`
+  becomes six stacked cards, and the Overview tab (12 metrics + 6 charts) becomes an enormous scroll. Design
+  the phase around *density*, not around reducing column counts.
+- **`st.html` is a first-class CSS channel.** Per `streamlit/elements/html.py`: when `body` is a path to a
+  `.css` file, Streamlit wraps the content in `<style>` tags automatically; and `_html_only_style_tags()`
+  routes style-only content to the **event container**, so it consumes *zero layout space*. The default
+  sanitizer path (`unsafe_allow_javascript=False`) uses `{USE_PROFILES:{html:true}}`, `style` is in
+  DOMPurify's default html tag allowlist, and DOMPurify does not parse or strip CSS rule contents — so
+  `@media` queries survive intact.
+- **12 Plotly figures with zero layout tuning** — no `update_layout`, no margins, no legend positioning, no
+  height anywhere in the repo. Plotly's default 450px height plus a default right-hand legend is what actually
+  breaks charts on a phone, worst on the high-cardinality `color="category"` figures (`dashboard.py:917`,
+  `1024`).
+- **Two wide tables with no sizing**: `st.dataframe` at `dashboard.py:1057` renders **7 columns with no
+  `column_config` at all**; the `st.data_editor` at `1090` renders 6 visible columns.
+- **An 11-widget sidebar** (`_build_sidebar_filters`, def `dashboard.py:538`, plus `auth.py:172-182`),
+  including three multiselects defaulting to *all options selected* and a two-handle float slider — the
+  hardest widget class to operate by touch — inside a drawer that must be opened and closed for every change.
+
+### 9a. CSS delivery mechanism (foundation — land before 9b/9e/9f)
+
+Create `app/static/mobile.css` (new `app/static/` directory) and load it once per render.
+
+Add to `app/dashboard.py` (requires `import pathlib` in the imports block):
+
+```python
+_MOBILE_CSS_PATH = pathlib.Path(__file__).parent / "static" / "mobile.css"
+
+
+def _inject_mobile_css() -> None:
+    """Load the responsive stylesheet once per render.
+
+    st.html() wraps a .css file in <style> tags and routes style-only content to the
+    event container, so this costs zero layout space. DOMPurify keeps <style> and does
+    not touch rule contents, so @media queries survive — no unsafe_allow_html required
+    (see Phase 2.6 for why that matters).
+    """
+    st.html(_MOBILE_CSS_PATH)
+```
+
+Call it as the first statement in `render_dashboard` (def `dashboard.py:1118`), before the sidebar is built.
+
+Resolve the path from `__file__`, **not** relative to the CWD. Every other path in this repo is CWD-relative
+(`CLAUDE.md`), but a stylesheet must not silently vanish when the app is launched from another directory.
+
+**Maintenance hazard to accept explicitly**: the rules below target Streamlit's `data-testid` hooks
+(`stHorizontalBlock`, `stColumn`, `stMetric`, `stTabs`, `stSidebar`), which are **not a stable public API**
+and may change across Streamlit upgrades. Mitigations: every rule is purely additive (delete `mobile.css` and
+you are back to today's desktop-first behavior), and the stylesheet is re-verified whenever the
+`streamlit>=1.41.0` floor in `requirements.txt` moves.
+
+### 9b. KPI rows — wrap 2-up instead of 1-up (highest-leverage change)
+
+Below 640px Streamlit forces `min-width: calc(100% - 1.8rem)` on each column. Override it for *metric-bearing*
+rows only, so KPIs pair up and the Overview scroll roughly halves:
+
+```css
+@media (max-width: 640px) {
+  /* Streamlit forces one-column stacking below 640px; let metric rows pair up. */
+  [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) [data-testid="stColumn"] {
+    min-width: calc(50% - 0.9rem) !important;
+    flex: 1 1 calc(50% - 0.9rem) !important;
+  }
+  [data-testid="stMetricValue"] { font-size: 1.25rem; }
+  [data-testid="stMetricLabel"] { font-size: 0.75rem; }
+}
+```
+
+The `:has()` scoping is what keeps this safe: chart columns (`dashboard.py:444, 680, 753, 872`) keep stacking
+full width, which is what charts want. Browser floor for `:has()` is Safari 15.4+ / Chrome 105+ — fine for
+2026 mobile. If it ever must be dropped, wrap each metric row in an explicit `st.container()` and target that
+instead.
+
+Metric rows affected, by column count:
+
+| Line | Section | Columns | Stacked today | After 9b |
+|---|---|---|---|---|
+| `dashboard.py:434` | `_section_net_worth` | 3 | 3 rows | 2 rows |
+| `dashboard.py:648` | `_section_overview` | 5 | 5 rows | 3 rows |
+| `dashboard.py:669` | `_section_overview` | 4 | 4 rows | 2 rows |
+| `dashboard.py:818` | `_section_cash_flow` | 6 | 6 rows | 3 rows |
+
+### 9c. Plotly — one shared layout helper applied to all 12 figures
+
+Add alongside the other private helpers in `app/dashboard.py`:
+
+```python
+def _style_chart(fig, *, height: int = 320):
+    """Apply mobile-safe layout to a Plotly figure. Call before st.plotly_chart."""
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=32, b=8),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
+        hovermode="x unified",
+        autosize=True,
+    )
+    return fig
+```
+
+Why each setting: a horizontal legend below the plot stops high-cardinality `color="category"` legends
+(`dashboard.py:917`, `1024`) from consuming half the width; tight margins reclaim ~80px on a 390px screen; an
+explicit height beats Plotly's 450px default once the legend has moved below the plot area.
+
+Wrap all 12 `st.plotly_chart` call sites — lines **460, 489, 700, 724, 770, 801, 850, 870, 891, 912, 926,
+1035**. They already pass `use_container_width=True`, so only the figure object changes.
+
+Also pass `config={"displayModeBar": False}` at each call site: the Plotly modebar is unusable by touch and
+steals vertical space. Leave `scrollZoom` off (the default) so a chart never captures page scroll.
+
+Two figures need a taller override, `height=380`: the horizontal top-categories bar (built at `691`) and the
+anomaly scatter (built at `1024`).
+
+### 9d. Tables — explicit `column_config` on both wide tables
+
+- **`st.dataframe` at `dashboard.py:1057`** (anomalies — 7 columns, currently *zero* config): add
+  `column_config` with `width="small"` on Date / Amount / Outlier score, `width="medium"` on Description, and
+  a `NumberColumn(format="$%.2f")` on Amount so it stops rendering full float precision into a narrow column.
+  Add an explicit `height` to cap the block.
+- **`st.data_editor` at `dashboard.py:1090`** (ledger — 6 visible columns): same treatment. Keep the existing
+  `column_config={"hash": None}` (`1094`) and the Category `SelectboxColumn` (`1095`) exactly as they are.
+
+**Deliberate non-goal**: horizontal scroll *inside* a table block is acceptable on mobile. Do not hide columns
+per-viewport — that would violate decision 2 above.
+
+### 9e. Sidebar / filters — the biggest interaction cost
+
+On mobile the sidebar is a full-screen drawer. With 11 widgets and three all-selected multiselects it is very
+tall, and every filter change costs open → scroll → change → close.
+
+- Group the secondary filters (categories, accounts, amount range, description search, outliers-only) inside a
+  single `st.sidebar.expander(T["filters_more"], expanded=False)`, leaving **period** and **owners** — the two
+  that actually get changed — at the top, always visible.
+- Keep `_build_sidebar_filters`'s signature and return shape (`tuple[pd.DataFrame, pd.DataFrame, list[str]]`)
+  unchanged so nothing downstream moves.
+- The two-handle `st.sidebar.slider` amount range (`dashboard.py:592`) is the hardest widget to operate by
+  touch. Either replace it with two `st.sidebar.number_input`s or keep it and document the wart — decide at
+  implementation time and record which was chosen.
+- New `_STRINGS` key `filters_more` in **both** `en` and `fr` (Phase 8b i18n-parity rule).
+- `auth.py:179` renders a raw Supabase URL as a sidebar caption — a long unbreakable token in a narrow drawer.
+  Add `overflow-wrap: anywhere` for sidebar captions in `mobile.css`.
+
+### 9f. Page config, tabs, and touch targets
+
+- `st.set_page_config` (`app/streamlit_app.py:21`) sets only `page_title` and `layout="wide"`. Add
+  `initial_sidebar_state="collapsed"` so the first paint on a phone is the dashboard, not the filter drawer.
+  This is a deliberate mobile-first tradeoff — on desktop the sidebar becomes one extra click.
+- 4 tabs at `dashboard.py:1158`. The **French labels are longer** ("Flux monétaires"), so the tab bar overflows
+  sooner in FR. Streamlit scrolls the tab bar horizontally, which is acceptable, but add a `font-size`
+  reduction for `[data-testid="stTabs"] button` inside the 640px query so all four fit without scrolling.
+- Enforce a 44px minimum touch target for buttons and toggles in the mobile query (Sign out, Save budgets,
+  the language toggle).
+- *Optional*: add `.streamlit/config.toml` (none exists today) to pin `[theme] base` and `baseFontSize`.
+  Flagged optional because it affects desktop equally.
+
+### 9g. Verification
+
+1. `streamlit run app/streamlit_app.py`, then Chrome DevTools device toolbar at **390×844** (iPhone 14),
+   **360×800** (Android), and **768×1024** (tablet). Streamlit's 640px and 768px breakpoints sit between
+   these, so all three code paths get exercised.
+2. Per tab: no horizontal *page* scroll; KPI rows wrap 2-up; every chart legend sits below its plot with at
+   least ~250px of plot area remaining; no clipped axis labels.
+3. Transactions tab: the table scrolls horizontally *within its own block*, and the category
+   `SelectboxColumn` opens and is selectable by touch.
+4. Budget tab: `st.data_editor` numeric entry works with the on-screen keyboard; "Save budgets" persists.
+5. Switch to French and re-check the tab bar and every metric label for truncation (FR strings are longer).
+6. Real-device pass against the HTTPS deployment with both allowlisted accounts — this also re-runs
+   verification item 15 (mobile sign-in).
+7. `python -m unittest discover -s tests -v` still green — none of this touches classification or data logic.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
@@ -1932,7 +2381,9 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 5. Phase 3c (migrations) **before** Phase 3d (`ensure_schema` iteration) — 3d relies on the files existing.
 6. Phase 3e (SELECT query with COALESCE + `transaction_hash`) **before** Phase 3l (ledger edit).
 7. Fix case in `analytics/placeholders.py` (`"uncategorized"` → `"Uncategorized"`) **alongside** Phase 3c, before running the pipeline against the seeded categories.
-8. **Never** change `build_transaction_hash` inputs — re-ingest idempotency depends on them.
+8. **Don't change `build_transaction_hash` inputs without a rehash + dedup migration** — re-ingest
+   idempotency depends on them. Superseded once, deliberately: see Phase 2.7 for the 2026-07-17 change from
+   `account_name`-keyed to `account_key`-keyed hashing, shipped together with `rehash_transactions()`.
 9. Seed data must use Plaid sign convention (positive = outflow) or cash flow inverts.
 10. `load_settings()` must never hard-require Plaid credentials — that would break the seed demo and dashboard-only deployments. Plaid validation lives only in `pipeline/runner.py::_build_ingestor`.
 11. Cron goes live only after merge to `main` + GitHub Secrets — Phase 0 owner action, not code.
@@ -1949,6 +2400,9 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 17. Phase 3q (`is_recurring` tagging) is planning-only for now — not implemented alongside 3o/3p. If picked
     up later, its migration lands after 3c/3p's migrations, and its ledger checkbox reuses the 3l
     edited-rows pattern; it must not be conflated with ML-based recurrence detection, which is out of scope.
+18. Phase 9 (mobile) lands **after** Phase 3 — it restyles the very sections 3i/3j/3k/3l assemble, so doing it
+    earlier means restyling twice. It is **not** a publish blocker. Internally, 9a (the CSS mechanism) must
+    land before 9b/9e/9f, which all write rules into `app/static/mobile.css`.
 
 ---
 
@@ -1973,3 +2427,5 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 17. Both workflow files: every `uses:` is a full 40-char commit SHA; the daily job has `timeout-minutes` and a `concurrency` group.
 18. `ruff check . && black --check .` pass on the branch; the CI lint job (Phase 8a) is green.
 19. (When Appendix A items are built) each new user-edit column is pipeline-immune: edit a note/status/reviewed flag, then run `python main.py` (or re-`upsert` the same rows) → the edit is retained.
+20. (When Phase 9 is built) the dashboard renders with no horizontal page scroll at 390px, 360px, and 768px
+    viewport widths, in **both** `en` and `fr`, across all four tabs.
