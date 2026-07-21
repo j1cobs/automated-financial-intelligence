@@ -1715,6 +1715,14 @@ see the rule table above for the current behavior.
 
 ## Phase 4 — Docs
 
+> **Status (2026-07-20): implemented.** README rewritten, `docs/setup-google-oauth.md`,
+> `docs/setup-plaid.md`, `docs/setup-database.md`, `docs/deployment.md`, and `CONTRIBUTING.md` all created.
+> Two deviations from the spec below: (1) the README omits a CI badge, since `.github/workflows/ci.yml`
+> doesn't exist yet (Phase 5 is still unimplemented) — a badge pointing at a nonexistent workflow would be
+> false; add it when Phase 5 lands. (2) the configuration table lists `SUPABASE_SERVICE_ROLE_KEY` nowhere,
+> matching Phase 1b's earlier finding that it has zero usages in the codebase. The 2.5h encryption-at-rest
+> decision is now documented in the README's Security section as originally planned.
+
 ### 4a. Rewrite `README.md`
 
 Structure (link to `docs/` for depth; keep each section skimmable):
