@@ -16,6 +16,13 @@ pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
 
 Commit both files together.
 
+> **Python version matters when regenerating.** `pip-compile` resolves against the interpreter it runs
+> on and does **not** emit `; python_version` markers, so the lock is only installable on that version
+> and newer. The current lock was generated on **Python 3.13** and pins `numpy`/`scipy` that require
+> **>=3.12** — which is why the supported floor is 3.12 (`pyproject.toml`) and CI tests 3.12 and 3.13.
+> Regenerate on 3.13, and if you ever lower the floor, re-run `pip-compile` on the *lowest* version you
+> intend to support.
+
 ## Running things
 
 ```bash

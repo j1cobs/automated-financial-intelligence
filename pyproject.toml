@@ -7,7 +7,7 @@ name = "automated-financial-intelligence"
 version = "0.1.0"
 description = "Modular personal-finance platform: ingest → classify → persist → dashboard"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dynamic = ["dependencies"]
 

@@ -2,7 +2,7 @@
 
 > Personal-finance platform: pull transactions from Plaid, persist them in PostgreSQL, and explore them in a Streamlit dashboard. Built to be self-hosted.
 
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
 
 ## Screenshots
 
@@ -45,7 +45,7 @@ python scripts/seed_sample_data.py
 streamlit run app/streamlit_app.py
 ```
 
-Requires Python 3.11+, and every command runs from the repo root (config and migration paths are relative). Plaid credentials are only needed if you want to pull real transactions with `python main.py`. See [docs/setup-plaid.md](docs/setup-plaid.md) for that.
+Requires Python 3.12+, and every command runs from the repo root (config and migration paths are relative). Plaid credentials are only needed if you want to pull real transactions with `python main.py`. See [docs/setup-plaid.md](docs/setup-plaid.md) for that.
 
 ## Configuration reference
 
