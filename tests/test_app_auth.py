@@ -143,6 +143,25 @@ class AppAuthTests(unittest.TestCase):
         auth.st.error.assert_called_once_with("Google sign-in session expired. Please try again.")
         auth.st.rerun.assert_not_called()
 
+    def test_sign_in_link_opens_in_new_tab(self) -> None:
+        # target="_blank" is required for the link to work at all on Streamlit Community
+        # Cloud, which wraps the app in its own sandboxed iframe lacking
+        # allow-top-navigation -- target="_top" is silently blocked there (see Phase 2.6a
+        # in PLAN.md). A regression back to "_top" produces a dead button with no error.
+        settings = SimpleNamespace(
+            google_oauth_client_id="client-id",
+            google_oauth_client_secret="client-secret",
+            google_oauth_redirect_uri="http://localhost:8501/",
+            google_allowed_emails=[],
+        )
+
+        with patch.object(auth, "start_google_sign_in", return_value="https://example.com/auth"):
+            auth.render_sign_in(settings)
+
+        rendered_html = auth.st.html.call_args[0][0]
+        self.assertIn('target="_blank"', rendered_html)
+        self.assertNotIn('target="_top"', rendered_html)
+
 
 class AuthSecurityTests(unittest.TestCase):
     """Covers the Phase 2.5b/2.5d hardening: verified-email enforcement, pending

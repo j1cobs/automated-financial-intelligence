@@ -157,7 +157,7 @@ def render_sign_in(settings) -> bool:
     safe_url = html.escape(auth_url)
     st.html(
         f'''
-        <a href="{safe_url}" target="_top"
+        <a href="{safe_url}" target="_blank"
            style="display:inline-block;padding:0.5em 1em;background:#4285F4;color:white;
                   border-radius:4px;text-decoration:none;font-family:sans-serif;">
             Continue with Google
