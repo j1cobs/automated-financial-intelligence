@@ -33,7 +33,7 @@ When extending, prefer wiring the existing real modules onto the live path over 
 
 - Install deps: `pip install -r requirements.txt` (requirements.txt is authoritative; pyproject.toml is minimal/incomplete)
 - Run pipeline: `python main.py`
-- Run dashboard: `streamlit run app/streamlit_app.py`
+- Run dashboard: `streamlit run streamlit_app.py`
 - Run all tests: `python -m unittest discover -s tests -v`
 - Run a single test: `python -m unittest tests.test_db_hash -v` (or `tests.test_db_hash.TestClass.test_method`)
 - Plaid sandbox bootstrap: `python scripts/create_sandbox_access_token.py --append`
