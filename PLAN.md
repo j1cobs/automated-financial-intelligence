@@ -600,6 +600,43 @@ handling are unaffected; only how the *outbound* link is rendered changes.
   and after granting consent, Google redirects back to the same tab and the dashboard loads signed in.
 - Sign out and sign in again to confirm the flow is stable on repeat.
 
+### Phase 2.6a — Amendment (2026-07-26): SCC's own hosting iframe reintroduces the same block
+
+**Problem found after deploying to Streamlit Community Cloud (SCC):** the sign-in button, which passed
+every check above, was a completely dead link on the live SCC deployment — clicking it produced no error,
+no console warning, and (confirmed via the Network tab) no request to Google at all. Every Google-side
+config was checked and correct (Client ID, Application type, Authorized redirect URIs, Test users,
+`GOOGLE_ALLOWED_EMAILS`, project consistency, an SCC reboot) — none of it mattered, because the click never
+got that far.
+
+**Root cause, confirmed by inspecting the live DOM:** SCC wraps every hosted app in its own outer iframe for
+platform chrome:
+
+```html
+<iframe sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox
+                 allow-same-origin allow-scripts allow-downloads" ...>
+```
+
+Same missing flag as the original Phase 2.6 problem — no `allow-top-navigation` /
+`allow-top-navigation-by-user-activation` — but this is a *different* iframe. `st.html()`'s fix above is
+still correct: its content genuinely isn't iframed by Streamlit itself. SCC's hosting layer adds its own
+wrapper around the **entire app**, one level higher, with the identical restrictive sandbox — something
+that cannot exist under local `streamlit run`, so nothing in the verification above could ever have caught
+it. Copy-pasting the link's `href` directly into a new tab's address bar worked perfectly, confirming the
+URL itself was never the problem — only navigating to it from inside SCC's iframe was blocked.
+
+**Fix:** `app/auth.py`'s anchor `target` changed from `"_top"` to `"_blank"` — the one mechanism this
+sandbox leaves open (`allow-popups` + `allow-popups-to-escape-sandbox` are both granted). Guarded by a new
+test, `tests/test_app_auth.py::test_sign_in_link_opens_in_new_tab`, since this exact attribute has now been
+the crux of two separate bugs and a silent regression produces a dead button with zero error output.
+
+**Accepted trade-off (not SCC-only):** `target="_top"` on a page with no parent frame — local `streamlit
+run` — is equivalent to same-tab navigation, so this change makes sign-in open a new tab **everywhere**,
+not just on SCC. The alternative (a script that opens a new tab only when actually framed) depends on
+inline `<script>` content surviving `st.html()`'s DOMPurify sanitization, which is unconfirmed and risks
+silently reproducing this same failure mode if it doesn't survive — the simple, unconditional fix was
+chosen deliberately over that risk.
+
 ---
 
 ## Phase 2.7 — Implemented (2026-07-17): account identity + post-rotation dedup
@@ -2625,6 +2662,10 @@ cron (which only schedules from the default branch) and gives SCC a stable branc
 - **Region.** SCC runs in US datacenters only. Supabase/Neon are reachable over the public internet and TLS
   is enforced by `core/config.py::enforce_tls`, so no change is needed — but the database must not be
   IP-allowlisted to a home address.
+- **Sign-in opens a new tab.** SCC wraps every app in its own sandboxed iframe that blocks top-level
+  navigation entirely — `target="_top"` (Phase 2.6's original fix) is silently blocked with no error. Fixed
+  in Phase 2.6a via `target="_blank"`, which also means sign-in now opens a new tab locally too, not just on
+  SCC. This was a real, dead-button bug found only after deploying — see Phase 2.6a for the full diagnosis.
 
 ### 10h. Owner actions (manual; no code)
 
@@ -2649,12 +2690,17 @@ cron (which only schedules from the default branch) and gives SCC a stable branc
    `pip install -e .`, `streamlit run streamlit_app.py` must still start. (`streamlit run
    app/streamlit_app.py` is expected to fail with `ModuleNotFoundError: core` — that is the bug being fixed.)
 3. `python -m unittest discover -s tests -v` still green — this phase adds no logic.
-4. Desktop: the `.streamlit.app` URL renders the sign-in page, "Continue with Google" navigates in the
-   **same tab** (Phase 2.6), an allowlisted account reaches the dashboard, a non-allowlisted one is refused.
+4. Desktop: the `.streamlit.app` URL renders the sign-in page, "Continue with Google" opens a **new tab**
+   (Phase 2.6a — SCC's own hosting iframe blocks same-tab navigation; this differs from local behavior
+   described in Phase 2.6), completes sign-in there, an allowlisted account reaches the dashboard, a
+   non-allowlisted one is refused.
 5. Mobile: same URL, both allowlisted accounts — this is the case the HTTPS redirect URI exists for, and it
    re-runs global verification item 15.
 6. The dashboard shows the same transactions the pipeline last wrote.
 7. Push a trivial commit to `main` → SCC auto-redeploys.
+8. Confirm sign-in genuinely completes against the **live deployed SCC URL**, not just locally — Phase 2.6a
+   was found precisely because every earlier verification pass in this phase and Phase 2.6 only ever ran
+   locally, where the SCC-specific iframe that broke it doesn't exist.
 
 ---
 
