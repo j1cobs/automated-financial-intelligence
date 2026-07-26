@@ -36,7 +36,9 @@ When extending, prefer wiring the existing real modules onto the live path over 
 - Run dashboard: `streamlit run streamlit_app.py`
 - Run all tests: `python -m unittest discover -s tests -v`
 - Run a single test: `python -m unittest tests.test_db_hash -v` (or `tests.test_db_hash.TestClass.test_method`)
-- Plaid sandbox bootstrap: `python scripts/create_sandbox_access_token.py --append`
+- Mint/repair a Plaid access token: `python scripts/plaid_link.py create --append` (sandbox is headless; production
+  opens Plaid Link in your browser) or `python scripts/plaid_link.py repair` (Link update mode for a broken Item —
+  e.g. a `NO_ACCOUNTS` error — without rotating the token)
 - Seed demo data (no Plaid credentials needed): `python scripts/seed_sample_data.py`
 
 Run all commands from the repo root: `database/db.py` reads the migration file via the relative path
@@ -61,8 +63,9 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   `google_oauth.py`.
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
   sign-out) and `dashboard.py` (DB reads + Plotly rendering).
-- `scripts/` — `create_sandbox_access_token.py` (Plaid sandbox bootstrap) and `seed_sample_data.py` (writes
-  deterministic demo data straight to Postgres — no ingestion, no credentials).
+- `scripts/` — `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
+  underlying `PlaidLinkClient`) and `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
+  no ingestion, no credentials).
 
 ## Configuration
 
