@@ -2651,6 +2651,139 @@ cron (which only schedules from the default branch) and gives SCC a stable branc
 
 ---
 
+## Phase 11 — Plaid token tooling: mint and repair Items from this repo — DONE (2026-07-26), confirmed working
+
+> **Status:** implemented and confirmed live. The user ran both `create` (sandbox) and `repair` (against a
+> real broken production Item) and confirmed both worked — `repair` fixed the `NO_ACCOUNTS` failure that
+> had been breaking the daily pipeline since its first run.
+
+### Context
+
+The daily pipeline had failed every run since its first success. The cause (see the failure log worked
+through earlier this session) was a Plaid `NO_ACCOUNTS` / `ITEM_ERROR` on `accounts/get` — the Item behind
+one of the production access tokens no longer had any accounts attached to it. The pipeline died at
+`ingestion/plaid_ingestor.py::fetch_accounts()` before any DB logic ran.
+
+Fixing that meant leaving this repo entirely and driving the separate `quickstart` checkout (Flask +
+`plaid_python` + a React/Vite frontend) just to get a token back. That is a heavy, disconnected detour for
+a recurring operational chore — and per the old `docs/setup-plaid.md`, this repo had *deliberately* had no
+Link integration, so the detour was permanent by design.
+
+**Goal:** one environment-aware CLI in this repo that both mints new Item tokens and repairs broken ones,
+with no Flask, no React, no new dependencies.
+
+Two research findings shaped the design:
+
+| Finding | Consequence |
+|---|---|
+| `redirect_uri` is only required for **mobile** Plaid Link clients; desktop web OAuth works without one | No HTTPS, no self-signed cert, no Plaid Dashboard allowlisting — plain `http://localhost` works even for OAuth banks like Chase. |
+| In Link **update mode** the `access_token` does not change — Plaid: "there is no need to repeat the exchange token process" | Repairing a broken Item needs **zero** GitHub Secret rotation. `update: { account_selection_enabled: true }` is Plaid's prescribed fix for `NO_ACCOUNTS`. |
+
+| | `create` (new Item) | `repair` (update mode) |
+|---|---|---|
+| `/link/token/create` | `products: ["transactions"]` | `access_token: <existing>`, **no** `products` |
+| After Link succeeds | exchange `public_token` → **new** access token | **no exchange**; original token stays valid |
+| `.env` / Secret effect | append token (+ owner); GitHub Secret must be updated by hand | none needed |
+
+### 11a. `ingestion/plaid_link.py` — the API surface
+
+`PlaidLinkClient` sits beside `plaid_ingestor.py` (token lifecycle is connection management — it belongs
+*next to* `PlaidIngestor`, not inside it, since that class's job is fetching transactions):
+
+```python
+class PlaidLinkClient:
+    def __init__(self, client_id, secret, base_url, timeout_seconds=30): ...
+    def create_link_token(self, *, access_token=None, client_name=..., country_codes=None, language="en") -> str: ...
+    def exchange_public_token(self, public_token: str) -> str: ...
+    def create_sandbox_public_token(self, institution_id: str, products=None) -> str: ...
+    def get_item(self, access_token: str) -> dict: ...
+    def get_accounts(self, access_token: str) -> dict: ...
+
+def classify_item_status(item_response: dict, accounts_response: dict | None) -> str:
+    """Reads Plaid's actual (flat) error shape: error_code sits at the top level, not
+    nested under an "error" key. Returns 'OK (n accounts)' or the raw error_code."""
+```
+
+`create_link_token`'s create/update split is exact: update mode sends `access_token` + `update:
+{account_selection_enabled: true}` and omits `products` entirely (Plaid rejects `products` alongside
+`access_token`); create mode is the reverse. Mirrors `PlaidIngestor._post()` (same `requests.post` /
+`response.ok` logging / `raise_for_status()`); no `plaid_python` dependency added.
+
+### 11b. `scripts/plaid_link.py` — the CLI
+
+Thin layer over 11a: `argparse`, a throwaway local Link server, prompts, `.env` writing. Logic lives in
+module-level functions (`cmd_create`, `cmd_repair`, `_item_status`, `_safe_call`, `run_link_flow`, the
+`.env` helpers) rather than buried in `main()`, matching how `tests/test_seed_sample_data.py` imports
+`scripts.seed_sample_data` internals directly. Credentials come from `core.config.load_settings()`.
+
+```
+python scripts/plaid_link.py create --append [--owner NAME] [--print-token] [--institution ins_109508]
+python scripts/plaid_link.py repair [--token-suffix 1372c4]
+```
+
+- **`create`** is environment-aware off `settings.plaid_base_url`: sandbox mints headlessly via
+  `create_sandbox_public_token()` (no browser); production opens Plaid Link in the default browser and
+  exchanges the result.
+- **`repair`** prints every configured token with a live status (`_item_status`, via `get_item` +
+  `get_accounts`), lets you pick one (or pass `--token-suffix`), runs Link in update mode, then re-calls
+  `get_accounts` to confirm the Item is healthy before telling you no Secret update is needed.
+- The local server (`run_link_flow`) binds `127.0.0.1` only, on an OS-assigned ephemeral port, serves the
+  Link JS page on `GET /` and receives `onSuccess`/`onExit` on `POST /callback`; no `redirect_uri` is ever
+  set. A 600s timeout prevents an abandoned browser tab from hanging the process forever.
+
+### 11c. `.env` writing — fixing an inherited footgun
+
+`pipeline/runner.py` raises `ConfigError` when `PLAID_ACCESS_TOKEN_OWNERS` is non-empty and its length
+differs from `PLAID_ACCESS_TOKENS`. The old script appended to `PLAID_ACCESS_TOKENS` only, so `--append`
+against a multi-owner setup could silently break that invariant and fail the *next* pipeline run.
+`append_token_to_env()` keeps both lists in lockstep: it refuses to write a mismatch, prompts for an owner
+when one is required, and — a bug caught by its own test suite during implementation — does **not**
+backfill blank placeholder owners for pre-existing tokens when starting a fresh owners list, because
+`core/config.py::_split_csv` drops empty CSV entries on read, which would silently recreate the exact
+mismatch this function exists to prevent. Comments and unrelated `.env` keys are preserved untouched.
+
+### 11d. `tests/test_plaid_link.py` — 18 tests, all passing
+
+`unittest` + `unittest.mock`, matching the repo's existing test style. Three groups:
+
+- `LinkTokenPayloadTests` — create vs. update mode payload shape (the regression risk with the highest
+  blast radius: this is Plaid's own rejection case).
+- `ItemStatusTests` — `classify_item_status` against the *actual* `NO_ACCOUNTS` payload from the original
+  failure log, plus `ITEM_LOGIN_REQUIRED`, an accounts-side error, and healthy singular/plural/zero counts.
+- `EnvWriterTests` — every case operates on a `tempfile.TemporaryDirectory` path, never the real `.env`:
+  fresh-file append, lockstep append, refusal on a missing owner, the corrected non-backfill behavior,
+  dedup of an already-present token, and preservation of comments/unrelated keys.
+
+`python -m unittest discover -s tests -v` stayed green throughout (117 tests total after this phase).
+
+### 11e. Removals and doc updates — DONE
+
+- Deleted `scripts/create_sandbox_access_token.py` (absorbed by `create`), after the sandbox `create` path
+  was confirmed working — the ordering constraint that gated this deletion.
+- `CLAUDE.md` — Commands and Architecture sections updated to reference `scripts/plaid_link.py` and
+  `ingestion/plaid_link.py`.
+- `docs/setup-plaid.md` — rewritten: both Sandbox and Production sections now point at `plaid_link.py`, and
+  a new "Repairing a broken Item" subsection documents the `repair` flow and why no Secret rotation follows
+  it. The old line about this repo having "no Plaid Link UI" is gone — that's exactly what this phase makes
+  obsolete.
+- `README.md` / `docs/deployment.md` checked for stale references — none found.
+- `PLAN.md`'s own historical Phase 1–10 references to the old script name are left as-is; they're records
+  of decisions made in those phases, not current-state documentation.
+
+### Verification (all run)
+
+1. `python -m unittest tests.test_plaid_link -v` — 18/18 pass.
+2. `python -m unittest discover -s tests -v` — 117/117 pass, both before and after the old script's deletion.
+3. `grep -rn "create_sandbox_access_token" --include=*.py --include=*.md .` — no hits outside `PLAN.md`'s
+   historical phase text.
+4. Sandbox `create --append` — confirmed working by the user.
+5–6. Production `repair` against the actual broken Item — confirmed working by the user; the `NO_ACCOUNTS`
+   Item is healthy again.
+7–8. Pipeline recovery (`python main.py`, then the daily workflow) — left to the user to confirm on the
+   next scheduled or manual run.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
