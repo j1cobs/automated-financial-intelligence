@@ -19,23 +19,30 @@
 
 ---
 
-## Where things stand (updated 2026-07-20)
+## Where things stand (updated 2026-07-26)
 
-**Complete:** Phases 1, 2, 2.5, 2.6, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10a, and Phase 6 except the
+**Complete:** Phases 1, 2, 2.5, 2.6, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10a, 11, and Phase 6 except the
 optional pytest migration.
 **Partial:** Phase 0 (only the HTTPS redirect URI and README screenshots remain), Phase 10 (10a done;
 10b–10i are the deploy itself), Phase 8 (8a done; 8b's manual checklist is a pre-merge ritual, not code).
 **Not started:** Phase 9. **Deferred by choice:** Phase 7 (ML), Appendix A, 6h (pytest).
 
-> **⚠️ Uncommitted work (as of 2026-07-20).** Phases 8a, 10a, and 6 are implemented **in the working tree
-> but committed to no branch** — 22 modified files plus 7 untracked ones, including the root
-> `streamlit_app.py` and six new test files. Verified locally: `ruff check .` → "All checks passed",
-> `ruff format --check .` → "38 files already formatted", and the suite runs **99 tests, all passing**.
-> Getting these committed and pushed is the immediate next action; until then the work exists in exactly
-> one place and is one `git checkout .` away from being lost.
+> **Uncommitted-work warning from 2026-07-20 resolved.** The Phases 8a/10a/6 working-tree changes that
+> warning covered are now committed (`3bb82cc`, `971c967`, `35a8568`, `a7f21f7`, `6916507`), along with
+> Phase 11 (`76f20c3`, `db84c57`, `de176ab`). The suite is green at **117 tests**.
+>
+> **⚠️ Current gap: `dev` is 8 commits ahead of `origin/main`, unmerged.** The `dev → main` merge described
+> below as landing 2026-07-20 does not include any of the above — none of the ruff/streamlit-entrypoint
+> work, the test refactor, or Phase 11's token tooling has reached `main` yet. This does **not** affect the
+> daily cron's health: Phase 11's actual fix was an operational repair of the Plaid Item itself (via Link
+> update mode), independent of git branch — `pipeline/runner.py` and `ingestion/plaid_ingestor.py` are
+> unchanged. What the merge gets you is `scripts/plaid_link.py` (and the rest of `dev`'s work) available on
+> the branch anyone would actually check out — right now, repeating this fix from a fresh `main` clone
+> means re-doing it without the new tooling.
 
-The `dev → main` merge landed 2026-07-20 (Phase 0), so the publish gate is closed and the daily cron is
-live. What remains is the deploy, mobile, and ML — features, not blockers.
+The `dev → main` merge for Phase 0's scope landed 2026-07-20, so *that* publish gate is closed and the
+daily cron is live — but see the gap above: everything since then is still sitting on `dev`. What remains
+in scope is the merge itself, then the deploy, mobile, and ML — features, not blockers.
 
 ### Recommended order of work
 
@@ -43,16 +50,16 @@ Ranked by what unblocks the most, not by phase number.
 
 | # | Work | Why here | Effort |
 |---|---|---|---|
-| 1 | **Commit the working tree** | Phases 8a, 10a, and 6 are done but uncommitted, on a branch now 1 behind `origin/main`. Fetch, fast-forward, then commit in separate `style:` / `fix:` / `feat:` / `ci:` / `test:` commits so the ruff reformat never hides the seven genuine lint fixes. | ~30 min |
-| 2 | **Phase 10b–10i** — deploy to SCC, register HTTPS redirect URI | 10a (the blocker) is done and the merge has landed, so SCC now has a stable default branch to track. Produces the public URL, which is the only way to close Phase 0's last checkbox. | Medium |
+| 1 | **Merge `dev → main`** | 8 commits sit on `dev` unmerged, including Phase 11's token tooling. The cron itself is already healthy (that fix was operational, not code — see the gap note above), but `main` is the branch anyone else would actually check out, and it doesn't have this tooling yet. Everything below assumes `main` is current. | ~15 min |
+| 2 | **Phase 10b–10i** — deploy to SCC, register HTTPS redirect URI | 10a (the blocker) is done. Once `main` is current, SCC has a stable default branch to track. Produces the public URL, which is the only way to close Phase 0's last checkbox. | Medium |
 | 3 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists, so this is what makes the deploy actually useful (constraint 22). Largest remaining code effort. | Large |
 | 4 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
 | 5 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
 
-**What changed in this ranking:** the previous top three (10a, Phase 8, the Phase 0 merge) are all done —
-10a and 8a as uncommitted working-tree changes, the merge on GitHub. Phase 6 also dropped off: it went from
-"only part of 6a exists" to 6a–6g complete and 99 tests green. Committing that work replaced them at #1,
-because it is the one step everything else now depends on.
+**What changed in this ranking:** the prior #1 (committing the working tree) is done. It's replaced by the
+merge itself — not because the cron needs it (that was fixed operationally), but because `main` is 8
+commits stale relative to everything built on `dev` since the last merge, including tooling anyone
+diagnosing the next Plaid failure would want available.
 
 ---
 
