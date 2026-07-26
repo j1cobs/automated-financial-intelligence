@@ -19,4 +19,4 @@ You can trigger a manual run from the Actions tab (`workflow_dispatch`) without 
 
 ## Dashboard
 
-The dashboard (`streamlit run app/streamlit_app.py`) is a separate process from the pipeline and needs its own environment: `DATABASE_URL` plus the `GOOGLE_OAUTH_*` and `GOOGLE_ALLOWED_EMAILS` variables. If you're deploying to Streamlit Community Cloud or similar, set `GOOGLE_OAUTH_REDIRECT_URI` to the deployed HTTPS URL and make sure that same URL is registered in the Google Cloud console (see [setup-google-oauth.md](setup-google-oauth.md)). Mismatches here are the most common cause of a broken sign-in after deploying.
+The dashboard (`streamlit run streamlit_app.py`) is a separate process from the pipeline and needs its own environment: `DATABASE_URL` plus the `GOOGLE_OAUTH_*` and `GOOGLE_ALLOWED_EMAILS` variables. If you're deploying to Streamlit Community Cloud or similar, set `GOOGLE_OAUTH_REDIRECT_URI` to the deployed HTTPS URL and make sure that same URL is registered in the Google Cloud console (see [setup-google-oauth.md](setup-google-oauth.md)). Mismatches here are the most common cause of a broken sign-in after deploying.

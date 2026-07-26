@@ -41,7 +41,7 @@ def _fetch_accounts(database_url: str) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(sql)
             columns = [desc.name for desc in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
 
 
 def _group_duplicates(accounts: list[dict]) -> list[list[dict]]:
@@ -70,8 +70,7 @@ def _group_duplicates(accounts: list[dict]) -> list[list[dict]]:
         if account["persistent_account_id"]:
             by_persistent_id[account["persistent_account_id"]].append(account)
         elif all(
-            account[field]
-            for field in ("official_name", "account_subtype", "account_type", "owner_name")
+            account[field] for field in ("official_name", "account_subtype", "account_type", "owner_name")
         ):
             key = (
                 account["official_name"],
@@ -159,9 +158,7 @@ def main() -> None:
         )
         for duplicate in duplicates:
             if args.apply:
-                moved = database.merge_account(
-                    duplicate["account_key"], canonical["account_key"]
-                )
+                moved = database.merge_account(duplicate["account_key"], canonical["account_key"])
                 total_moved += moved
                 LOGGER.info(
                     "  merged %s -> %s (%d transactions reassigned)",
@@ -180,8 +177,11 @@ def main() -> None:
         LOGGER.info("Dry run complete. Re-run with --apply to perform the merge.")
         return
 
-    LOGGER.info("Merged %d accounts, %d transactions reassigned. Rehashing transactions...",
-                sum(len(g) - 1 for g in groups), total_moved)
+    LOGGER.info(
+        "Merged %d accounts, %d transactions reassigned. Rehashing transactions...",
+        sum(len(g) - 1 for g in groups),
+        total_moved,
+    )
     rehashed, deleted = database.rehash_transactions()
     LOGGER.info(
         "Rehash complete: %d transaction_hash values updated, %d duplicate transactions removed.",

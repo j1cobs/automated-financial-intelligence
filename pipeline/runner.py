@@ -19,9 +19,9 @@ def _build_ingestor(settings):
         raise ConfigError("PLAID_CLIENT_ID and PLAID_SECRET are required")
     if not settings.plaid_access_tokens:
         raise ConfigError("PLAID_ACCESS_TOKENS is required")
-    if settings.plaid_access_token_owners and len(
-        settings.plaid_access_token_owners
-    ) != len(settings.plaid_access_tokens):
+    if settings.plaid_access_token_owners and len(settings.plaid_access_token_owners) != len(
+        settings.plaid_access_tokens
+    ):
         raise ConfigError(
             "PLAID_ACCESS_TOKEN_OWNERS must have the same number of entries as PLAID_ACCESS_TOKENS"
         )
@@ -44,7 +44,10 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
     database = DatabaseClient(settings.database_url)
     database.ensure_schema()
 
-    owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners))
+    # strict=False is deliberate: plaid_access_token_owners is optional (_build_ingestor only
+    # enforces equal length when it's non-empty), so an empty owners list must zip to {} here,
+    # not raise.
+    owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners, strict=False))
     accounts = ingestor.fetch_accounts(owner_by_token)
 
     # Re-map each account onto its existing canonical account_key (if any) *before* persisting,
@@ -55,16 +58,12 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
         account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
 
-    LOGGER.info(
-        "Fetching transactions from %s to %s (%s days)", start_date, end_date, days_back
-    )
+    LOGGER.info("Fetching transactions from %s to %s (%s days)", start_date, end_date, days_back)
     transactions = ingestor.fetch_transactions(start_date=start_date, end_date=end_date)
     if transactions.empty:
         LOGGER.info("No transactions fetched. Pipeline complete.")
         return transactions
-    transactions["account_key"] = transactions["account_key"].map(
-        lambda key: key_remap.get(key, key)
-    )
+    transactions["account_key"] = transactions["account_key"].map(lambda key: key_remap.get(key, key))
 
     models = build_placeholder_models()
     transactions["category"] = models.classifier.categorize(transactions["description"])
@@ -86,7 +85,7 @@ def main() -> None:
         run_pipeline()
     except psycopg.OperationalError as error:
         LOGGER.error("Pipeline failed: database connection error (%s)", type(error).__name__)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
     except Exception:
         LOGGER.exception("Pipeline failed")
         raise

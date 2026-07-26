@@ -42,7 +42,7 @@ A few decisions worth calling out:
 ```bash
 docker compose up -d
 python scripts/seed_sample_data.py
-streamlit run app/streamlit_app.py
+streamlit run streamlit_app.py
 ```
 
 Requires Python 3.12+, and every command runs from the repo root (config and migration paths are relative). Plaid credentials are only needed if you want to pull real transactions with `python main.py`. See [docs/setup-plaid.md](docs/setup-plaid.md) for that.

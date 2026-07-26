@@ -184,8 +184,7 @@ class DatabaseClient:
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE transactions SET account_key = %s, updated_at = NOW() "
-                    "WHERE account_key = %s",
+                    "UPDATE transactions SET account_key = %s, updated_at = NOW() WHERE account_key = %s",
                     (canonical_key, duplicate_key),
                 )
                 moved = cur.rowcount
@@ -229,12 +228,12 @@ class DatabaseClient:
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING",
-                    (category,)
+                    "INSERT INTO categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (category,)
                 )
                 cur.execute(
-                    "UPDATE transactions SET user_category = %s, updated_at = NOW() WHERE transaction_hash = %s",
-                    (category, transaction_hash)
+                    "UPDATE transactions SET user_category = %s, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (category, transaction_hash),
                 )
             conn.commit()
 
@@ -352,7 +351,10 @@ class DatabaseClient:
             if transaction_hash in seen_hashes:
                 continue
             seen_hashes.add(transaction_hash)
-            account_key = record.get("account_key") or f"{record.get('source', 'unknown')}:{record.get('account_name', 'unknown')}"
+            account_key = (
+                record.get("account_key")
+                or f"{record.get('source', 'unknown')}:{record.get('account_name', 'unknown')}"
+            )
             rows.append(
                 (
                     record.get("transaction_id") or None,
@@ -385,6 +387,8 @@ class DatabaseClient:
         inserted = len(rows) - updated
         LOGGER.info(
             "Upserted %s transactions (%s new, %s already present)",
-            len(rows), inserted, updated,
+            len(rows),
+            inserted,
+            updated,
         )
         return inserted, updated

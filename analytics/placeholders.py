@@ -7,8 +7,8 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class PlaceholderModelBundle:
-    classifier: "PlaceholderTransactionClassifier"
-    outlier_detector: "PlaceholderOutlierDetector"
+    classifier: PlaceholderTransactionClassifier
+    outlier_detector: PlaceholderOutlierDetector
 
 
 class PlaceholderTransactionClassifier:

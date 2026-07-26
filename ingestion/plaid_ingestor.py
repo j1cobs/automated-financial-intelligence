@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from datetime import date
 from typing import Any
-from urllib import response
 
 import pandas as pd
 import requests
@@ -39,9 +38,7 @@ class PlaidIngestor(BaseIngestor):
         response.raise_for_status()
         return response.json()
 
-    def _fetch_accounts_raw(
-        self, access_token: str, owner_name: str
-    ) -> list[dict[str, Any]]:
+    def _fetch_accounts_raw(self, access_token: str, owner_name: str) -> list[dict[str, Any]]:
         data = self._post(
             "accounts/get",
             {
@@ -75,21 +72,15 @@ class PlaidIngestor(BaseIngestor):
             )
         return results
 
-    def fetch_accounts(
-        self, owner_by_token: dict[str, str] | None = None
-    ) -> list[dict[str, Any]]:
+    def fetch_accounts(self, owner_by_token: dict[str, str] | None = None) -> list[dict[str, Any]]:
         owner_by_token = owner_by_token or {}
         all_accounts: list[dict[str, Any]] = []
         for token in self.access_tokens:
             try:
-                accounts = self._fetch_accounts_raw(
-                    token, owner_by_token.get(token, "")
-                )
+                accounts = self._fetch_accounts_raw(token, owner_by_token.get(token, ""))
                 all_accounts.extend(accounts)
             except requests.RequestException:
-                LOGGER.exception(
-                    "Failed to fetch accounts for token suffix=%s", token[-6:]
-                )
+                LOGGER.exception("Failed to fetch accounts for token suffix=%s", token[-6:])
                 raise
         return all_accounts
 
@@ -128,18 +119,13 @@ class PlaidIngestor(BaseIngestor):
                 )
                 raw_accounts = []
 
-            account_map = {
-                a["_account_id"]: (a["account_key"], a["account_name"])
-                for a in raw_accounts
-            }
+            account_map = {a["_account_id"]: (a["account_key"], a["account_name"]) for a in raw_accounts}
 
             offset = 0
             total = None
             while total is None or offset < total:
                 try:
-                    payload = self._request_page(
-                        access_token, start_date, end_date, offset
-                    )
+                    payload = self._request_page(access_token, start_date, end_date, offset)
                 except requests.RequestException:
                     LOGGER.exception(
                         "Plaid API request failed for token suffix=%s",
@@ -157,9 +143,7 @@ class PlaidIngestor(BaseIngestor):
                     records.append(
                         {
                             "transaction_id": transaction.get("transaction_id", ""),
-                            "date": pd.to_datetime(
-                                transaction.get("date"), errors="coerce"
-                            ).date(),
+                            "date": pd.to_datetime(transaction.get("date"), errors="coerce").date(),
                             "description": transaction.get("name", ""),
                             "amount": float(transaction.get("amount", 0.0)),
                             "balance": pd.NA,

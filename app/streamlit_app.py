@@ -2,19 +2,11 @@ from __future__ import annotations
 
 import logging
 
-# import sys
-# from pathlib import Path
-
-# # Adds the root directory (one level up from 'app') to the Python path
-# root_path = Path(__file__).resolve().parent.parent
-# if str(root_path) not in sys.path:
-#     sys.path.append(str(root_path))
-
 import streamlit as st
 
-from core.config import load_settings
 from app.auth import render_sidebar, render_sign_in
 from app.dashboard import load_financial_data, render_dashboard
+from core.config import load_settings
 
 LOGGER = logging.getLogger(__name__)
 

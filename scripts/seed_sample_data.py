@@ -32,11 +32,36 @@ from database.db import DatabaseClient
 SEED = 42
 
 ACCOUNTS = [
-    {"owner_name": "Alex", "account_name": "Alex Chequing", "account_type": "depository", "account_subtype": "checking"},
-    {"owner_name": "Alex", "account_name": "Alex Rewards Visa", "account_type": "credit", "account_subtype": "credit card"},
-    {"owner_name": "Alex", "account_name": "Alex TFSA", "account_type": "investment", "account_subtype": "tfsa"},
-    {"owner_name": "Sam", "account_name": "Sam Chequing", "account_type": "depository", "account_subtype": "checking"},
-    {"owner_name": "Sam", "account_name": "Sam High-Interest Savings", "account_type": "depository", "account_subtype": "savings"},
+    {
+        "owner_name": "Alex",
+        "account_name": "Alex Chequing",
+        "account_type": "depository",
+        "account_subtype": "checking",
+    },
+    {
+        "owner_name": "Alex",
+        "account_name": "Alex Rewards Visa",
+        "account_type": "credit",
+        "account_subtype": "credit card",
+    },
+    {
+        "owner_name": "Alex",
+        "account_name": "Alex TFSA",
+        "account_type": "investment",
+        "account_subtype": "tfsa",
+    },
+    {
+        "owner_name": "Sam",
+        "account_name": "Sam Chequing",
+        "account_type": "depository",
+        "account_subtype": "checking",
+    },
+    {
+        "owner_name": "Sam",
+        "account_name": "Sam High-Interest Savings",
+        "account_type": "depository",
+        "account_subtype": "savings",
+    },
 ]
 
 STARTING_BALANCES = {
@@ -81,15 +106,17 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
 
     def add(day: date, description: str, amount: float, account_name: str, category: str) -> None:
         if start_date <= day <= end_date:
-            rows.append({
-                "date": day,
-                "description": description,
-                "amount": round(amount, 2),
-                "account_name": account_name,
-                "category": category,
-                "is_outlier": False,
-                "outlier_score": 0.0,
-            })
+            rows.append(
+                {
+                    "date": day,
+                    "description": description,
+                    "amount": round(amount, 2),
+                    "account_name": account_name,
+                    "category": category,
+                    "is_outlier": False,
+                    "outlier_score": 0.0,
+                }
+            )
 
     # Biweekly payroll (1st and 15th)
     for year, month in _iter_months(start_date, end_date):
@@ -111,7 +138,7 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
         add(date(year, month, 20), "Credit Card Payment", 350.0, "Alex Chequing", "Transfer")
 
         # Biweekly groceries: 2-3x per month per owner
-        for owner, account_name in CHEQUING_BY_OWNER.items():
+        for _owner, account_name in CHEQUING_BY_OWNER.items():
             for _ in range(rng.randint(2, 3)):
                 day_of_month = rng.randint(1, 28)
                 add(
@@ -123,7 +150,7 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
                 )
 
         # ATM withdrawals: once or twice per month from chequing accounts
-        for owner, account_name in CHEQUING_BY_OWNER.items():
+        for _owner, account_name in CHEQUING_BY_OWNER.items():
             for _ in range(rng.choice([1, 2])):
                 day_of_month = rng.randint(1, 28)
                 add(
@@ -136,7 +163,7 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
 
     # Weekly restaurant/coffee: 1-2x per week per owner
     for week_start in _iter_weeks(start_date, end_date):
-        for owner, account_name in CHEQUING_BY_OWNER.items():
+        for _owner, account_name in CHEQUING_BY_OWNER.items():
             for _ in range(rng.choice([1, 2])):
                 offset = rng.randint(0, 6)
                 add(
@@ -168,15 +195,17 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
     for offset, description, amount, category in anomalies:
         d = start_date + timedelta(days=offset)
         if start_date <= d <= end_date:
-            rows.append({
-                "date": d,
-                "description": description,
-                "amount": amount,
-                "account_name": "Alex Rewards Visa",
-                "category": category,
-                "is_outlier": True,
-                "outlier_score": 0.9,
-            })
+            rows.append(
+                {
+                    "date": d,
+                    "description": description,
+                    "amount": amount,
+                    "account_name": "Alex Rewards Visa",
+                    "category": category,
+                    "is_outlier": True,
+                    "outlier_score": 0.9,
+                }
+            )
 
     frame = pd.DataFrame(rows).sort_values("date", kind="stable").reset_index(drop=True)
     frame["source"] = "sample"
@@ -197,19 +226,21 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
     accounts = []
     for account in ACCOUNTS:
         account_name = account["account_name"]
-        accounts.append({
-            "account_key": f"sample:{account_name}",
-            "account_name": account_name,
-            "owner_name": account["owner_name"],
-            "official_name": account_name,
-            "account_type": account["account_type"],
-            "account_subtype": account["account_subtype"],
-            "balance_available": None,
-            "balance_current": balances[account_name],
-            "balance_limit": None,
-            "iso_currency_code": "CAD",
-            "source": "sample",
-        })
+        accounts.append(
+            {
+                "account_key": f"sample:{account_name}",
+                "account_name": account_name,
+                "owner_name": account["owner_name"],
+                "official_name": account_name,
+                "account_type": account["account_type"],
+                "account_subtype": account["account_subtype"],
+                "balance_available": None,
+                "balance_current": balances[account_name],
+                "balance_limit": None,
+                "iso_currency_code": "CAD",
+                "source": "sample",
+            }
+        )
 
     return accounts, frame
 

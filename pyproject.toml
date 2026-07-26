@@ -16,3 +16,11 @@ dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
 include = ["analytics*", "app*", "core*", "database*", "ingestion*", "pipeline*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["venv_automated_financial_intelligence"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]   # pycodestyle, pyflakes, isort, pyupgrade, bugbear

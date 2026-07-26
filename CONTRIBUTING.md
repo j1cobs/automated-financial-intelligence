@@ -28,9 +28,25 @@ Commit both files together.
 ```bash
 python -m unittest discover -s tests -v      # tests
 python main.py                                # pipeline (needs Plaid + DB credentials)
-streamlit run app/streamlit_app.py             # dashboard (needs DB + Google OAuth credentials)
+streamlit run streamlit_app.py                 # dashboard (needs DB + Google OAuth credentials)
 python scripts/seed_sample_data.py             # demo data, no credentials needed beyond DATABASE_URL
 ```
+
+## Linting and formatting
+
+Lint/format is handled by [ruff](https://docs.astral.sh/ruff/), a dev-only tool — it is deliberately
+absent from `requirements.txt`/`requirements.lock` since it's not a runtime dependency.
+
+```bash
+pip install ruff==0.15.22
+ruff check .              # lint
+ruff check --fix .        # lint, applying safe autofixes
+ruff format .             # format
+```
+
+Config lives in `pyproject.toml` (`[tool.ruff]` / `[tool.ruff.lint]`). CI runs `ruff check .` and
+`ruff format --check .` in a dedicated `lint` job and fails the build on any violation — there is no
+soft-launch period.
 
 ## Conventions
 
@@ -45,5 +61,6 @@ python scripts/seed_sample_data.py             # demo data, no credentials neede
 ## Before opening a PR
 
 - Tests pass locally.
+- `ruff check .` and `ruff format --check .` both pass.
 - No personal data (real account names, emails, tokens) anywhere in the diff.
 - New config variables are documented in `.env.example` and the README's configuration table.
