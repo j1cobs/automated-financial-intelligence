@@ -107,7 +107,7 @@ def consume_google_callback(settings) -> bool:
             code_verifier=code_verifier,
         )
         identity = fetch_userinfo(token_response["access_token"])
-    except Exception as error:
+    except Exception:
         LOGGER.exception("Google sign-in failed")
         st.error("Google sign-in failed. Please try again.")
         clear_query_params()
@@ -148,7 +148,8 @@ def render_sign_in(settings) -> bool:
         or not settings.google_oauth_redirect_uri
     ):
         st.error(
-            "Configure GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI first."
+            "Configure GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, "
+            "and GOOGLE_OAUTH_REDIRECT_URI first."
         )
         return False
 
@@ -163,9 +164,7 @@ def render_sign_in(settings) -> bool:
         </a>
         '''
     )
-    st.caption(
-        "Google handles the credential check; the app only accepts allowlisted identities."
-    )
+    st.caption("Google handles the credential check; the app only accepts allowlisted identities.")
     return False
 
 

@@ -124,7 +124,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "budget_saved": "Budgets saved.",
         "budget_over": "Over budget",
         "budget_on_track": "On track",
-        "budget_current_month_note": "Budget view follows your period filter. Projection only shown for current month.",
+        "budget_current_month_note": (
+            "Budget view follows your period filter. Projection only shown for current month."
+        ),
         # Cash flow additions
         "chart_mom_bar": "Income vs. expenses by month",
         "chart_savings_rate": "Monthly savings rate (%)",
@@ -199,7 +201,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "col_score": "Score d'anomalie",
         "no_anomalies": "Aucune anomalie détectée dans la période sélectionnée.",
         "s5_heading": "Transactions",
-        "s5_caption": "Les montants positifs sont des revenus ou crédits. Les montants négatifs sont des dépenses ou débits.",
+        "s5_caption": (
+            "Les montants positifs sont des revenus ou crédits. "
+            "Les montants négatifs sont des dépenses ou débits."
+        ),
         "no_accounts": "Aucune donnée de compte disponible.",
         "no_transactions": "Aucune transaction ne correspond aux filtres sélectionnés.",
         "no_data": "Aucune donnée disponible.",
@@ -230,10 +235,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "budget_saved": "Budgets enregistrés.",
         "budget_over": "Dépassé",
         "budget_on_track": "Dans les limites",
-        "budget_current_month_note": "La vue budget suit le filtre de période. La projection n'est affichée que pour le mois en cours.",
+        "budget_current_month_note": (
+            "La vue budget suit le filtre de période. La projection n'est affichée que pour le mois en cours."
+        ),
         "chart_mom_bar": "Revenus vs. dépenses par mois",
         "chart_savings_rate": "Taux d'épargne mensuel (%)",
-        "edit_cat_label": "Modifiez les catégories en ligne — les changements survivent aux ré-exécutions du pipeline.",
+        "edit_cat_label": (
+            "Modifiez les catégories en ligne — les changements survivent aux ré-exécutions du pipeline."
+        ),
         "period_range": "Période",
         "period_last_30_days": "30 derniers jours",
         "period_current_month": "Mois en cours",
@@ -292,9 +301,7 @@ def load_financial_data(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 def _label_subtype(subtype: str | None, lang: str) -> str:
     if not subtype:
         return "Other"
-    return _SUBTYPE_LABELS.get(lang, _SUBTYPE_LABELS["en"]).get(
-        subtype.lower(), subtype.title()
-    )
+    return _SUBTYPE_LABELS.get(lang, _SUBTYPE_LABELS["en"]).get(subtype.lower(), subtype.title())
 
 
 _PAYMENT_KEYWORDS = r"payment|paiement|prélèvement|prelevement|transfer|xfer"
@@ -425,9 +432,7 @@ def _section_net_worth(
     if selected_owners:
         acct_df = acct_df[acct_df["owner_name"].isin(selected_owners)]
 
-    assets_df = acct_df[
-        acct_df["account_type"].isin(["depository", "investment"])
-    ].copy()
+    assets_df = acct_df[acct_df["account_type"].isin(["depository", "investment"])].copy()
     credit_df = acct_df[acct_df["account_type"] == "credit"].copy()
 
     total_assets = assets_df["balance_current"].sum()
@@ -448,9 +453,7 @@ def _section_net_worth(
     with c1:
         if not assets_df.empty:
             assets_df = assets_df.copy()
-            assets_df["subtype_label"] = assets_df["account_subtype"].apply(
-                lambda s: _label_subtype(s, lang)
-            )
+            assets_df["subtype_label"] = assets_df["account_subtype"].apply(lambda s: _label_subtype(s, lang))
             fig = px.pie(
                 assets_df,
                 values="balance_current",
@@ -465,11 +468,7 @@ def _section_net_worth(
     with c2:
         owner_data = []
         for _, row in acct_df.iterrows():
-            val = (
-                row["balance_current"]
-                if row["account_type"] != "credit"
-                else -row["balance_current"]
-            )
+            val = row["balance_current"] if row["account_type"] != "credit" else -row["balance_current"]
             owner_data.append(
                 {
                     "owner": row["owner_name"] or "Unknown",
@@ -565,17 +564,13 @@ def _build_sidebar_filters(
         selected_month_labels = st.sidebar.multiselect(
             T["period"], options=month_options, default=month_options
         )
-        selected_month_keys = df.loc[
-            df["_month_label"].isin(selected_month_labels), "_month_key"
-        ].unique()
+        selected_month_keys = df.loc[df["_month_label"].isin(selected_month_labels), "_month_key"].unique()
     else:
         selected_month_keys = _preset_month_keys(selected_preset, df)
 
     # Owner multiselect
     owners = sorted(df["owner_name"].dropna().unique())
-    selected_owners = st.sidebar.multiselect(
-        T["owners"], options=owners, default=owners
-    )
+    selected_owners = st.sidebar.multiselect(T["owners"], options=owners, default=owners)
 
     # Category multiselect
     cats = sorted(df["category"].dropna().unique())
@@ -584,9 +579,7 @@ def _build_sidebar_filters(
     # Account multiselect — options restricted to the selected owners
     owner_subset = df[df["owner_name"].isin(selected_owners)] if selected_owners else df
     accounts = sorted(owner_subset["account_name"].dropna().unique())
-    selected_accounts = st.sidebar.multiselect(
-        T["accounts"], options=accounts, default=accounts
-    )
+    selected_accounts = st.sidebar.multiselect(T["accounts"], options=accounts, default=accounts)
 
     # Amount range slider
     abs_amounts = df["amount"].abs()
@@ -707,8 +700,7 @@ def _section_overview(
         if len(months_sorted) >= 2:
             this_m, last_m = months_sorted[-1], months_sorted[-2]
             mom = bounded_all_time[
-                bounded_all_time["month"].isin([this_m, last_m])
-                & (bounded_all_time["tx_type"] == "expense")
+                bounded_all_time["month"].isin([this_m, last_m]) & (bounded_all_time["tx_type"] == "expense")
             ]
             mom_grp = mom.groupby(["category", "month"], as_index=False)["adjusted_amount"].sum()
             mom_grp["abs_amount"] = mom_grp["adjusted_amount"].abs()
@@ -731,16 +723,13 @@ def _section_overview(
         if selected_owners
         else pd.Series(True, index=acct_df.index)
     )
-    liquid_assets = acct_df[
-        acct_df["account_type"].isin(["depository"]) & owner_mask
-    ]["balance_current"].sum()
+    liquid_assets = acct_df[acct_df["account_type"].isin(["depository"]) & owner_mask][
+        "balance_current"
+    ].sum()
 
     # Trend-shaped: always full history, ignoring the sidebar's quick-range window.
     monthly_expenses_series = (
-        all_time_df[all_time_df["tx_type"] == "expense"]
-        .groupby("month")["adjusted_amount"]
-        .sum()
-        .abs()
+        all_time_df[all_time_df["tx_type"] == "expense"].groupby("month")["adjusted_amount"].sum().abs()
     )
     if not monthly_expenses_series.empty:
         avg_monthly_expenses = monthly_expenses_series.mean()
@@ -788,9 +777,7 @@ def _section_overview(
         )
         if not monthly.empty:
             monthly["savings_rate"] = (
-                (monthly["income"] - monthly["expenses"])
-                / monthly["income"].clip(lower=0.01)
-                * 100
+                (monthly["income"] - monthly["expenses"]) / monthly["income"].clip(lower=0.01) * 100
             )
             fig_sr = px.line(
                 monthly,
@@ -833,13 +820,11 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
     st.caption(T["transfers_note"])
 
     mom_summary = (
-        df[df["tx_type"] != "transfer"]
-        .groupby(["month", "tx_type"], as_index=False)["adjusted_amount"]
-        .sum()
+        df[df["tx_type"] != "transfer"].groupby(["month", "tx_type"], as_index=False)["adjusted_amount"].sum()
     )
-    mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"] = (
-        mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"].abs()
-    )
+    mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"] = mom_summary.loc[
+        mom_summary["tx_type"] == "expense", "adjusted_amount"
+    ].abs()
     fig_mom = px.bar(
         mom_summary,
         x="month",
@@ -853,13 +838,11 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
     st.plotly_chart(fig_mom, use_container_width=True)
 
     week_summary = (
-        df[df["tx_type"] != "transfer"]
-        .groupby(["week", "tx_type"], as_index=False)["adjusted_amount"]
-        .sum()
+        df[df["tx_type"] != "transfer"].groupby(["week", "tx_type"], as_index=False)["adjusted_amount"].sum()
     )
-    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = (
-        week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"].abs()
-    )
+    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = week_summary.loc[
+        week_summary["tx_type"] == "expense", "adjusted_amount"
+    ].abs()
     fig_week = px.bar(
         week_summary,
         x="week",
@@ -894,9 +877,7 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
-        split = real.groupby(["month", "owner_name"], as_index=False)[
-            "adjusted_amount"
-        ].sum()
+        split = real.groupby(["month", "owner_name"], as_index=False)["adjusted_amount"].sum()
         fig2 = px.bar(
             split,
             x="month",
@@ -976,7 +957,7 @@ def _section_budget(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         if limit:
             pct = min(spent / limit, 1.0)
             status = T["budget_over"] if spent > limit else T["budget_on_track"]
-            label = f"{cat} — ${spent:,.2f} / ${limit:,.2f} ({pct*100:.0f}%) — {status} | {projected_label}"
+            label = f"{cat} — ${spent:,.2f} / ${limit:,.2f} ({pct * 100:.0f}%) — {status} | {projected_label}"
             st.progress(pct, text=label)
         else:
             st.write(f"**{cat}**: ${spent:,.2f} spent (no budget set) | {projected_label}")
@@ -987,10 +968,7 @@ def _section_budget(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
     # Budget editor — all canonical categories from DB
     all_edit_cats = db.get_categories()
     editor_df = pd.DataFrame(
-        [
-            {"category": cat, "monthly_limit": budget_map.get(cat, 0.0)}
-            for cat in all_edit_cats
-        ]
+        [{"category": cat, "monthly_limit": budget_map.get(cat, 0.0)} for cat in all_edit_cats]
     )
     edited = st.data_editor(
         editor_df,
@@ -1097,14 +1075,15 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         key=editor_key,
         column_config={
             "hash": None,  # hidden
-            T["col_cat"]: st.column_config.SelectboxColumn(
-                T["col_cat"], options=all_cats, required=False
-            ),
+            T["col_cat"]: st.column_config.SelectboxColumn(T["col_cat"], options=all_cats, required=False),
             T["col_recurring"]: st.column_config.CheckboxColumn(T["col_recurring"]),
         },
         disabled=[
-            T["col_date"], T["col_owner"], T["col_account"],
-            T["col_desc"], T["col_amount"],
+            T["col_date"],
+            T["col_owner"],
+            T["col_account"],
+            T["col_desc"],
+            T["col_amount"],
         ],
         use_container_width=True,
         hide_index=True,
@@ -1129,7 +1108,8 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
         st.session_state["lang"] = "fr" if st.session_state.get("lang_fr") else "en"
 
     st.sidebar.toggle(
-        "Français", key="lang_fr",
+        "Français",
+        key="lang_fr",
         value=st.session_state.get("lang", "en") == "fr",
         on_change=_on_lang_toggle,
     )

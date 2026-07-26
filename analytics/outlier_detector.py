@@ -20,7 +20,7 @@ class OutlierDetector:
         scored["outlier_score"] = 0.0
         scored["is_outlier"] = False
 
-        for category, group in scored.groupby("category", dropna=False):
+        for _category, group in scored.groupby("category", dropna=False):
             group_index = group.index
             features = group[["amount"]].fillna(0.0).astype(float)
             if len(group) < self.min_group_size:

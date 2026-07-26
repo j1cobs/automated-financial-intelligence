@@ -27,9 +27,7 @@ def _load_secrets_file(path: Path | None = None) -> dict[str, Any]:
         return tomllib.load(file)
 
 
-def _read_value(
-    key: str, secrets: dict[str, Any], default: str | None = None
-) -> str | None:
+def _read_value(key: str, secrets: dict[str, Any], default: str | None = None) -> str | None:
     if key in os.environ:
         return os.environ[key]
     if key in secrets:
@@ -103,18 +101,12 @@ def load_settings() -> Settings:
         plaid_client_id=_read_value("PLAID_CLIENT_ID", secrets),
         plaid_secret=_read_value("PLAID_SECRET", secrets),
         plaid_access_tokens=_split_csv(_read_value("PLAID_ACCESS_TOKENS", secrets, "")),
-        plaid_access_token_owners=_split_csv(
-            _read_value("PLAID_ACCESS_TOKEN_OWNERS", secrets, "")
-        ),
-        plaid_base_url=_read_value(
-            "PLAID_BASE_URL", secrets, "https://sandbox.plaid.com"
-        )
+        plaid_access_token_owners=_split_csv(_read_value("PLAID_ACCESS_TOKEN_OWNERS", secrets, "")),
+        plaid_base_url=_read_value("PLAID_BASE_URL", secrets, "https://sandbox.plaid.com")
         or "https://sandbox.plaid.com",
         database_url=enforce_tls(database_url),
         model_path=_read_value("MODEL_PATH", secrets, "artifacts/classifier.joblib")
         or "artifacts/classifier.joblib",
-        labeled_dataset_path=_read_value(
-            "LABELED_DATASET_PATH", secrets, "labeled_transactions.csv"
-        )
+        labeled_dataset_path=_read_value("LABELED_DATASET_PATH", secrets, "labeled_transactions.csv")
         or "labeled_transactions.csv",
     )

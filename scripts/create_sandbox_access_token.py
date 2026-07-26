@@ -17,14 +17,9 @@ if it's not already present.
 from __future__ import annotations
 
 import argparse
-from http import client
-import json
 import os
-import sys
-from typing import List
 
 import requests
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,7 +29,9 @@ DEFAULT_INSTITUTION = "ins_109508"
 DEFAULT_PRODUCTS = ["transactions"]
 
 
-def create_public_token(client_id: str, secret: str, institution_id: str, products: List[str], base_url: str) -> str:
+def create_public_token(
+    client_id: str, secret: str, institution_id: str, products: list[str], base_url: str
+) -> str:
     url = f"{base_url.rstrip('/')}/sandbox/public_token/create"
     payload = {
         "client_id": client_id,
@@ -61,7 +58,7 @@ def update_env_file(env_path: str, token: str) -> None:
     # Read existing file (if any)
     lines = []
     if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as fh:
+        with open(env_path, encoding="utf-8") as fh:
             lines = fh.readlines()
 
     key = "PLAID_ACCESS_TOKENS"
@@ -111,7 +108,13 @@ def main() -> int:
         return 2
 
     try:
-        public_token = create_public_token(client_id, secret, args.institution, [p.strip() for p in args.products.split(",") if p.strip()], args.base_url)
+        public_token = create_public_token(
+            client_id,
+            secret,
+            args.institution,
+            [p.strip() for p in args.products.split(",") if p.strip()],
+            args.base_url,
+        )
         access_token = exchange_public_token(client_id, secret, public_token, args.base_url)
     except requests.RequestException as exc:
         print("ERROR: Plaid API request failed:", exc)
