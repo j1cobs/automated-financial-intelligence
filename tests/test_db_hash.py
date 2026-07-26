@@ -25,12 +25,8 @@ class TransactionHashTests(unittest.TestCase):
         renamed_account = {**base, "account_key": "plaid:abc123", "account_name": "Checking ••••9999"}
         different_account = {**base, "account_key": "plaid:xyz789"}
 
-        self.assertEqual(
-            build_transaction_hash(same_account), build_transaction_hash(renamed_account)
-        )
-        self.assertNotEqual(
-            build_transaction_hash(same_account), build_transaction_hash(different_account)
-        )
+        self.assertEqual(build_transaction_hash(same_account), build_transaction_hash(renamed_account))
+        self.assertNotEqual(build_transaction_hash(same_account), build_transaction_hash(different_account))
 
     def test_hash_is_type_independent(self) -> None:
         """Regression test: the same transaction must hash identically whether amount

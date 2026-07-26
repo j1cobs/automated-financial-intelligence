@@ -18,14 +18,12 @@ class PlaceholderModelTests(unittest.TestCase):
         )
 
         categorized = frame.copy()
-        categorized["category"] = models.classifier.categorize(
-            categorized["description"]
-        )
+        categorized["category"] = models.classifier.categorize(categorized["description"])
         scored = models.outlier_detector.score(categorized)
 
         self.assertEqual(list(scored["category"]), ["Uncategorized", "Uncategorized"])
         self.assertTrue((scored["outlier_score"] == 0.0).all())
-        self.assertTrue((scored["is_outlier"] == False).all())
+        self.assertTrue((~scored["is_outlier"]).all())
 
 
 if __name__ == "__main__":
