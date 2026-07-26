@@ -21,13 +21,21 @@
 
 ## Where things stand (updated 2026-07-20)
 
-**Complete:** Phases 1, 2, 2.5, 2.6, 2.7, 2.8, 3 (3a–3s, all), 4, 5.
-**Partial:** Phase 0 (credential rotations done; three owner actions left), Phase 6 (only
-`tests/test_db_upsert_counts.py` exists, covering part of 6a).
-**Not started:** Phases 8, 9, 10. **Deferred by choice:** Phase 7 (ML), Appendix A.
+**Complete:** Phases 1, 2, 2.5, 2.6, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10a, and Phase 6 except the
+optional pytest migration.
+**Partial:** Phase 0 (only the HTTPS redirect URI and README screenshots remain), Phase 10 (10a done;
+10b–10i are the deploy itself), Phase 8 (8a done; 8b's manual checklist is a pre-merge ritual, not code).
+**Not started:** Phase 9. **Deferred by choice:** Phase 7 (ML), Appendix A, 6h (pytest).
 
-Phase 2.5 closing (its last item, 2.5h, landed with Phase 4) means **no code-side publish blocker remains**.
-What is left before `dev → main` is owner actions and a quality gate, not features.
+> **⚠️ Uncommitted work (as of 2026-07-20).** Phases 8a, 10a, and 6 are implemented **in the working tree
+> but committed to no branch** — 22 modified files plus 7 untracked ones, including the root
+> `streamlit_app.py` and six new test files. Verified locally: `ruff check .` → "All checks passed",
+> `ruff format --check .` → "38 files already formatted", and the suite runs **99 tests, all passing**.
+> Getting these committed and pushed is the immediate next action; until then the work exists in exactly
+> one place and is one `git checkout .` away from being lost.
+
+The `dev → main` merge landed 2026-07-20 (Phase 0), so the publish gate is closed and the daily cron is
+live. What remains is the deploy, mobile, and ML — features, not blockers.
 
 ### Recommended order of work
 
@@ -35,18 +43,16 @@ Ranked by what unblocks the most, not by phase number.
 
 | # | Work | Why here | Effort |
 |---|---|---|---|
-| 1 | **Phase 10a** — root `streamlit_app.py` | Hard prerequisite for *any* deploy, and fixes a latent import bug that only hides behind the local editable install. Tiny change, unblocks all of Phase 10. | ~10 min |
-| 2 | **Phase 8** — ruff + black + review checklist | The stated pre-merge gate, and cheapest to fix *before* code is public. Catches formatting drift across the large Phase 3 surface. | Small |
-| 3 | **Phase 0** — merge `dev` → `main`, populate GitHub Secrets | One merge activates the Actions cron *and* gives SCC a stable branch to track (constraints 11, 21). | Owner action |
-| 4 | **Phase 10b–10i** — deploy to SCC, register HTTPS redirect URI | Produces the public URL, which is the only way to close Phase 0's last checkbox. | Medium |
-| 5 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists, so this is what makes the deploy actually useful (constraint 22). | Large |
-| 6 | **Phase 6** — test coverage expansion | Not a functional blocker (33 tests pass, CI green), but coverage is credibility for an interview showcase. Can proceed in parallel with anything above. | Medium |
-| 7 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
-| 8 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
+| 1 | **Commit the working tree** | Phases 8a, 10a, and 6 are done but uncommitted, on a branch now 1 behind `origin/main`. Fetch, fast-forward, then commit in separate `style:` / `fix:` / `feat:` / `ci:` / `test:` commits so the ruff reformat never hides the seven genuine lint fixes. | ~30 min |
+| 2 | **Phase 10b–10i** — deploy to SCC, register HTTPS redirect URI | 10a (the blocker) is done and the merge has landed, so SCC now has a stable default branch to track. Produces the public URL, which is the only way to close Phase 0's last checkbox. | Medium |
+| 3 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists, so this is what makes the deploy actually useful (constraint 22). Largest remaining code effort. | Large |
+| 4 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
+| 5 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
 
-**What changed in this ranking:** Phase 10 is new and jumps near the top because 10a is both trivial and
-blocking. Phase 8 moved ahead of the merge because it is the gate for that merge. Phase 6 dropped below the
-deploy work — it improves confidence but blocks nothing, and CI is already green.
+**What changed in this ranking:** the previous top three (10a, Phase 8, the Phase 0 merge) are all done —
+10a and 8a as uncommitted working-tree changes, the merge on GitHub. Phase 6 also dropped off: it went from
+"only part of 6a exists" to 6a–6g complete and 99 tests green. Committing that work replaced them at #1,
+because it is the one step everything else now depends on.
 
 ---
 
@@ -64,8 +70,13 @@ The local untracked `.env` holds **live production credentials**. Git history is
 - [x] Confirm `GOOGLE_ALLOWED_EMAILS` in production secrets lists exactly the two authorized addresses.
 - [x] Confirm the managed Postgres (Supabase/Neon) tier has encryption at rest enabled. **Confirmed** — all
   customer data is encrypted at rest on the provider.
-- [ ] At publish time: merge `dev` → `main`, populate GitHub Secrets (cron only runs from the default
-  branch). **Not started.** Do this last, and only once the publish blockers below are actually true.
+- [x] At publish time: merge `dev` → `main`, populate GitHub Secrets (cron only runs from the default
+  branch). **Done 2026-07-20.** `main` is now `b27090a` ("feat(app): first real push to main, v1 of
+  dashboard and pipeline") and contains every commit from `dev` (GitHub `compare/main...dev` reports
+  `ahead_by=0, behind_by=1`). **Consequence: the daily pipeline cron is now live** — the workflow sits on
+  the default branch and the Secrets it needs are populated, so the Automation caveat below (and the
+  matching one in `CLAUDE.md`) is obsolete and must be corrected. Note that a *local* `git fetch` is still
+  required: local `main` is stale at `fa80b46` and local `dev` is 1 commit behind `origin/main`.
 - [ ] Capture dashboard screenshots on sample data for the README (leave placeholder section, don't block merge).
 
 ---
@@ -180,7 +191,7 @@ Plaid-only descriptions are true when written:
 - **Architecture / ingestion bullet**: remove `CSVIngestor` and `runner._build_ingestor` source-switching description — `PlaidIngestor` is the only implementation; `BaseIngestor` remains as the interface seam for future sources.
 - **Configuration section**: remove `PlaidLinkConfig` (doesn't exist) and the `INGESTION_SOURCE`/`CSV_PATHS` description. Plaid vars are required *to run the pipeline* but optional at config-load time. Should read: `core/` — shared helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`, `google_oauth.py`.
 - **Scripts bullet**: remove `scripts/generate_public_token.py` reference; replace with `scripts/seed_sample_data.py` (Phase 2b).
-- **Lines 72-75** (Automation section): replace "still on the dev branch and uncommitted" with "committed but inert until required Secrets are populated on the default branch."
+- **Lines 72-75** (Automation section): replace "still on the dev branch and uncommitted" with "committed but inert until required Secrets are populated on the default branch." **Superseded 2026-07-20** — the `dev → main` merge landed and the Secrets are populated, so the workflow is no longer inert. `CLAUDE.md`'s Automation section must now say the daily cron is **live**, and the same correction applies to this plan's own Automation caveat.
 - **Line 58** (dashboard description): remove "Altair" — the dashboard uses Plotly only.
 
 ### 1f. Dependency lockfile with hashes (supply chain)
@@ -1948,6 +1959,19 @@ secrets-bearing daily job. Installs use the hash-locked `requirements.lock` (Pha
 
 ## Phase 6 — Tests
 
+> **Status (2026-07-20): implemented — but uncommitted.** 6a–6g are all written and passing; only **6h**
+> (the optional pytest migration) remains, and it is deliberately deferred. The suite now runs **99 tests,
+> all green**, up from the 33 recorded earlier in this plan. Six new files landed —
+> `tests/test_db_upserts.py` (6a, 245 lines, supersedes the older `test_db_upsert_counts.py`),
+> `test_pipeline_runner.py` (6b), `test_config.py` (6c), `test_outlier_detector.py` (6d),
+> `test_dashboard_helpers.py` (6e), `test_seed_sample_data.py` (6f) — plus the 6g auth-security cases
+> appended to the existing `tests/test_app_auth.py`. All use `unittest.mock` throughout; none touches a
+> live DB or the network, as required below.
+>
+> **Runner caveat:** the system `python` on PATH lacks `psycopg`, so `python -m unittest discover -s tests`
+> errors on 8 tests from a bare shell. Use the project virtualenv's interpreter
+> (`venv_automated_financial_intelligence/Scripts/python.exe`) to get the real 99-test result.
+
 All tests must be pure — no live DB, no network. Mock seam for DB: `@patch("database.db.psycopg.connect")`. All `pipeline.runner` deps patchable at `pipeline.runner.*`.
 
 ### 6a. `tests/test_db_upserts.py`
@@ -2037,8 +2061,27 @@ Pure — patch `DatabaseClient` where the seed script imports it (e.g. `@patch("
 - `test_generate_anomalies_flagged` — exactly 3 rows with `is_outlier=True`, each with `outlier_score == 0.9`.
 - `test_generate_categories_canonical` — set of `category` values ⊆ the Phase 3c seed list (title case).
 - `test_generate_transfer_pair` — the monthly credit-card payment posts as a −350/+350 pair, both `category="Transfer"`.
+- `test_generate_source_is_sample` — every row has `source == "sample"`.
+- `test_generate_deterministic` — two calls with the same `days` → identical frames (`assert_frame_equal`).
+- `test_main_calls_db_in_order` — mocked client: `ensure_schema`, `upsert_plaid_accounts`, `upsert_categories`, `upsert_transactions` all called.
 
-### 6g. (optional / not blocking) Adopt `pytest` as the test runner
+### 6g. Auth security tests (extend `tests/test_app_auth.py`)
+
+Cover the Phase 2.5b/2.5d hardening. Mock `requests` at `core.google_oauth.requests`; drive
+`app.auth` with a fake `st.session_state` / `st.query_params` as the existing tests do.
+
+- `test_unverified_email_rejected` — userinfo payload with `email_verified: false` and an allowlisted email → `is_authorized_identity` returns `False`.
+- `test_verified_email_on_allowlist_accepted` — `email_verified: true` + allowlisted email → `True`.
+- `test_missing_email_verified_claim_rejected` — payload without the claim → `False` (fails closed).
+- `test_pending_state_expires_after_ttl` — insert a pending entry with `created_at` 601s in the past; callback with its state → rejected via the "session expired" path.
+- `test_pending_state_capped` — insert 32 entries; `start_google_sign_in` → oldest evicted, size ≤ 32.
+- `test_auth_url_has_no_offline_access` — `build_authorization_url(...)` output does not contain `access_type=offline` (2.5c).
+
+### 6h. (optional / not blocking / deferred) Adopt `pytest` as the test runner
+
+> Renumbered from `6g` on 2026-07-20 — this section and the auth-security tests above were both numbered
+> `6g`. The auth tests kept the letter (they shipped as part of the 6a–6g batch); this one moved to `6h`
+> and was reordered to sit last, which also reflects that it is the only part of Phase 6 still open.
 
 Found 2026-07-19: `pytest` already collects and runs the existing `unittest.TestCase`-based suite as-is —
 no rewrite required, it's a drop-in runner. The only friction seen was environmental (bare `pytest`, run
@@ -2061,21 +2104,6 @@ If ever adopted:
   `_classify_tx_type` matrix in 6e, the `google_oauth` allow/block cases) — nicer diffs and less
   boilerplate, but with ~13-30 tests total the payoff is modest; only worth it if pytest fixtures/parametrize
   end up used elsewhere too.
-- `test_generate_source_is_sample` — every row has `source == "sample"`.
-- `test_generate_deterministic` — two calls with the same `days` → identical frames (`assert_frame_equal`).
-- `test_main_calls_db_in_order` — mocked client: `ensure_schema`, `upsert_plaid_accounts`, `upsert_categories`, `upsert_transactions` all called.
-
-### 6g. Auth security tests (extend `tests/test_app_auth.py`)
-
-Cover the Phase 2.5b/2.5d hardening. Mock `requests` at `core.google_oauth.requests`; drive
-`app.auth` with a fake `st.session_state` / `st.query_params` as the existing tests do.
-
-- `test_unverified_email_rejected` — userinfo payload with `email_verified: false` and an allowlisted email → `is_authorized_identity` returns `False`.
-- `test_verified_email_on_allowlist_accepted` — `email_verified: true` + allowlisted email → `True`.
-- `test_missing_email_verified_claim_rejected` — payload without the claim → `False` (fails closed).
-- `test_pending_state_expires_after_ttl` — insert a pending entry with `created_at` 601s in the past; callback with its state → rejected via the "session expired" path.
-- `test_pending_state_capped` — insert 32 entries; `start_google_sign_in` → oldest evicted, size ≤ 32.
-- `test_auth_url_has_no_offline_access` — `build_authorization_url(...)` output does not contain `access_type=offline` (2.5c).
 
 ---
 
@@ -2096,42 +2124,142 @@ Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo i
 ## Phase 8 — Code quality: modularity, comments, conventions (verification gate)
 
 A pass to confirm new code is modular, commented where non-obvious, and conventionally styled — enforced
-by a review checklist **and** automated tooling in CI.
+by a review checklist (8b) **and** an automated ruff gate in CI (8a).
 
-### 8a. Tooling — ruff + black
+### 8a. Tooling — ruff (lint + format) in CI
 
-- Dev-only tools (NOT added to `requirements.txt`; document in `CONTRIBUTING.md`, Phase 4f). Install:
-  `pip install ruff black`.
-- Add config to `pyproject.toml` (extends the 1c rewrite):
-  ```toml
-  [tool.black]
-  line-length = 110
-  target-version = ["py311"]
+> **Amended 2026-07-20 — black is dropped in favour of `ruff format`.** This section originally specified
+> ruff *and* black, written before ruff's formatter was a viable black replacement. It now is:
+> `ruff format` is black-compatible by design, so output is effectively identical, but it is one tool, one
+> config block, one pinned version, and it installs and runs an order of magnitude faster. Two further
+> decisions were locked at the same time: **`line-length = 110`** (as originally proposed — measured below),
+> and the lint job is **blocking from its first run**, not soft-launched.
+>
+> Status: **implemented 2026-07-21.** `ruff==0.15.22` resolved and pinned; `[tool.ruff]`/`[tool.ruff.lint]`
+> added to `pyproject.toml`; `ruff format .` + `ruff check --fix .` applied repo-wide; the 15 over-length
+> lines hand-wrapped; the genuine `B`/`UP` findings reviewed individually (see below) — none were blanket
+> `--fix`ed; `lint` job added to `ci.yml` as a sibling of `test`; `CONTRIBUTING.md` documents the tooling
+> and PR checklist gained the `ruff check . && ruff format --check .` bullet.
+>
+> **Findings that needed judgment, not autofix:** `pipeline/runner.py`'s `zip(plaid_access_tokens,
+> plaid_access_token_owners)` got `strict=False` explicit (not `True` — owners is intentionally optional,
+> and `_build_ingestor` only enforces equal length when owners is non-empty; `strict=True` would raise on
+> the legitimate "no owners configured" case). Its `except psycopg.OperationalError` gained
+> `raise SystemExit(1) from None`, matching the already-decided Phase 2.5 security posture (don't leak a
+> DSN-bearing traceback). `scripts/dedupe_accounts.py`'s `zip(columns, row)` got `strict=True` (safe —
+> `cur.description` and each fetched row are guaranteed equal length by the DB-API). Three unused
+> `for owner, account_name in ...` loop vars in `scripts/seed_sample_data.py` and one in
+> `analytics/outlier_detector.py` were renamed `_owner`/`_category`. `tests/test_placeholders.py`'s
+> `(scored["is_outlier"] == False).all()` was rewritten to `(~scored["is_outlier"]).all()` — ruff's own
+> suggested text (`not scored["is_outlier"]`) would have raised `ValueError: truth value of a Series is
+> ambiguous`; the E712 autofix is unsafe for pandas Series for exactly this reason.
 
-  [tool.ruff]
-  line-length = 110
-  target-version = "py311"
-  extend-exclude = ["venv_automated_financial_intelligence"]
+**State *before* this work, kept for context (measured 2026-07-20):**
 
-  [tool.ruff.lint]
-  select = ["E", "F", "I", "UP", "B"]   # pyflakes, pycodestyle, isort, pyupgrade, bugbear
-  ```
-  (Confirm `line-length` against the current code before committing — pick the value that reformats least;
-  110 is a starting proposal, adjust to the repo's actual longest-common width.)
-- Add a **lint job** to `.github/workflows/ci.yml` (Phase 5a), parallel to the test job:
-  ```yaml
+- `.github/workflows/ci.yml` has exactly one job, `test` (matrix `["3.12", "3.13"]`, actions SHA-pinned per
+  Phase 5, installs via `pip install --require-hashes -r requirements.lock`). No linting of any kind runs.
+- `pyproject.toml` is 19 lines with no `[tool.*]` section at all.
+- Neither `ruff` nor `black` is installed locally, and neither is in `requirements.txt` / `requirements.lock`.
+  They stay **dev-only** — never added to the hash-locked runtime deps.
+- 31 tracked `.py` files. Lines exceeding 110 chars, by file: `scripts/seed_sample_data.py` (5),
+  `app/dashboard.py` (5), `database/db.py` (2), `scripts/create_sandbox_access_token.py` (2),
+  `app/auth.py` (1) — **15 lines across 5 files**, longest 154. Small enough to fix in one pass, which is
+  what makes the blocking-from-day-one decision affordable.
+
+#### `pyproject.toml` — append (do not rewrite; 1c's structure stays)
+
+```toml
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["venv_automated_financial_intelligence"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]   # pycodestyle, pyflakes, isort, pyupgrade, bugbear
+```
+
+Two deliberate deviations from the original snippet above: `target-version` is **`py312`**, not `py311` —
+`requires-python = ">=3.12"` (1c) and CI tests 3.12/3.13, so `py311` would suppress pyupgrade rewrites the
+project can actually use. And there is no `[tool.black]` section. `extend-exclude` covers the local
+virtualenv (`CLAUDE.md`: never edit or search inside it); ruff also honours `.gitignore` by default, so
+this is belt-and-braces.
+
+#### Discovery pass — run before touching any code
+
+Ruff has never run on this tree, so the violation set is unmeasured. Run first, read the output, *then* edit:
+
+```bash
+pip install ruff              # note the resolved version — it becomes the CI pin
+ruff check .                  # lint findings
+ruff format --diff .          # what the formatter would rewrite, without writing
+```
+
+Expect three classes of finding, which must be handled **differently**:
+
+| Class | Rules | How to handle |
+|---|---|---|
+| Pure formatting | — | `ruff format .` — mechanical, no review needed |
+| Import order / unused imports | `I`, `F401` | `ruff check --fix .` — safe, but eyeball the diff |
+| Real findings | `B` (bugbear), `UP` | **Review individually. Do not blanket-`--fix`.** B-rules surface genuine bugs (mutable default args, loop-variable binding) that deserve a real fix, not a rewrite |
+
+If a `B` or `UP` finding implies a behavioural change, **stop and raise it** — this is a formatting pass, not
+a refactor. Genuine false positives get a narrowly-scoped `# noqa: <rule>` with a comment explaining why,
+never a blanket rule removal from `select`.
+
+#### Fix the 15 over-length lines
+
+`ruff format` wraps most long lines, but not long string literals, comments, or URLs. Hand-wrap whatever
+`ruff check .` still reports as `E501` afterwards, in the five files listed above. Preserve meaning exactly
+— several of these are docstrings and comments recording non-obvious invariants (the Plaid sign convention,
+why `user_category` exists). **Rewrap, don't rewrite.**
+
+#### `.github/workflows/ci.yml` — add a `lint` job
+
+Sibling of the existing `test` job under `jobs:`, so the two run in parallel:
+
+```yaml
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<full-commit-SHA>      # SHA-pinned, per Phase 5 security note
-      - uses: actions/setup-python@<full-commit-SHA>
-        with: { python-version: "3.12" }
-      - run: pip install ruff black                    # dev tools; not hash-locked runtime deps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff==0.15.22
       - run: ruff check .
-      - run: black --check .
-  ```
-  Actions stay SHA-pinned (Phase 5). Keep this non-blocking-optional at first if a full reformat is noisy;
-  make it required once the tree is clean.
+      - run: ruff format --check .
+```
+
+- **Reuse the exact SHA pins already at `ci.yml:17-18`** — do not re-resolve them. Phase 5 requires
+  SHA-pinned actions and those two are already verified for this repo.
+- **Pin the ruff version explicitly.** An unpinned `pip install ruff` lets a new ruff release turn a green
+  `main` red with no code change. Use the version resolved in the discovery pass, so local and CI agree.
+- Single Python version — lint results do not vary across 3.12/3.13, so a matrix wastes CI minutes.
+- **No `continue-on-error`** — blocking from the first run.
+- The job deliberately does **not** install `requirements.lock`: ruff needs no project deps, so skipping the
+  install makes it finish in seconds.
+
+#### `CONTRIBUTING.md` — document the tooling
+
+New `## Linting and formatting` section between `## Running things` and `## Conventions`, stating that ruff
+is a dev tool deliberately absent from `requirements.txt`/`requirements.lock`, and listing
+`pip install ruff==0.15.22` / `ruff check .` / `ruff check --fix .` / `ruff format .`, plus the note
+that CI runs `ruff check .` and `ruff format --check .` and fails on any violation, with config in
+`pyproject.toml`. Also add one bullet to the existing `## Before opening a PR` list:
+
+- `ruff check .` and `ruff format --check .` both pass.
+
+#### Commit structure
+
+Three commits, in this order, so mechanical noise never hides a real change:
+
+1. `style: apply ruff format and autofixes` — `ruff format .` + `ruff check --fix .` output plus the
+   hand-wrapped `E501` lines. **No behavioural change.**
+2. `fix: <specific>` — **only** if the discovery pass surfaced genuine `B`/`UP` findings worth fixing. Skip
+   this commit entirely if there are none.
+3. `ci: add ruff lint and format gate` — `pyproject.toml` config, the `lint` job, `CONTRIBUTING.md`, and
+   marking this section done.
 
 ### 8b. Review checklist (manual gate before `dev → main`)
 
@@ -2148,9 +2276,29 @@ by a review checklist **and** automated tooling in CI.
 - **i18n parity:** every new UI string exists in both `en` and `fr` `_STRINGS`.
 
 ### 8c. Verification
-- `ruff check .` and `black --check .` pass locally and in CI.
-- `python -m unittest discover -s tests -v` still green (formatting changed nothing behavioral).
-- `git grep -E "jacos|jacosse|gmail\.com|C:\\\\Users"` → no matches (reaffirm the Phase-level rule).
+
+```bash
+# 1. Both halves of the tooling gate pass locally
+ruff check .
+ruff format --check .
+
+# 2. Formatting changed nothing behavioural — the suite must stay green
+python -m unittest discover -s tests -v      # 99 tests, all passing (use the venv interpreter)
+
+# 3. Nothing personal leaked in (reaffirms the Phase-level rule)
+git grep -E "jacos|jacosse|gmail\.com|C:\\\\Users"    # expect no matches
+
+# 4. The app still runs — formatting touches app/dashboard.py and app/auth.py
+python scripts/seed_sample_data.py            # needs DATABASE_URL only
+streamlit run app/streamlit_app.py            # sign in, click through all four tabs
+```
+
+Then push the branch and confirm on GitHub that **both** `test` (2 jobs) and `lint` (1 job) appear and go
+green. To prove the gate actually bites, temporarily push a deliberately mis-formatted line and confirm CI
+goes red before removing it.
+
+**Do not run `python main.py`** as verification — it hits live Plaid and writes production data. The seed
+script is the safe equivalent.
 
 ---
 
@@ -2378,7 +2526,13 @@ adds the **script's own directory**, not the repo root. On SCC there is no edita
 on `sys.path`, `core` is not importable, and the app fails at import. This must be fixed regardless of host,
 and it is why the commented-out `sys.path` block at `app/streamlit_app.py:5-11` exists.
 
-### 10a. Root-level entry point (the blocker)
+### 10a. Root-level entry point (the blocker) — DONE (uncommitted)
+
+> **Status (2026-07-20): implemented in the working tree, not yet committed.** Root `streamlit_app.py`
+> exists with exactly the shim below; the dead commented-out `sys.path` block is gone from
+> `app/streamlit_app.py` (ruff also re-sorted its imports in the same pass); and the run command reads
+> `streamlit run streamlit_app.py` in `README.md`, `CONTRIBUTING.md`, and `CLAUDE.md`. This unblocks
+> 10b–10i.
 
 Create `streamlit_app.py` at the **repo root** — also SCC's conventional default entrypoint filename:
 
@@ -2640,7 +2794,7 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 15. From a mobile browser, sign in via the HTTPS redirect URI with both allowlisted accounts → dashboard renders.
 16. `docker compose up -d` → `docker port <postgres-container>` shows `127.0.0.1:5433` (loopback only), and the seed + dashboard flow still works locally.
 17. Both workflow files: every `uses:` is a full 40-char commit SHA; the daily job has `timeout-minutes` and a `concurrency` group.
-18. `ruff check . && black --check .` pass on the branch; the CI lint job (Phase 8a) is green.
+18. `ruff check . && ruff format --check .` pass on the branch; the CI lint job (Phase 8a) is green.
 19. (When Appendix A items are built) each new user-edit column is pipeline-immune: edit a note/status/reviewed flag, then run `python main.py` (or re-`upsert` the same rows) → the edit is retained.
 20. (When Phase 9 is built) the dashboard renders with no horizontal page scroll at 390px, 360px, and 768px
     viewport widths, in **both** `en` and `fr`, across all four tabs.
