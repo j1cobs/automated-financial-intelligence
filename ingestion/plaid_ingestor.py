@@ -104,11 +104,38 @@ class PlaidIngestor(BaseIngestor):
             },
         )
 
+    @staticmethod
+    def _account_identity(account: dict[str, Any]) -> tuple[str, str, str, str] | None:
+        """The identity that decides whether two Plaid accounts are the same real account.
+
+        Deliberately the same tuple `DatabaseClient.canonicalize_account_keys` matches on —
+        (official_name, account_subtype, account_type, mask) — so the ingestor and the
+        database agree on what "the same account" means. Returns None when any field is
+        missing, because a partial tuple cannot distinguish two accounts safely.
+        """
+        fields = (
+            account.get("official_name"),
+            account.get("account_subtype"),
+            account.get("account_type"),
+            account.get("mask"),
+        )
+        if any(value is None or value == "" for value in fields):
+            return None
+        return (str(fields[0]), str(fields[1]), str(fields[2]), str(fields[3]))
+
     def fetch_transactions(self, start_date: date, end_date: date) -> pd.DataFrame:
         if not self.access_tokens:
             raise ValueError("At least one PLAID_ACCESS_TOKEN must be configured")
 
         records: list[dict] = []
+        # A jointly-held account can be exposed by more than one Plaid Item, and each Item
+        # issues its own account_id *and* its own transaction_ids for the same real
+        # transactions. `DatabaseClient.canonicalize_account_keys` merges those accounts into
+        # one account_key, so without this guard the same transactions land twice on it.
+        # Claim each real account for the first token (in self.access_tokens order, so the
+        # winner is deterministic) that reveals it, and skip it for every later token. The
+        # identity tuple must match the one the DB canonicalizes on.
+        claimed_identities: dict[tuple[str, str, str, str], str] = {}
         for access_token in self.access_tokens:
             try:
                 raw_accounts = self._fetch_accounts_raw(access_token, "")
@@ -120,6 +147,28 @@ class PlaidIngestor(BaseIngestor):
                 raw_accounts = []
 
             account_map = {a["_account_id"]: (a["account_key"], a["account_name"]) for a in raw_accounts}
+
+            skipped_account_ids: set[str] = set()
+            for account in raw_accounts:
+                identity = self._account_identity(account)
+                # A partially-populated identity is not reliable enough to call two accounts
+                # the same, so such accounts are always ingested rather than skipped.
+                if identity is None:
+                    continue
+                account_id = account["_account_id"]
+                claimed_by = claimed_identities.get(identity)
+                if claimed_by is None:
+                    claimed_identities[identity] = account_id
+                elif claimed_by != account_id:
+                    skipped_account_ids.add(account_id)
+                    LOGGER.info(
+                        "Skipping duplicate Plaid account mask=%s (account_id=%s) for token "
+                        "suffix=%s; already ingested via account_id=%s from an earlier token",
+                        account.get("mask"),
+                        account_id,
+                        access_token[-6:],
+                        claimed_by,
+                    )
 
             offset = 0
             total = None
@@ -137,6 +186,8 @@ class PlaidIngestor(BaseIngestor):
                 total = payload.get("total_transactions", len(transactions))
                 for transaction in transactions:
                     account_id = transaction.get("account_id", "unknown")
+                    if account_id in skipped_account_ids:
+                        continue
                     account_key, account_name = account_map.get(
                         account_id, (f"plaid:{account_id}", account_id)
                     )

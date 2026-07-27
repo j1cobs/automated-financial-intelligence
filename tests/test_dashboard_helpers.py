@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from app.dashboard import _classify_tx_type, _label_subtype
+from app.dashboard import _classify_tx_type, _effective_credit_limit, _label_subtype
 
 
 def _frame(account_type, amount: float, description: str = "Some Merchant") -> pd.DataFrame:
@@ -72,6 +72,28 @@ class LabelSubtypeTests(unittest.TestCase):
 
     def test_none_subtype(self) -> None:
         self.assertEqual(_label_subtype(None, "en"), "Other")
+
+
+class EffectiveCreditLimitTests(unittest.TestCase):
+    def test_plaid_limit_present_wins(self) -> None:
+        limit, is_manual = _effective_credit_limit(2000.0, 5000.0)
+        self.assertEqual(limit, 2000.0)
+        self.assertFalse(is_manual)
+
+    def test_plaid_missing_falls_back_to_manual(self) -> None:
+        limit, is_manual = _effective_credit_limit(float("nan"), 3000.0)
+        self.assertEqual(limit, 3000.0)
+        self.assertTrue(is_manual)
+
+    def test_neither_present_is_unknown(self) -> None:
+        limit, is_manual = _effective_credit_limit(float("nan"), float("nan"))
+        self.assertIsNone(limit)
+        self.assertFalse(is_manual)
+
+    def test_zero_plaid_limit_treated_as_missing(self) -> None:
+        limit, is_manual = _effective_credit_limit(0.0, 1000.0)
+        self.assertEqual(limit, 1000.0)
+        self.assertTrue(is_manual)
 
 
 if __name__ == "__main__":

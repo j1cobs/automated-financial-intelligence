@@ -71,7 +71,18 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
 
     database.upsert_categories(transactions["category"].dropna().astype(str).tolist())
     inserted, updated = database.upsert_transactions(transactions)
-    LOGGER.info("Pipeline completed: %s new transactions, %s already present", inserted, updated)
+    # Upserts are append-only: a transaction that acquires a new Plaid transaction_id (e.g. a
+    # pending charge that posts, or an account re-linked under a new Item) hashes differently
+    # and lands as an extra row alongside its older copy. Reconciling this window against what
+    # Plaid just returned trims those stale leftovers. Must run after upsert_transactions, and
+    # on the frame whose account_key has already been remapped through key_remap above.
+    removed = database.reconcile_transactions(transactions, start_date, end_date)
+    LOGGER.info(
+        "Pipeline completed: %s new transactions, %s already present, %s stale duplicates removed",
+        inserted,
+        updated,
+        removed,
+    )
     return transactions
 
 
