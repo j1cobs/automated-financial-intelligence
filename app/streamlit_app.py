@@ -10,10 +10,14 @@ from core.config import load_settings
 
 LOGGER = logging.getLogger(__name__)
 
-st.set_page_config(page_title="Automated Financial Intelligence", layout="wide")
-
 
 def main() -> None:
+    st.set_page_config(page_title="Automated Financial Intelligence", layout="wide")
+    st.html(
+        '<style>[data-testid="stMainBlockContainer"] '
+        "{max-width: 100%; padding-left: 2rem; padding-right: 2rem;}</style>"
+    )
+
     settings = load_settings()
 
     render_sidebar(settings)

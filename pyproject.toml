@@ -23,4 +23,5 @@ target-version = "py312"
 extend-exclude = ["venv_automated_financial_intelligence"]
 
 [tool.ruff.lint]
+ignore = ["E501"]
 select = ["E", "F", "I", "UP", "B"]   # pycodestyle, pyflakes, isort, pyupgrade, bugbear

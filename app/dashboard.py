@@ -44,6 +44,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "amount_range": "Amount range ($)",
         "search": "Search description",
         "outliers_only": "Flagged transactions only",
+        "duplicates_only": "Possible duplicates only",
         # Section 1
         "s1_heading": "Net worth overview",
         "s1_caption": "Total assets minus total liabilities.",
@@ -54,8 +55,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_owner_balance": "Assets vs. liabilities by holder",
         "credit_util_heading": "Credit card utilisation",
         "credit_util_caption": "Credit limit used per card.",
-        "credit_util_label": "{card} — {owner} — {pct:.0f}% used",
+        "credit_util_label": "{card} — {owner} — ${current:,.2f} / ${limit:,.2f} ({pct:.0f}% used)",
+        "credit_util_label_manual": "{card} — {owner} — ${current:,.2f} / ${limit:,.2f} ({pct:.0f}% used, manual limit)",
+        "credit_util_unknown": "{card} — {owner} — ${current:,.2f} owed — no credit limit set",
         "no_credit": "No credit accounts found.",
+        "stale_balances": "Balances may be out of date for: {accounts}. Re-run the pipeline or repair the Plaid connection.",
+        "account_fork": "Possible duplicate account(s) detected: {accounts}. Run scripts/dedupe_accounts.py to merge their history.",
+        "credit_limit_editor_heading": "Set credit limits",
+        "col_card": "Card",
+        "col_owner": "Owner",
+        "col_plaid_limit": "Plaid limit",
+        "col_manual_limit": "Your limit",
+        "credit_limit_save": "Save limits",
+        "credit_limit_saved": "Credit limits saved.",
         # Section 3
         "s3_heading": "Cash flow analysis",
         "s3_caption": "Inflows are positive, outflows are negative.",
@@ -79,17 +91,21 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_outlier_scatter": "Unusual transactions — score vs. date",
         "axis_score": "Outlier score",
         "col_date": "Date",
-        "col_owner": "Holder",
         "col_account": "Account",
         "col_desc": "Description",
         "col_amount": "Amount ($)",
         "col_cat": "Category",
         "col_recurring": "Recurring",
+        "col_duplicate": "Duplicate",
         "col_score": "Outlier score",
         "no_anomalies": "No anomalies detected in the selected period.",
         # Section 5
         "s5_heading": "Transactions",
         "s5_caption": "Positive amounts are income or credits. Negative amounts are expenses or debits.",
+        "s5_duplicate_caption": (
+            "Tick Duplicate to exclude a double-posted transaction from every total and chart. "
+            "Flagged rows stay listed here so you can untick them."
+        ),
         # Empty states
         "no_accounts": "No account data available.",
         "no_transactions": "No transactions match the selected filters.",
@@ -160,6 +176,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "amount_range": "Plage de montants ($)",
         "search": "Rechercher dans la description",
         "outliers_only": "Transactions signalées uniquement",
+        "duplicates_only": "Doublons possibles uniquement",
         "s1_heading": "Aperçu de la valeur nette",
         "s1_caption": "Total des actifs moins le total des dettes.",
         "metric_net_worth": "Valeur nette",
@@ -169,8 +186,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_owner_balance": "Actifs vs. passifs par titulaire",
         "credit_util_heading": "Utilisation des cartes de crédit",
         "credit_util_caption": "Limite de crédit utilisée par carte.",
-        "credit_util_label": "{card} — {owner} — {pct:.0f}% utilisé",
+        "credit_util_label": "{card} — {owner} — {current:,.2f} $ / {limit:,.2f} $ ({pct:.0f} % utilisé)",
+        "credit_util_label_manual": "{card} — {owner} — {current:,.2f} $ / {limit:,.2f} $ ({pct:.0f} % utilisé, limite manuelle)",
+        "credit_util_unknown": "{card} — {owner} — {current:,.2f} $ dus — aucune limite de crédit définie",
         "no_credit": "Aucun compte de crédit trouvé.",
+        "stale_balances": "Les soldes pourraient être désuets pour : {accounts}. Relancez le pipeline ou réparez la connexion Plaid.",
+        "account_fork": "Compte(s) possiblement en double détecté(s) : {accounts}. Exécutez scripts/dedupe_accounts.py pour fusionner leur historique.",
+        "credit_limit_editor_heading": "Définir les limites de crédit",
+        "col_card": "Carte",
+        "col_owner": "Titulaire",
+        "col_plaid_limit": "Limite Plaid",
+        "col_manual_limit": "Votre limite",
+        "credit_limit_save": "Enregistrer les limites",
+        "credit_limit_saved": "Limites de crédit enregistrées.",
         "s3_heading": "Analyse des flux monétaires",
         "s3_caption": "Les entrées sont positives, les sorties sont négatives.",
         "metric_income": "Revenus réels",
@@ -192,18 +220,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_outlier_scatter": "Transactions inhabituelles — score vs. date",
         "axis_score": "Score d'anomalie",
         "col_date": "Date",
-        "col_owner": "Titulaire",
         "col_account": "Compte",
         "col_desc": "Description",
         "col_amount": "Montant ($)",
         "col_cat": "Catégorie",
         "col_recurring": "Récurrent",
+        "col_duplicate": "Doublon",
         "col_score": "Score d'anomalie",
         "no_anomalies": "Aucune anomalie détectée dans la période sélectionnée.",
         "s5_heading": "Transactions",
         "s5_caption": (
             "Les montants positifs sont des revenus ou crédits. "
             "Les montants négatifs sont des dépenses ou débits."
+        ),
+        "s5_duplicate_caption": (
+            "Cochez Doublon pour exclure une transaction publiée en double de tous les totaux et "
+            "graphiques. Les lignes signalées restent affichées ici pour pouvoir être décochées."
         ),
         "no_accounts": "Aucune donnée de compte disponible.",
         "no_transactions": "Aucune transaction ne correspond aux filtres sélectionnés.",
@@ -266,6 +298,7 @@ def load_financial_data(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     SELECT
         t.transaction_date   AS date,
         t.transaction_hash,
+        t.account_key,
         a.account_name,
         a.owner_name,
         a.account_type,
@@ -275,21 +308,27 @@ def load_financial_data(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         COALESCE(t.user_category, t.category) AS category,
         t.outlier_score,
         t.is_outlier,
-        t.is_recurring
+        t.is_recurring,
+        t.is_duplicate
     FROM transactions t
     JOIN accounts a ON t.account_key = a.account_key
     ORDER BY t.transaction_date DESC
     """
     acct_query = """
     SELECT
+        account_key,
         account_name,
+        official_name,
+        mask,
         owner_name,
         account_type,
         account_subtype,
         COALESCE(balance_available, 0)::double precision AS balance_available,
         COALESCE(balance_current,  0)::double precision AS balance_current,
-        COALESCE(balance_limit,    0)::double precision AS balance_limit,
-        iso_currency_code
+        balance_limit::double precision AS balance_limit,
+        manual_credit_limit::double precision AS manual_credit_limit,
+        iso_currency_code,
+        updated_at
     FROM accounts
     """
     with psycopg.connect(database_url) as conn:
@@ -419,8 +458,26 @@ def _enrich_transactions(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _effective_credit_limit(balance_limit: float, manual_credit_limit: float) -> tuple[float | None, bool]:
+    """Resolve the credit limit to use for utilisation: Plaid's value if present,
+    otherwise the manually-entered fallback. Returns (limit, is_manual); limit is
+    None when neither source has a value."""
+    if pd.notna(balance_limit) and balance_limit > 0:
+        return balance_limit, False
+    if pd.notna(manual_credit_limit) and manual_credit_limit > 0:
+        return manual_credit_limit, True
+    return None, False
+
+
+_STALE_BALANCE_DAYS = 3
+
+
 def _section_net_worth(
-    acct_df: pd.DataFrame, T: dict[str, str], lang: str, selected_owners: list[str]
+    acct_df: pd.DataFrame,
+    T: dict[str, str],
+    lang: str,
+    selected_owners: list[str],
+    database_url: str,
 ) -> None:
     st.subheader(T["s1_heading"])
     st.caption(T["s1_caption"])
@@ -429,11 +486,30 @@ def _section_net_worth(
         st.info(T["no_accounts"])
         return
 
+    all_acct_df = acct_df  # unfiltered — the credit limit editor must not hide any card
+
     if selected_owners:
         acct_df = acct_df[acct_df["owner_name"].isin(selected_owners)]
 
     assets_df = acct_df[acct_df["account_type"].isin(["depository", "investment"])].copy()
     credit_df = acct_df[acct_df["account_type"] == "credit"].copy()
+
+    stale_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=_STALE_BALANCE_DAYS)
+    stale_df = all_acct_df[pd.to_datetime(all_acct_df["updated_at"], utc=True) < stale_cutoff]
+    if not stale_df.empty:
+        stale_names = ", ".join(
+            f"{row['account_name']} ({(pd.Timestamp.now(tz='UTC') - pd.to_datetime(row['updated_at'], utc=True)).days}d)"
+            for _, row in stale_df.iterrows()
+        )
+        st.warning(T["stale_balances"].format(accounts=stale_names))
+
+    identity_cols = ["official_name", "account_subtype", "account_type", "mask"]
+    identifiable = all_acct_df.dropna(subset=identity_cols)
+    fork_sizes = identifiable.groupby(identity_cols)["account_key"].transform("size")
+    forked_df = identifiable[fork_sizes > 1]
+    if not forked_df.empty:
+        forked_names = ", ".join(sorted(forked_df["account_name"].unique()))
+        st.warning(T["account_fork"].format(accounts=forked_names))
 
     total_assets = assets_df["balance_current"].sum()
     total_liabilities = credit_df["balance_current"].sum()
@@ -494,15 +570,70 @@ def _section_net_worth(
         st.markdown(f"**{T['credit_util_heading']}**")
         st.caption(T["credit_util_caption"])
         for _, row in credit_df.iterrows():
-            limit = row["balance_limit"]
             current = row["balance_current"]
-            pct = (current / limit) if limit > 0 else 0.0
-            label = T["credit_util_label"].format(
-                card=row["account_name"], owner=row["owner_name"] or "—", pct=pct * 100
+            limit, is_manual = _effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
+            owner = row["owner_name"] or "—"
+            if limit is None:
+                st.write(
+                    T["credit_util_unknown"].format(card=row["account_name"], owner=owner, current=current)
+                )
+                continue
+            pct = current / limit
+            key = "credit_util_label_manual" if is_manual else "credit_util_label"
+            label = T[key].format(
+                card=row["account_name"],
+                owner=owner,
+                current=current,
+                limit=limit,
+                pct=pct * 100,
             )
-            st.progress(min(pct, 1.0), text=label)
+            st.progress(min(max(pct, 0.0), 1.0), text=label)
     else:
         st.info(T["no_credit"])
+
+    all_credit_df = all_acct_df[all_acct_df["account_type"] == "credit"]
+    if not all_credit_df.empty:
+        with st.expander(T["credit_limit_editor_heading"]):
+            editor_df = pd.DataFrame(
+                [
+                    {
+                        "account_key": row["account_key"],
+                        T["col_card"]: row["account_name"],
+                        T["col_owner"]: row["owner_name"] or "—",
+                        T["col_plaid_limit"]: (
+                            row["balance_limit"] if pd.notna(row["balance_limit"]) else None
+                        ),
+                        T["col_manual_limit"]: (
+                            row["manual_credit_limit"] if pd.notna(row["manual_credit_limit"]) else None
+                        ),
+                    }
+                    for _, row in all_credit_df.iterrows()
+                ]
+            )
+            edited = st.data_editor(
+                editor_df.drop(columns=["account_key"]),
+                key="credit_limit_editor",
+                column_config={
+                    T["col_card"]: st.column_config.TextColumn(disabled=True),
+                    T["col_owner"]: st.column_config.TextColumn(disabled=True),
+                    T["col_plaid_limit"]: st.column_config.NumberColumn(disabled=True, format="$%.2f"),
+                    T["col_manual_limit"]: st.column_config.NumberColumn(min_value=0, format="$%.2f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+            )
+            if st.button(T["credit_limit_save"]):
+                db = DatabaseClient(database_url)
+                for i, row in edited.iterrows():
+                    account_key = editor_df.iloc[i]["account_key"]
+                    new_limit = row[T["col_manual_limit"]]
+                    db.set_manual_credit_limit(
+                        str(account_key),
+                        float(new_limit) if pd.notna(new_limit) else None,
+                    )
+                st.success(T["credit_limit_saved"])
+                st.rerun()
 
 
 _PERIOD_PRESETS = [
@@ -599,12 +730,25 @@ def _build_sidebar_filters(
     # Outliers-only toggle
     outliers_only = st.sidebar.toggle(T["outliers_only"], value=False)
 
+    # Duplicates-only toggle — narrows the view to rows that share
+    # (account_key, date, description, amount) with at least one other row, i.e. the
+    # candidates the user has to inspect by hand. Grouping on account_key rather than
+    # account_name avoids collapsing two distinct accounts with the same display name.
+    duplicates_only = st.sidebar.toggle(T["duplicates_only"], value=False)
+
     desc_mask = (
         df["description"].str.contains(search, case=False, na=False)
         if search
         else pd.Series(True, index=df.index)
     )
     outlier_mask = df["is_outlier"] if outliers_only else pd.Series(True, index=df.index)
+    if duplicates_only:
+        group_sizes = df.groupby(["account_key", "date", "description", "amount"], dropna=False)[
+            "amount"
+        ].transform("size")
+        duplicate_mask = group_sizes > 1
+    else:
+        duplicate_mask = pd.Series(True, index=df.index)
 
     non_date_mask = (
         df["owner_name"].isin(selected_owners)
@@ -614,6 +758,7 @@ def _build_sidebar_filters(
         & (df["amount"].abs() <= amt_range[1])
         & desc_mask
         & outlier_mask
+        & duplicate_mask
     )
     date_mask = df["_month_key"].isin(selected_month_keys)
 
@@ -1042,6 +1187,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
     st.subheader(T["s5_heading"])
     st.caption(T["s5_caption"])
     st.caption(T["edit_cat_label"])
+    st.caption(T["s5_duplicate_caption"])
 
     db = DatabaseClient(database_url)
     all_cats = db.get_categories()  # canonical list from categories table
@@ -1056,6 +1202,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
             "adjusted_amount",
             "category",
             "is_recurring",
+            "is_duplicate",
         ]
     ].copy()
     display.columns = [
@@ -1067,6 +1214,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         T["col_amount"],
         T["col_cat"],
         T["col_recurring"],
+        T["col_duplicate"],
     ]
 
     editor_key = "ledger_editor"
@@ -1077,6 +1225,7 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
             "hash": None,  # hidden
             T["col_cat"]: st.column_config.SelectboxColumn(T["col_cat"], options=all_cats, required=False),
             T["col_recurring"]: st.column_config.CheckboxColumn(T["col_recurring"]),
+            T["col_duplicate"]: st.column_config.CheckboxColumn(T["col_duplicate"]),
         },
         disabled=[
             T["col_date"],
@@ -1101,6 +1250,9 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         if T["col_recurring"] in col_changes:
             new_recurring = col_changes[T["col_recurring"]]
             db.update_transaction_recurring(str(transaction_hash), bool(new_recurring))
+        if T["col_duplicate"] in col_changes:
+            new_duplicate = col_changes[T["col_duplicate"]]
+            db.update_transaction_duplicate(str(transaction_hash), bool(new_duplicate))
 
 
 def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: str) -> None:
@@ -1126,7 +1278,7 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
 
     if tx_df.empty:
         st.info(T["no_transactions"])
-        _section_net_worth(acct_df, T, lang, [])
+        _section_net_worth(acct_df, T, lang, [], database_url)
         return
 
     tx = tx_df.copy()
@@ -1141,15 +1293,23 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
         st.info(T["no_transactions"])
         return
 
-    enriched = filtered
-    enriched_all_time = all_time_filtered
+    # Rows the user has hand-flagged as double-posts are dropped from every analytical
+    # frame (totals, charts, budgets, anomalies) but deliberately kept in the ledger's
+    # frame: the ledger's checkbox is the only way to un-flag a row, so hiding flagged
+    # rows there would make the flag irreversible. Filtering here — after the sidebar
+    # has done its work — keeps both frames subject to the same period/owner/category
+    # filters; only the is_duplicate rows differ.
+    ledger_df = filtered
+    not_duplicate = ~filtered["is_duplicate"].fillna(False).astype(bool)
+    enriched = filtered[not_duplicate]
+    enriched_all_time = all_time_filtered[~all_time_filtered["is_duplicate"].fillna(False).astype(bool)]
 
     tab_overview, tab_cashflow, tab_budget, tab_transactions = st.tabs(
         [T["tab_overview"], T["tab_cashflow"], T["tab_budget"], T["tab_transactions"]]
     )
 
     with tab_overview:
-        _section_net_worth(acct_df, T, lang, selected_owners)
+        _section_net_worth(acct_df, T, lang, selected_owners, database_url)
         st.divider()
         _section_overview(enriched, enriched_all_time, acct_df, T, lang, selected_owners)
 
@@ -1162,4 +1322,4 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
     with tab_transactions:
         _section_anomalies(enriched, T)
         st.divider()
-        _section_ledger(enriched, T, database_url)
+        _section_ledger(ledger_df, T, database_url)

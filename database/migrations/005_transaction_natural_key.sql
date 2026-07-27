@@ -1,6 +1,22 @@
--- Defence in depth: transaction_hash is a Python-side string of the natural key, so any
--- future change in how a field is stringified can silently produce a "new" transaction.
--- This index makes Postgres compare the natural key directly (NUMERIC to NUMERIC, DATE to
--- DATE), so drift raises a unique violation instead of duplicating a row.
-CREATE UNIQUE INDEX IF NOT EXISTS transactions_natural_key
-    ON transactions (account_key, transaction_date, description, amount);
+-- SUPERSEDED by 009 (transactions_external_id) and 010 (which drops this index).
+--
+-- This migration originally created a UNIQUE index on
+-- (account_key, transaction_date, description, amount) as defence in depth against
+-- transaction_hash drift. That guarantee turned out to be wrong in two ways:
+--
+--   1. It forbids two *genuinely distinct* transactions sharing those four values on one
+--      account -- recurring "Fixed monthly fees $0.00", or two identical purchases at the same
+--      merchant on the same day. Real examples exist in this database, so re-creating the index
+--      now fails outright with a UniqueViolation.
+--   2. Being account-scoped, it could not see the duplicate class that actually occurred: the
+--      same Plaid transaction_id stored under two different account_keys after Plaid
+--      re-attributed it.
+--
+-- Identity is now external_id when Plaid supplies one (unique index in 009, and what
+-- build_transaction_hash hashes), falling back to the account-scoped transaction_hash for rows
+-- without one. The CREATE is removed rather than the file deleted because ensure_schema() re-runs
+-- every migration on every call -- leaving it here would re-create, and then fail on, an index
+-- that 010 immediately drops.
+--
+-- Intentionally a no-op.
+SELECT 1;
