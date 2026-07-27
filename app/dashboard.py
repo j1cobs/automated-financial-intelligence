@@ -91,7 +91,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_outlier_scatter": "Unusual transactions — score vs. date",
         "axis_score": "Outlier score",
         "col_date": "Date",
-        "col_owner": "Holder",
         "col_account": "Account",
         "col_desc": "Description",
         "col_amount": "Amount ($)",
@@ -221,7 +220,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "chart_outlier_scatter": "Transactions inhabituelles — score vs. date",
         "axis_score": "Score d'anomalie",
         "col_date": "Date",
-        "col_owner": "Titulaire",
         "col_account": "Compte",
         "col_desc": "Description",
         "col_amount": "Montant ($)",
@@ -342,7 +340,9 @@ def load_financial_data(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 def _label_subtype(subtype: str | None, lang: str) -> str:
     if not subtype:
         return "Other"
-    return _SUBTYPE_LABELS.get(lang, _SUBTYPE_LABELS["en"]).get(subtype.lower(), subtype.title())
+    return _SUBTYPE_LABELS.get(lang, _SUBTYPE_LABELS["en"]).get(
+        subtype.lower(), subtype.title()
+    )
 
 
 _PAYMENT_KEYWORDS = r"payment|paiement|prélèvement|prelevement|transfer|xfer"
@@ -383,11 +383,14 @@ def _detect_internal_transfers(df: pd.DataFrame) -> pd.Series:
                 in_idx
                 for in_idx in unmatched_inflows
                 if df.loc[in_idx, "account_name"] != out_account
-                and abs((df.loc[in_idx, "date"] - out_date).days) <= _TRANSFER_MATCH_DAYS
+                and abs((df.loc[in_idx, "date"] - out_date).days)
+                <= _TRANSFER_MATCH_DAYS
             ]
             if not candidates:
                 continue
-            best = min(candidates, key=lambda i: abs((df.loc[i, "date"] - out_date).days))
+            best = min(
+                candidates, key=lambda i: abs((df.loc[i, "date"] - out_date).days)
+            )
             unmatched_inflows.discard(best)
             is_paired.loc[out_idx] = True
             is_paired.loc[best] = True
@@ -460,7 +463,9 @@ def _enrich_transactions(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _effective_credit_limit(balance_limit: float, manual_credit_limit: float) -> tuple[float | None, bool]:
+def _effective_credit_limit(
+    balance_limit: float, manual_credit_limit: float
+) -> tuple[float | None, bool]:
     """Resolve the credit limit to use for utilisation: Plaid's value if present,
     otherwise the manually-entered fallback. Returns (limit, is_manual); limit is
     None when neither source has a value."""
@@ -475,7 +480,11 @@ _STALE_BALANCE_DAYS = 3
 
 
 def _section_net_worth(
-    acct_df: pd.DataFrame, T: dict[str, str], lang: str, selected_owners: list[str], database_url: str
+    acct_df: pd.DataFrame,
+    T: dict[str, str],
+    lang: str,
+    selected_owners: list[str],
+    database_url: str,
 ) -> None:
     st.subheader(T["s1_heading"])
     st.caption(T["s1_caption"])
@@ -489,11 +498,15 @@ def _section_net_worth(
     if selected_owners:
         acct_df = acct_df[acct_df["owner_name"].isin(selected_owners)]
 
-    assets_df = acct_df[acct_df["account_type"].isin(["depository", "investment"])].copy()
+    assets_df = acct_df[
+        acct_df["account_type"].isin(["depository", "investment"])
+    ].copy()
     credit_df = acct_df[acct_df["account_type"] == "credit"].copy()
 
     stale_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=_STALE_BALANCE_DAYS)
-    stale_df = all_acct_df[pd.to_datetime(all_acct_df["updated_at"], utc=True) < stale_cutoff]
+    stale_df = all_acct_df[
+        pd.to_datetime(all_acct_df["updated_at"], utc=True) < stale_cutoff
+    ]
     if not stale_df.empty:
         stale_names = ", ".join(
             f"{row['account_name']} ({(pd.Timestamp.now(tz='UTC') - pd.to_datetime(row['updated_at'], utc=True)).days}d)"
@@ -527,7 +540,9 @@ def _section_net_worth(
     with c1:
         if not assets_df.empty:
             assets_df = assets_df.copy()
-            assets_df["subtype_label"] = assets_df["account_subtype"].apply(lambda s: _label_subtype(s, lang))
+            assets_df["subtype_label"] = assets_df["account_subtype"].apply(
+                lambda s: _label_subtype(s, lang)
+            )
             fig = px.pie(
                 assets_df,
                 values="balance_current",
@@ -542,7 +557,11 @@ def _section_net_worth(
     with c2:
         owner_data = []
         for _, row in acct_df.iterrows():
-            val = row["balance_current"] if row["account_type"] != "credit" else -row["balance_current"]
+            val = (
+                row["balance_current"]
+                if row["account_type"] != "credit"
+                else -row["balance_current"]
+            )
             owner_data.append(
                 {
                     "owner": row["owner_name"] or "Unknown",
@@ -569,17 +588,25 @@ def _section_net_worth(
         st.caption(T["credit_util_caption"])
         for _, row in credit_df.iterrows():
             current = row["balance_current"]
-            limit, is_manual = _effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
+            limit, is_manual = _effective_credit_limit(
+                row["balance_limit"], row["manual_credit_limit"]
+            )
             owner = row["owner_name"] or "—"
             if limit is None:
                 st.write(
-                    T["credit_util_unknown"].format(card=row["account_name"], owner=owner, current=current)
+                    T["credit_util_unknown"].format(
+                        card=row["account_name"], owner=owner, current=current
+                    )
                 )
                 continue
             pct = current / limit
             key = "credit_util_label_manual" if is_manual else "credit_util_label"
             label = T[key].format(
-                card=row["account_name"], owner=owner, current=current, limit=limit, pct=pct * 100
+                card=row["account_name"],
+                owner=owner,
+                current=current,
+                limit=limit,
+                pct=pct * 100,
             )
             st.progress(min(max(pct, 0.0), 1.0), text=label)
     else:
@@ -594,12 +621,16 @@ def _section_net_worth(
                         "account_key": row["account_key"],
                         T["col_card"]: row["account_name"],
                         T["col_owner"]: row["owner_name"] or "—",
-                        T["col_plaid_limit"]: row["balance_limit"]
-                        if pd.notna(row["balance_limit"])
-                        else None,
-                        T["col_manual_limit"]: row["manual_credit_limit"]
-                        if pd.notna(row["manual_credit_limit"])
-                        else None,
+                        T["col_plaid_limit"]: (
+                            row["balance_limit"]
+                            if pd.notna(row["balance_limit"])
+                            else None
+                        ),
+                        T["col_manual_limit"]: (
+                            row["manual_credit_limit"]
+                            if pd.notna(row["manual_credit_limit"])
+                            else None
+                        ),
                     }
                     for _, row in all_credit_df.iterrows()
                 ]
@@ -610,8 +641,12 @@ def _section_net_worth(
                 column_config={
                     T["col_card"]: st.column_config.TextColumn(disabled=True),
                     T["col_owner"]: st.column_config.TextColumn(disabled=True),
-                    T["col_plaid_limit"]: st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-                    T["col_manual_limit"]: st.column_config.NumberColumn(min_value=0, format="$%.2f"),
+                    T["col_plaid_limit"]: st.column_config.NumberColumn(
+                        disabled=True, format="$%.2f"
+                    ),
+                    T["col_manual_limit"]: st.column_config.NumberColumn(
+                        min_value=0, format="$%.2f"
+                    ),
                 },
                 use_container_width=True,
                 hide_index=True,
@@ -623,7 +658,8 @@ def _section_net_worth(
                     account_key = editor_df.iloc[i]["account_key"]
                     new_limit = row[T["col_manual_limit"]]
                     db.set_manual_credit_limit(
-                        str(account_key), float(new_limit) if pd.notna(new_limit) else None
+                        str(account_key),
+                        float(new_limit) if pd.notna(new_limit) else None,
                     )
                 st.success(T["credit_limit_saved"])
                 st.rerun()
@@ -688,13 +724,17 @@ def _build_sidebar_filters(
         selected_month_labels = st.sidebar.multiselect(
             T["period"], options=month_options, default=month_options
         )
-        selected_month_keys = df.loc[df["_month_label"].isin(selected_month_labels), "_month_key"].unique()
+        selected_month_keys = df.loc[
+            df["_month_label"].isin(selected_month_labels), "_month_key"
+        ].unique()
     else:
         selected_month_keys = _preset_month_keys(selected_preset, df)
 
     # Owner multiselect
     owners = sorted(df["owner_name"].dropna().unique())
-    selected_owners = st.sidebar.multiselect(T["owners"], options=owners, default=owners)
+    selected_owners = st.sidebar.multiselect(
+        T["owners"], options=owners, default=owners
+    )
 
     # Category multiselect
     cats = sorted(df["category"].dropna().unique())
@@ -703,7 +743,9 @@ def _build_sidebar_filters(
     # Account multiselect — options restricted to the selected owners
     owner_subset = df[df["owner_name"].isin(selected_owners)] if selected_owners else df
     accounts = sorted(owner_subset["account_name"].dropna().unique())
-    selected_accounts = st.sidebar.multiselect(T["accounts"], options=accounts, default=accounts)
+    selected_accounts = st.sidebar.multiselect(
+        T["accounts"], options=accounts, default=accounts
+    )
 
     # Amount range slider
     abs_amounts = df["amount"].abs()
@@ -734,11 +776,13 @@ def _build_sidebar_filters(
         if search
         else pd.Series(True, index=df.index)
     )
-    outlier_mask = df["is_outlier"] if outliers_only else pd.Series(True, index=df.index)
+    outlier_mask = (
+        df["is_outlier"] if outliers_only else pd.Series(True, index=df.index)
+    )
     if duplicates_only:
-        group_sizes = df.groupby(["account_key", "date", "description", "amount"], dropna=False)[
-            "amount"
-        ].transform("size")
+        group_sizes = df.groupby(
+            ["account_key", "date", "description", "amount"], dropna=False
+        )["amount"].transform("size")
         duplicate_mask = group_sizes > 1
     else:
         duplicate_mask = pd.Series(True, index=df.index)
@@ -792,13 +836,27 @@ def _section_overview(
     m5.metric(T["metric_flags"], str(flagged))
 
     # Weekly vs. monthly average pace — zero-filled so inactive weeks/months pull the average down
-    weekly_totals = real.groupby(["week", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
-    monthly_totals = real.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
+    weekly_totals = (
+        real.groupby(["week", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
+    )
+    monthly_totals = (
+        real.groupby(["month", "tx_type"])["adjusted_amount"]
+        .sum()
+        .unstack(fill_value=0)
+    )
 
-    avg_weekly_expense = weekly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
-    avg_monthly_expense = monthly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
-    avg_weekly_income = weekly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
-    avg_monthly_income = monthly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+    avg_weekly_expense = (
+        weekly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
+    )
+    avg_monthly_expense = (
+        monthly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0
+    )
+    avg_weekly_income = (
+        weekly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+    )
+    avg_monthly_income = (
+        monthly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0
+    )
 
     w1, w2, w3, w4 = st.columns(4)
     w1.metric(T["metric_avg_weekly_spend"], f"${avg_weekly_expense:,.2f}")
@@ -809,7 +867,9 @@ def _section_overview(
     # Comparison-shaped charts: bounded to the trailing 12 months of all-time data,
     # not the sidebar's quick-range window — otherwise they'd dilute/go stale over the years.
     at_max_date = all_time_df["date"].max()
-    bounded_all_time = all_time_df[all_time_df["date"] >= at_max_date - pd.DateOffset(months=12)]
+    bounded_all_time = all_time_df[
+        all_time_df["date"] >= at_max_date - pd.DateOffset(months=12)
+    ]
 
     c1, c2 = st.columns(2)
     with c1:
@@ -838,9 +898,12 @@ def _section_overview(
         if len(months_sorted) >= 2:
             this_m, last_m = months_sorted[-1], months_sorted[-2]
             mom = bounded_all_time[
-                bounded_all_time["month"].isin([this_m, last_m]) & (bounded_all_time["tx_type"] == "expense")
+                bounded_all_time["month"].isin([this_m, last_m])
+                & (bounded_all_time["tx_type"] == "expense")
             ]
-            mom_grp = mom.groupby(["category", "month"], as_index=False)["adjusted_amount"].sum()
+            mom_grp = mom.groupby(["category", "month"], as_index=False)[
+                "adjusted_amount"
+            ].sum()
             mom_grp["abs_amount"] = mom_grp["adjusted_amount"].abs()
             mom_grp["period"] = mom_grp["month"].map(
                 {this_m: T["label_this_month"], last_m: T["label_last_month"]}
@@ -867,7 +930,10 @@ def _section_overview(
 
     # Trend-shaped: always full history, ignoring the sidebar's quick-range window.
     monthly_expenses_series = (
-        all_time_df[all_time_df["tx_type"] == "expense"].groupby("month")["adjusted_amount"].sum().abs()
+        all_time_df[all_time_df["tx_type"] == "expense"]
+        .groupby("month")["adjusted_amount"]
+        .sum()
+        .abs()
     )
     if not monthly_expenses_series.empty:
         avg_monthly_expenses = monthly_expenses_series.mean()
@@ -906,8 +972,12 @@ def _section_overview(
             .apply(
                 lambda g: pd.Series(
                     {
-                        "income": g.loc[g["tx_type"] == "income", "adjusted_amount"].sum(),
-                        "expenses": abs(g.loc[g["tx_type"] == "expense", "adjusted_amount"].sum()),
+                        "income": g.loc[
+                            g["tx_type"] == "income", "adjusted_amount"
+                        ].sum(),
+                        "expenses": abs(
+                            g.loc[g["tx_type"] == "expense", "adjusted_amount"].sum()
+                        ),
                     }
                 )
             )
@@ -915,7 +985,9 @@ def _section_overview(
         )
         if not monthly.empty:
             monthly["savings_rate"] = (
-                (monthly["income"] - monthly["expenses"]) / monthly["income"].clip(lower=0.01) * 100
+                (monthly["income"] - monthly["expenses"])
+                / monthly["income"].clip(lower=0.01)
+                * 100
             )
             fig_sr = px.line(
                 monthly,
@@ -925,7 +997,9 @@ def _section_overview(
                 labels={"savings_rate": "%", "month": T["axis_month"]},
                 template="plotly_white",
             )
-            fig_sr.add_hline(y=20, line_dash="dot", line_color="green", annotation_text="Target 20%")
+            fig_sr.add_hline(
+                y=20, line_dash="dot", line_color="green", annotation_text="Target 20%"
+            )
             st.plotly_chart(fig_sr, use_container_width=True)
 
 
@@ -958,11 +1032,13 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
     st.caption(T["transfers_note"])
 
     mom_summary = (
-        df[df["tx_type"] != "transfer"].groupby(["month", "tx_type"], as_index=False)["adjusted_amount"].sum()
+        df[df["tx_type"] != "transfer"]
+        .groupby(["month", "tx_type"], as_index=False)["adjusted_amount"]
+        .sum()
     )
-    mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"] = mom_summary.loc[
-        mom_summary["tx_type"] == "expense", "adjusted_amount"
-    ].abs()
+    mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"] = (
+        mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"].abs()
+    )
     fig_mom = px.bar(
         mom_summary,
         x="month",
@@ -976,11 +1052,13 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
     st.plotly_chart(fig_mom, use_container_width=True)
 
     week_summary = (
-        df[df["tx_type"] != "transfer"].groupby(["week", "tx_type"], as_index=False)["adjusted_amount"].sum()
+        df[df["tx_type"] != "transfer"]
+        .groupby(["week", "tx_type"], as_index=False)["adjusted_amount"]
+        .sum()
     )
-    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = week_summary.loc[
-        week_summary["tx_type"] == "expense", "adjusted_amount"
-    ].abs()
+    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = (
+        week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"].abs()
+    )
     fig_week = px.bar(
         week_summary,
         x="week",
@@ -1015,7 +1093,9 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
-        split = real.groupby(["month", "owner_name"], as_index=False)["adjusted_amount"].sum()
+        split = real.groupby(["month", "owner_name"], as_index=False)[
+            "adjusted_amount"
+        ].sum()
         fig2 = px.bar(
             split,
             x="month",
@@ -1098,7 +1178,9 @@ def _section_budget(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
             label = f"{cat} — ${spent:,.2f} / ${limit:,.2f} ({pct * 100:.0f}%) — {status} | {projected_label}"
             st.progress(pct, text=label)
         else:
-            st.write(f"**{cat}**: ${spent:,.2f} spent (no budget set) | {projected_label}")
+            st.write(
+                f"**{cat}**: ${spent:,.2f} spent (no budget set) | {projected_label}"
+            )
 
     st.divider()
     st.markdown(f"**{T['budget_edit_label']}**")
@@ -1106,13 +1188,18 @@ def _section_budget(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
     # Budget editor — all canonical categories from DB
     all_edit_cats = db.get_categories()
     editor_df = pd.DataFrame(
-        [{"category": cat, "monthly_limit": budget_map.get(cat, 0.0)} for cat in all_edit_cats]
+        [
+            {"category": cat, "monthly_limit": budget_map.get(cat, 0.0)}
+            for cat in all_edit_cats
+        ]
     )
     edited = st.data_editor(
         editor_df,
         key="budget_editor",
         column_config={
-            "category": st.column_config.TextColumn(T["budget_col_category"], disabled=True),
+            "category": st.column_config.TextColumn(
+                T["budget_col_category"], disabled=True
+            ),
             "monthly_limit": st.column_config.NumberColumn(
                 T["budget_col_limit"], min_value=0, format="$%.2f"
             ),
@@ -1216,7 +1303,9 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         key=editor_key,
         column_config={
             "hash": None,  # hidden
-            T["col_cat"]: st.column_config.SelectboxColumn(T["col_cat"], options=all_cats, required=False),
+            T["col_cat"]: st.column_config.SelectboxColumn(
+                T["col_cat"], options=all_cats, required=False
+            ),
             T["col_recurring"]: st.column_config.CheckboxColumn(T["col_recurring"]),
             T["col_duplicate"]: st.column_config.CheckboxColumn(T["col_duplicate"]),
         },
@@ -1248,7 +1337,9 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
             db.update_transaction_duplicate(str(transaction_hash), bool(new_duplicate))
 
 
-def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: str) -> None:
+def render_dashboard(
+    tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: str
+) -> None:
     def _on_lang_toggle() -> None:
         st.session_state["lang"] = "fr" if st.session_state.get("lang_fr") else "en"
 
@@ -1295,7 +1386,9 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
     ledger_df = filtered
     not_duplicate = ~filtered["is_duplicate"].fillna(False).astype(bool)
     enriched = filtered[not_duplicate]
-    enriched_all_time = all_time_filtered[~all_time_filtered["is_duplicate"].fillna(False).astype(bool)]
+    enriched_all_time = all_time_filtered[
+        ~all_time_filtered["is_duplicate"].fillna(False).astype(bool)
+    ]
 
     tab_overview, tab_cashflow, tab_budget, tab_transactions = st.tabs(
         [T["tab_overview"], T["tab_cashflow"], T["tab_budget"], T["tab_transactions"]]
@@ -1304,7 +1397,9 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
     with tab_overview:
         _section_net_worth(acct_df, T, lang, selected_owners, database_url)
         st.divider()
-        _section_overview(enriched, enriched_all_time, acct_df, T, lang, selected_owners)
+        _section_overview(
+            enriched, enriched_all_time, acct_df, T, lang, selected_owners
+        )
 
     with tab_cashflow:
         _section_cash_flow(enriched, T)
