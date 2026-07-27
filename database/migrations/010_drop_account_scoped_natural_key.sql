@@ -1,0 +1,16 @@
+-- Drop the account-scoped natural key introduced in 005, and never recreate it.
+--
+-- A UNIQUE index on (account_key, transaction_date, description, amount) cannot distinguish a
+-- duplicate from a genuinely repeated transaction, and this data contains the latter: the user
+-- made four separate real `IKEA $250.00` charges on 2026-07-02, tapping repeatedly against a
+-- $250 contactless limit. Under 005 three of those four real charges are silently destroyed.
+-- The same shape recurs harmlessly elsewhere ("Fixed monthly fees $0.00" on the same account,
+-- two identical purchases at one merchant on one day) -- all of it legitimate spending.
+--
+-- Duplicate detection therefore cannot live in the schema. It lives in
+-- DatabaseClient.reconcile_transactions(), which is the only place with the information that
+-- actually discriminates: the number of copies Plaid itself currently returns for each natural
+-- key. Five stored IKEA rows against four fetched means exactly one is spurious; four against
+-- four means nothing is. A key Plaid returns zero of is left alone -- that is real history that
+-- has aged out of Plaid's window, not a duplicate.
+DROP INDEX IF EXISTS transactions_natural_key;
