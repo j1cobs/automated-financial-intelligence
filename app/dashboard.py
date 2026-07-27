@@ -572,11 +572,15 @@ def _section_net_worth(
             limit, is_manual = _effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
             owner = row["owner_name"] or "—"
             if limit is None:
-                st.write(T["credit_util_unknown"].format(card=row["account_name"], owner=owner, current=current))
+                st.write(
+                    T["credit_util_unknown"].format(card=row["account_name"], owner=owner, current=current)
+                )
                 continue
             pct = current / limit
             key = "credit_util_label_manual" if is_manual else "credit_util_label"
-            label = T[key].format(card=row["account_name"], owner=owner, current=current, limit=limit, pct=pct * 100)
+            label = T[key].format(
+                card=row["account_name"], owner=owner, current=current, limit=limit, pct=pct * 100
+            )
             st.progress(min(max(pct, 0.0), 1.0), text=label)
     else:
         st.info(T["no_credit"])
@@ -590,7 +594,9 @@ def _section_net_worth(
                         "account_key": row["account_key"],
                         T["col_card"]: row["account_name"],
                         T["col_owner"]: row["owner_name"] or "—",
-                        T["col_plaid_limit"]: row["balance_limit"] if pd.notna(row["balance_limit"]) else None,
+                        T["col_plaid_limit"]: row["balance_limit"]
+                        if pd.notna(row["balance_limit"])
+                        else None,
                         T["col_manual_limit"]: row["manual_credit_limit"]
                         if pd.notna(row["manual_credit_limit"])
                         else None,
@@ -730,9 +736,9 @@ def _build_sidebar_filters(
     )
     outlier_mask = df["is_outlier"] if outliers_only else pd.Series(True, index=df.index)
     if duplicates_only:
-        group_sizes = df.groupby(
-            ["account_key", "date", "description", "amount"], dropna=False
-        )["amount"].transform("size")
+        group_sizes = df.groupby(["account_key", "date", "description", "amount"], dropna=False)[
+            "amount"
+        ].transform("size")
         duplicate_mask = group_sizes > 1
     else:
         duplicate_mask = pd.Series(True, index=df.index)
@@ -1289,9 +1295,7 @@ def render_dashboard(tx_df: pd.DataFrame, acct_df: pd.DataFrame, database_url: s
     ledger_df = filtered
     not_duplicate = ~filtered["is_duplicate"].fillna(False).astype(bool)
     enriched = filtered[not_duplicate]
-    enriched_all_time = all_time_filtered[
-        ~all_time_filtered["is_duplicate"].fillna(False).astype(bool)
-    ]
+    enriched_all_time = all_time_filtered[~all_time_filtered["is_duplicate"].fillna(False).astype(bool)]
 
     tab_overview, tab_cashflow, tab_budget, tab_transactions = st.tabs(
         [T["tab_overview"], T["tab_cashflow"], T["tab_budget"], T["tab_transactions"]]
