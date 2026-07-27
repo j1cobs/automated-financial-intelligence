@@ -41,8 +41,8 @@ When extending, prefer wiring the existing real modules onto the live path over 
   e.g. a `NO_ACCOUNTS` error — without rotating the token)
 - Seed demo data (no Plaid credentials needed): `python scripts/seed_sample_data.py`
 
-Run all commands from the repo root: `database/db.py` reads the migration file via the relative path
-`database/migrations/001_core_tables.sql`, and config loads `.env` / `.streamlit/secrets.toml` relative to the CWD.
+Run all commands from the repo root: `database/db.py` globs the migrations via the relative path
+`database/migrations/`, and config loads `.env` / `.streamlit/secrets.toml` relative to the CWD.
 
 ## Architecture
 
@@ -51,18 +51,43 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 
 - `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a _normalized_ DataFrame
   (`description`, `amount`, `account_name`, `source`, `date`, ...). `PlaidIngestor` is the only implementation;
-  `BaseIngestor` remains as the interface seam for future sources.
+  `BaseIngestor` remains as the interface seam for future sources. Each real account is ingested once per run:
+  `fetch_transactions` claims an account for the first token that reveals it and skips it for later tokens, using the
+  same identity tuple `canonicalize_account_keys` matches on. That is what keeps a co-owned account visible through
+  two Plaid Items from delivering every transaction twice.
 - `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
   but the pipeline currently uses `analytics/placeholders.py` (`build_placeholder_models`), which stamps
   `category="uncategorized"`, `outlier_score=0.0`, `is_outlier=False`. The data path is wired end-to-end before ML is
   switched on (Phase 1). When changing "the classifier," check which module `runner.py` actually imports.
-- `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` executes the SQL migration file at runtime;
-  upserts are idempotent via `build_transaction_hash` (sha256 of `account_name|date|description|amount`) with
-  `ON CONFLICT (transaction_hash) DO UPDATE`. Postgres = Supabase/Neon (`DATABASE_URL`).
+- `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
+  (currently 001–012) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
+  (`DATABASE_URL`). Transaction identity, and the duplicate handling built on it, is the subtlest part of this layer:
+  - `build_transaction_hash` hashes Plaid's `transaction_id` when the row has one, and falls back to
+    `account_key|date|description|amount` only for rows without one (seed data, future non-Plaid sources). Upserts are
+    idempotent via `ON CONFLICT (transaction_hash) DO UPDATE`, and because the hash tracks the `transaction_id`, a
+    transaction Plaid revises (pending → posted) or re-attributes to another account is absorbed in place.
+  - **Never key identity on the natural key.** `transaction_hash` is UNIQUE, so an account-scoped formula would allow
+    only one row per `(account_key, date, description, amount)` and silently destroy genuine repeats — the data holds
+    four separate real `IKEA $250.00` charges on one day, tapped against a $250 contactless limit. Migration 005 added
+    such an index; 010 dropped it and 005 is now an intentional no-op. Do not recreate it.
+  - `transactions_external_id` (migration 009) is a partial UNIQUE index on `external_id`, catching the same Plaid
+    transaction stored under two accounts.
+  - `reconcile_transactions` runs after every upsert in `pipeline/runner.py`. Persistence is otherwise append-only, so
+    the same real transaction returning under a *new* `transaction_id` (Item re-link, or one account exposed through
+    two Items) lands as a second row. Reconciliation trims stored copies per natural key down to the number Plaid
+    currently returns. A natural key Plaid returns **zero** of is skipped and never touched — that is real history aged
+    out of Plaid's rolling window, not a duplicate. This guard is load-bearing; do not relax it.
+  - `is_duplicate` (migration 012) is a user-set flag for copies no rule can identify. Flagged rows are excluded from
+    analytics but never deleted, so the call is reversible. Like `user_category` and `is_recurring`, it survives
+    pipeline re-runs only because `upsert_transactions` never names that column — keep it out of the INSERT.
+  - Account identity is `(official_name, account_subtype, account_type, mask)`, matched by `canonicalize_account_keys`
+    (after `persistent_account_id`). `owner_name` is excluded: it records which token revealed the account, not who
+    owns it.
 - `core/` — shared, UI-agnostic helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`,
   `google_oauth.py`.
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
-  sign-out) and `dashboard.py` (DB reads + Plotly rendering).
+  sign-out) and `dashboard.py` (DB reads + Plotly rendering). The transactions table is where the user sets
+  `is_duplicate`; a "Possible duplicates only" sidebar filter surfaces the candidates.
 - `scripts/` — `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
   underlying `PlaidLinkClient`) and `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
   no ingestion, no credentials).

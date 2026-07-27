@@ -359,9 +359,10 @@ class DatabaseClient:
         UniqueViolation depending on id order. Deleting every non-keeper duplicate first, then
         updating only the surviving keepers, avoids that collision regardless of id order.
 
-        A prior pass collapses rows sharing an external_id. transaction_hash is account-scoped,
-        so it cannot see the case where Plaid re-attributes the same transaction_id to a different
-        account_id — the newest copy (Plaid's current attribution) wins, matching migration 009.
+        A prior pass collapses rows sharing an external_id, keeping the newest copy (Plaid's
+        current attribution), which is what the transactions_external_id unique index from
+        migration 009 enforces going forward. It survives the hash change because a row can
+        hold a stale external_id from before that index existed.
 
         Returns (rows_rehashed, rows_deleted_as_duplicates).
         """
@@ -558,33 +559,26 @@ class DatabaseClient:
         "updated" means a transaction_hash that already existed in the table before this
         call (a category/outlier refresh), not a newly-persisted transaction.
 
-        Two identities are in play and they do not agree, so this method reconciles them
-        before inserting.
+        Identity is `transaction_hash`, which build_transaction_hash derives from Plaid's
+        `transaction_id` whenever there is one. That makes the hash stable across the two ways
+        Plaid mutates a transaction in place: the pending -> posted transition, which revises
+        amount / date / description, and re-attribution to a different account_key. Both
+        therefore arrive with an unchanged hash and are absorbed by the ON CONFLICT clause,
+        which carries account_key / date / description / amount across rather than inserting a
+        twin. An earlier account-scoped hash needed a pre-insert relocation pass to achieve the
+        same thing; that pass was removed along with the hash change.
 
-        `transaction_hash` is account-scoped (account_key|date|description|amount) — see
-        build_transaction_hash for why the external_id-based variant was reverted. That makes
-        it deliberately unstable: Plaid keeps a stable `transaction_id` while *mutating* the
-        transaction's attributes (the pending→posted transition revises amount, date and/or
-        description), and it can re-attribute a transaction to a different account_key. Any of
-        those changes the hash.
+        `external_id = EXCLUDED.external_id` is in the conflict clause so a re-issued
+        transaction_id follows its row instead of being rejected later by the
+        transactions_external_id unique index (migration 009).
 
-        `external_id` (Plaid's transaction_id) is the stable identity for *updates*. Without
-        reconciliation, a revised pending transaction misses `ON CONFLICT (transaction_hash)`,
-        is attempted as a fresh INSERT, and collides with the transactions_external_id unique
-        index from migration 009 — an observed production failure.
+        What this does NOT handle is a transaction returning under a genuinely *new*
+        transaction_id after an Item re-link: that hashes differently and lands as a second
+        row. reconcile_transactions() trims those against the count Plaid itself reports.
 
-        So a pre-insert step runs for every incoming row that carries an external_id:
-
-          1. If the incoming natural key is already occupied by a *different* row, delete the
-             stale row that currently holds our external_id (it has been superseded).
-          2. Otherwise re-point the row holding our external_id at the new hash and attributes.
-             An UPDATE, not DELETE+INSERT, so user_category, is_recurring and created_at
-             survive Plaid revising the transaction.
-
-        The INSERT then runs unchanged and its ON CONFLICT now matches, refreshing category /
-        outlier_score / is_outlier. `external_id = EXCLUDED.external_id` is in that conflict
-        clause so a re-issued transaction_id follows its row rather than being rejected later
-        by the unique index.
+        Columns the user owns — user_category, is_recurring, is_duplicate — are deliberately
+        absent from both the INSERT list and the conflict-update list, so a pipeline run can
+        never clear a manual edit. Keep them out when adding columns here.
         """
         # No relocation pass is needed: build_transaction_hash keys on the transaction_id, so a
         # transaction Plaid has revised (pending -> posted) or re-attributed to another account

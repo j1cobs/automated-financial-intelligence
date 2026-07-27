@@ -23,7 +23,7 @@
 | Layer     | Path                 | Responsibility                                                                            |
 | --------- | -------------------- | ----------------------------------------------------------------------------------------- |
 | Ingestion | `ingestion/`         | Fetch and normalize transactions (Plaid; `BaseIngestor` is the seam for future sources)   |
-| Database  | `database/`          | Idempotent upserts keyed on a content hash; migrations run automatically on startup       |
+| Database  | `database/`          | Idempotent upserts keyed on Plaid's transaction id; migrations run automatically on startup |
 | Analytics | `analytics/`         | ML classifier and outlier detector (the pipeline uses a placeholder for now, see Roadmap) |
 | Core      | `core/`              | Config loading, Google OAuth/PKCE, session handling                                       |
 | Pipeline  | `pipeline/runner.py` | Orchestrates ingest → classify → persist                                                  |
@@ -31,10 +31,11 @@
 
 A few decisions worth calling out:
 
-- **Idempotent upserts.** Every transaction hashes to `sha256(account_key|date|description|amount)`, so re-running the pipeline on the same window is a no-op instead of a pile of duplicates.
+- **Idempotent upserts.** A transaction is identified by Plaid's `transaction_id`, hashed into a unique `transaction_hash` (rows with no id — seed data — fall back to `account_key|date|description|amount`). Re-running the pipeline on the same window is a no-op instead of a pile of duplicates, and a pending charge that posts under revised amounts updates its row rather than twinning it.
+- **Duplicate detection is not a unique index, deliberately.** Nothing in `(account_key, date, description, amount)` separates a duplicate from a genuine repeat: the four `IKEA $250.00` charges in this data are four real taps against a $250 contactless limit, and an index on that key destroys three of them. So the pipeline stays append-only and `reconcile_transactions()` trims stored copies down to however many Plaid itself currently returns for each key — with the rule that a key Plaid returns *zero* of is never touched, because that is real history aged out of Plaid's window. What no rule can settle, the user flags as a duplicate in the dashboard; flagged rows drop out of every analytic but stay in the ledger, so the call is reversible.
 - **Config-load vs. pipeline-run validation are separate.** `load_settings()` only ever requires `DATABASE_URL`. Plaid credentials are checked when the pipeline actually runs, not at import time, so the dashboard and the sample-data seed script both work with zero Plaid setup.
 - **Migrations run at every startup**, not through a separate tool. `ensure_schema()` just executes every `.sql` file in `database/migrations/` in order; each one is written to be safe to run twice.
-- **Manual edits survive pipeline re-runs.** The pipeline writes to `category`; a user editing a row in the dashboard writes to `user_category` instead, and the dashboard reads `COALESCE(user_category, category)`. Same pattern for `is_recurring`.
+- **Manual edits survive pipeline re-runs.** The pipeline writes to `category`; a user editing a row in the dashboard writes to `user_category` instead, and the dashboard reads `COALESCE(user_category, category)`. Same pattern for `is_recurring` and the duplicate flag: the upsert never names those columns, so nothing the pipeline writes can clobber them.
 - **OAuth without a framework.** Google sign-in uses PKCE (S256) directly against Google's endpoints, with a verified-email allowlist and a 4-hour session.
 
 ## Quickstart (local, no Plaid account needed)
@@ -73,7 +74,7 @@ Pulling real transactions requires a Plaid account and a Postgres database. See 
 
 ## Project status & roadmap
 
-- **Done:** ingest → classify → persist → dashboard, end to end. Four-tab dashboard (Overview, Cash flow, Budget, Transactions), bilingual EN/FR, inline category and recurring-flag editing, budgets, anomaly surfacing.
+- **Done:** ingest → classify → persist → dashboard, end to end. Four-tab dashboard (Overview, Cash flow, Budget, Transactions), bilingual EN/FR, inline category, recurring- and duplicate-flag editing with a "Possible duplicates only" filter, budgets, anomaly surfacing, manual credit-limit entry for cards where Plaid reports no limit, and warnings for stale balances and duplicate accounts.
 - **Stubbed:** the ML classifier and outlier detector exist in `analytics/`, but the pipeline currently runs `analytics/placeholders.py` instead. Every transaction is stamped `Uncategorized` with `outlier_score=0` until Phase 7 wires the real models in.
 - **Not yet active:** the daily GitHub Actions pipeline is defined in `.github/workflows/daily-finance-pipeline.yml` but doesn't run automatically until the required Secrets are populated on `main` (GitHub only schedules workflows from the default branch). See [docs/deployment.md](docs/deployment.md).
 

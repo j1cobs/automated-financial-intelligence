@@ -19,30 +19,32 @@
 
 ---
 
-## Where things stand (updated 2026-07-26)
+## Where things stand (updated 2026-07-27)
 
-**Complete:** Phases 1, 2, 2.5, 2.6, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10a, 11, and Phase 6 except the
-optional pytest migration.
-**Partial:** Phase 0 (only the HTTPS redirect URI and README screenshots remain), Phase 10 (10a done;
-10b–10i are the deploy itself), Phase 8 (8a done; 8b's manual checklist is a pre-merge ritual, not code).
+**Complete:** Phases 1, 2, 2.5, 2.6, 2.6a, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10a, 11, 12, and Phase 6
+except the optional pytest migration.
+**Partial:** Phase 0 (only README screenshots remain — the HTTPS redirect URI item closed 2026-07-26), Phase
+10 (10a–10h done and deployed live on SCC; 10i is confirmed for desktop/one account, still open for the
+second allowlisted account and all of mobile), Phase 8 (8a done; 8b's manual checklist is a pre-merge
+ritual, not code).
 **Not started:** Phase 9. **Deferred by choice:** Phase 7 (ML), Appendix A, 6h (pytest).
 
-> **Uncommitted-work warning from 2026-07-20 resolved.** The Phases 8a/10a/6 working-tree changes that
-> warning covered are now committed (`3bb82cc`, `971c967`, `35a8568`, `a7f21f7`, `6916507`), along with
-> Phase 11 (`76f20c3`, `db84c57`, `de176ab`). The suite is green at **117 tests**.
->
-> **⚠️ Current gap: `dev` is 8 commits ahead of `origin/main`, unmerged.** The `dev → main` merge described
-> below as landing 2026-07-20 does not include any of the above — none of the ruff/streamlit-entrypoint
-> work, the test refactor, or Phase 11's token tooling has reached `main` yet. This does **not** affect the
-> daily cron's health: Phase 11's actual fix was an operational repair of the Plaid Item itself (via Link
-> update mode), independent of git branch — `pipeline/runner.py` and `ingestion/plaid_ingestor.py` are
-> unchanged. What the merge gets you is `scripts/plaid_link.py` (and the rest of `dev`'s work) available on
-> the branch anyone would actually check out — right now, repeating this fix from a fresh `main` clone
-> means re-doing it without the new tooling.
+> **Both prior gaps resolved.** The `dev → main` merge is done — `dev`'s tip (`9f0b34d`) is confirmed an
+> ancestor of `origin/main` via `git merge-base --is-ancestor`, so every commit through Phase 11 and Phase
+> 2.6a is on `main`. The dashboard is deployed live on Streamlit Community Cloud, and sign-in is confirmed
+> working end-to-end (desktop, `jacosse1@gmail.com`, real data rendering correctly).
 
-The `dev → main` merge for Phase 0's scope landed 2026-07-20, so *that* publish gate is closed and the
-daily cron is live — but see the gap above: everything since then is still sitting on `dev`. What remains
-in scope is the merge itself, then the deploy, mobile, and ML — features, not blockers.
+The dashboard is live and reachable and sign-in works, so the publish-critical path is functionally done.
+
+> **New blocker (2026-07-27): the daily cron is NOT healthy.** Phase 12 rewrote transaction identity and
+> duplicate handling, and **none of it is on `main`** — it is uncommitted on `dev`. The GitHub Actions cron
+> runs `main.py` from `main`, which still has the old append-only logic: it double-ingests the co-owned
+> account, has no `reconcile_transactions`, and re-creates duplicates on every run. The production database
+> was repaired by hand (685 → 639 transactions) and the cron is actively re-dirtying it. **Committing and
+> merging Phase 12 to `main` is now the highest-priority item**, ahead of 10i, Phase 9 and ML.
+
+After that merge: finish 10i's verification matrix (second account, mobile), then Phase 9, then ML — polish
+and features, not blockers.
 
 ### Recommended order of work
 
@@ -50,16 +52,15 @@ Ranked by what unblocks the most, not by phase number.
 
 | # | Work | Why here | Effort |
 |---|---|---|---|
-| 1 | **Merge `dev → main`** | 8 commits sit on `dev` unmerged, including Phase 11's token tooling. The cron itself is already healthy (that fix was operational, not code — see the gap note above), but `main` is the branch anyone else would actually check out, and it doesn't have this tooling yet. Everything below assumes `main` is current. | ~15 min |
-| 2 | **Phase 10b–10i** — deploy to SCC, register HTTPS redirect URI | 10a (the blocker) is done. Once `main` is current, SCC has a stable default branch to track. Produces the public URL, which is the only way to close Phase 0's last checkbox. | Medium |
-| 3 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists, so this is what makes the deploy actually useful (constraint 22). Largest remaining code effort. | Large |
-| 4 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
-| 5 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
+| 1 | **Finish Phase 10i verification** — sign in with `lapointe.alexie@gmail.com`, confirm a non-allowlisted account is refused | The one account tested so far proves the mechanism works, but not that the allowlist itself is correctly enforced end-to-end on the live deployment. Quick to close out. | ~10 min |
+| 2 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists (constraint 22), and it's still entirely unverified — Phase 10i's mobile item is blocked on this. Largest remaining code effort. | Large |
+| 3 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
+| 4 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
 
-**What changed in this ranking:** the prior #1 (committing the working tree) is done. It's replaced by the
-merge itself — not because the cron needs it (that was fixed operationally), but because `main` is 8
-commits stale relative to everything built on `dev` since the last merge, including tooling anyone
-diagnosing the next Plaid failure would want available.
+**What changed in this ranking:** the prior #1 (merging `dev → main`) is done, and the SCC deploy itself
+(prior #2) is done and confirmed working — both dropped off entirely. What's left of Phase 10 is narrow
+enough (two remaining verification checks) that it's listed directly rather than as its own phase-sized
+item.
 
 ---
 
@@ -72,8 +73,11 @@ The local untracked `.env` holds **live production credentials**. Git history is
   Item minted new `account_id`s for existing accounts, so `scripts/dedupe_accounts.py` was run (dry run,
   then `--apply`) to merge the resulting duplicates (see Phase 2.7).
 - [x] Rotate (or recreate) the Google OAuth client secret.
-- [ ] Set the production Google OAuth redirect URI to the **HTTPS** public dashboard URL (mobile sign-in
+- [x] Set the production Google OAuth redirect URI to the **HTTPS** public dashboard URL (mobile sign-in
   depends on it); keep `http://localhost:8501/` only as a second, dev-only redirect in the Google console.
+  **Done 2026-07-26** — the SCC URL is registered in Google Cloud Console alongside `http://localhost:8501/`,
+  and sign-in is confirmed working live (see Phase 10i). Mobile sign-in itself is not yet verified (Phase 9
+  is not started) — this checkbox covers the redirect URI registration, not full mobile verification.
 - [x] Confirm `GOOGLE_ALLOWED_EMAILS` in production secrets lists exactly the two authorized addresses.
 - [x] Confirm the managed Postgres (Supabase/Neon) tier has encryption at rest enabled. **Confirmed** — all
   customer data is encrypted at rest on the provider.
@@ -600,7 +604,14 @@ handling are unaffected; only how the *outbound* link is rendered changes.
   and after granting consent, Google redirects back to the same tab and the dashboard loads signed in.
 - Sign out and sign in again to confirm the flow is stable on repeat.
 
-### Phase 2.6a — Amendment (2026-07-26): SCC's own hosting iframe reintroduces the same block
+### Phase 2.6a — Amendment (2026-07-26): SCC's own hosting iframe reintroduces the same block — DONE, confirmed working live
+
+> **Status (2026-07-26): confirmed fixed on the live deployment.** `target="_blank"` shipped
+> (`e664078`/`9f0b34d`, merged to `main`), and sign-in was verified end-to-end on the live SCC URL with
+> `jacosse1@gmail.com` on desktop — a real request to `accounts.google.com` now fires, the new tab
+> completes sign-in, and the dashboard renders with correct transaction data. **Not yet verified:** the
+> second allowlisted account (`lapointe.alexie@gmail.com`) and mobile sign-in — both still open, tracked in
+> Phase 10i.
 
 **Problem found after deploying to Streamlit Community Cloud (SCC):** the sign-in button, which passed
 every check above, was a completely dead link on the live SCC deployment — clicking it produced no error,
@@ -2391,6 +2402,113 @@ assumed — re-verify if the `streamlit` floor in `requirements.txt` moves):
   including three multiselects defaulting to *all options selected* and a two-handle float slider — the
   hardest widget class to operate by touch — inside a drawer that must be opened and closed for every change.
 
+### Gotcha: module-level `st.*` calls in `app/streamlit_app.py` only run once per process
+
+> Discovered 2026-07-26 while fixing the dashboard's full-width layout (credit-card-utilisation +
+> full-width session). Read this before touching `st.set_page_config`, CSS injection, or anything else
+> placed at module scope in `app/streamlit_app.py` — the failure mode is completely silent (no exception, no
+> console warning) and cost most of a session to root-cause. Filed here, under Phase 9, because CSS/layout
+> work is exactly where this will bite next.
+
+**Symptom.** `layout="wide"` was already set at module scope in `app/streamlit_app.py` (this predates Phase
+9) and had never actually produced a wide layout. Adding
+`st.markdown("<style>...</style>", unsafe_allow_html=True)` at the same module scope to widen the block
+container appeared to do nothing — not even after full server restarts, fresh OS processes (verified by
+new PIDs via `Get-CimInstance Win32_Process`), and confirming the on-disk file content was correct via `Read`.
+
+**Root cause — two independent bugs stacked on top of each other:**
+
+1. **`st.markdown(html, unsafe_allow_html=True)` silently drops raw `<style>` tags.** Even with
+   `unsafe_allow_html=True`, no `<style>` element ever appeared in the DOM and no error was raised —
+   confirmed by querying `document.querySelectorAll('style')` in the live page via browser devtools/JS
+   console. `st.html(...)` is the correct primitive for injecting a `<style>` block; unlike `st.markdown`,
+   it is not run through the tag-stripping sanitizer. (Phase 9a below already uses `st.html()` for exactly
+   this reason — it independently arrived at the right primitive. This gotcha is about *where* it's called
+   from, not *which function* — see point 2.)
+
+2. **Module-scope `st.*` calls in an *imported* module only execute on that process's first-ever script
+   run — never again.** The actual script Streamlit invokes is the tiny repo-root shim (Phase 10a):
+   ```python
+   from app.streamlit_app import main
+   if __name__ == "__main__":
+       main()
+   ```
+   Streamlit re-executes this shim top-to-bottom on *every* rerun (every widget interaction, every new
+   browser tab/session attaching to the same running process). But `from app.streamlit_app import main` is a
+   plain Python import: once `app.streamlit_app` is in `sys.modules` (which happens on the very first
+   import, in the very first script run of the process), every subsequent `from app.streamlit_app import
+   main` is a cache hit — Python returns the already-created `main` function object and does **not**
+   re-execute the module's top-level statements. Anything sitting at module scope in `app/streamlit_app.py`
+   (`st.set_page_config()`, a bare `st.html(...)` call, a stray `st.write(...)`) therefore fires exactly
+   once per OS process, on whichever session happens to be first to connect after a (re)start — and is
+   completely absent from every other session's rendered output, forever, until the process is restarted
+   again. This is *not* the same thing as Streamlit's dev-mode hot-reload-on-file-save (which reruns the
+   script but does not by itself explain a *correctly-loaded* module skipping its own top-level code on a
+   plain rerun) — it is ordinary CPython import caching, and it applies even to a freshly-restarted process
+   the moment a second session, tab, or rerun touches it.
+
+   Functions called every run (`render_sidebar(settings)`, `render_dashboard(...)`, anything invoked from
+   inside `main()`) are unaffected — they execute fresh on every rerun because they are *called*, not
+   *imported*, each time. That is why `render_sidebar`'s output (and every `dashboard.py` change made in the
+   same session) rendered correctly and immediately, while the module-scope CSS fix appeared completely
+   inert — two visibly different reload behaviours from two edits made minutes apart, which is what made this
+   confusing to diagnose.
+
+**The fix.** Move every Streamlit call whose effect must hold on *every* render — `st.set_page_config()`,
+layout/CSS injection, anything else layout-affecting — to be the first statement(s) **inside `main()`**
+itself, exactly like `render_sidebar`/`render_dashboard` already are. Current `app/streamlit_app.py`:
+```python
+def main() -> None:
+    st.set_page_config(page_title="Automated Financial Intelligence", layout="wide")
+    st.html(
+        '<style>[data-testid="stMainBlockContainer"] '
+        "{max-width: 100%; padding-left: 2rem; padding-right: 2rem;}</style>"
+    )
+    settings = load_settings()
+    render_sidebar(settings)
+    ...
+```
+`st.set_page_config()` still satisfies Streamlit's "must be the first Streamlit command" constraint here,
+because it is chronologically the first `st.*` call made in every run — the shim's `from ... import main`
+line is a plain import, not a Streamlit call. This pattern generalizes: **any module-level `st.*` call in
+`app/streamlit_app.py` specifically (the module reached only via import, never run directly) is suspect** —
+if its effect needs to appear on every render, it must live inside a function that gets called every render,
+not at the top of the file.
+
+**How this was actually diagnosed (useful if this class of bug recurs):**
+- Don't trust a visual screenshot alone — confirm via the browser JS console:
+  `getComputedStyle(document.querySelector('[data-testid="..."]')).<property>`, and count matching elements
+  with `document.querySelectorAll(...)`.
+- Rule out staleness before suspecting the mechanism: confirm the file on disk is correct (`Read`, not
+  memory), and confirm a *genuinely new OS process* is bound to the port —
+  `Get-NetTCPConnection -LocalPort <port> -State Listen | Select-Object -ExpandProperty OwningProcess`, then
+  `Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select-Object CommandLine,CreationDate` — and
+  that its `CreationDate` is after the file's `LastWriteTime`.
+- Rule out import-path shadowing: this repo uses a PEP 660 editable install
+  (`__editable__.automated_financial_intelligence-0.1.0.pth` /
+  `__editable___automated_financial_intelligence_0_1_0_finder.py` in the venv's `site-packages`), which maps
+  each top-level package (`app`, `core`, `database`, …) to an absolute path via a `MAPPING` dict in the
+  generated finder. Worth a quick `grep` of that file if imports ever seem to resolve to the wrong copy —
+  in this investigation the mapping was correct and this was ruled out, but it is a real class of bug on
+  other machines/installs.
+- The single most conclusive test: drop a unique literal marker (e.g. `st.write("MARKER_12345")`) at the
+  exact module-scope location under suspicion. If it does not render after a confirmed-fresh restart, the
+  code path never executed for that session — independent of whatever CSS/selector confusion is also in
+  play. This is what actually separated "wrong selector" from "code never runs" here; without it, the two
+  failure modes look identical from the outside (nothing happens, no error).
+- Also checked and ruled out: Streamlit's historical per-browser "wide mode" `localStorage` override
+  (`Object.entries(localStorage)` filtered for `/wide|layout|theme/i`) — not present in this codebase's
+  Streamlit version. Worth checking early in any future width/layout investigation regardless, since it is
+  a real override mechanism when it exists and produces an identical-looking symptom.
+
+**Selector note (secondary, worth recording alongside the above):** Streamlit 1.59.2 emits **both** a hashed
+`st-emotion-cache-*` class **and** stable literal classes matching the element's `data-testid` — e.g. the
+main block container's `class` attribute is
+`stMainBlockContainer block-container st-emotion-cache-1w723zb e15ve43o4`. So a bare `.block-container`
+selector does work in this version. Prefer `[data-testid="stMainBlockContainer"]` attribute selectors
+anyway — `data-testid` is Streamlit's explicit, documented testing/accessibility hook, while the plain
+literal class name is incidental and not documented as stable across versions.
+
 ### 9a. CSS delivery mechanism (foundation — land before 9b/9e/9f)
 
 Create `app/static/mobile.css` (new `app/static/` directory) and load it once per render.
@@ -2412,7 +2530,11 @@ def _inject_mobile_css() -> None:
     st.html(_MOBILE_CSS_PATH)
 ```
 
-Call it as the first statement in `render_dashboard` (def `dashboard.py:1118`), before the sidebar is built.
+Call it as the first statement in `render_dashboard` (def `dashboard.py:1118`), before the sidebar is built —
+**not** at module scope in `app/streamlit_app.py` or `app/dashboard.py`. See the "Gotcha: module-level
+`st.*` calls in `app/streamlit_app.py` only run once per process" section directly above: `render_dashboard`
+is called fresh on every rerun (unlike module-level code in an imported file), which is exactly why this
+call site is correct as specified.
 
 Resolve the path from `__file__`, **not** relative to the CWD. Every other path in this repo is CWD-relative
 (`CLAUDE.md`), but a stylesheet must not silently vanish when the app is launched from another directory.
@@ -2590,9 +2712,19 @@ if __name__ == "__main__":
 ```
 
 Because the entry script now sits at the repo root, Streamlit inserts the repo root into `sys.path`, and
-`core` / `app` / `database` import normally with no `sys.path` manipulation anywhere. `app/streamlit_app.py`
-keeps `st.set_page_config()` at module scope — it runs on import, before any other Streamlit call, which is
-required.
+`core` / `app` / `database` import normally with no `sys.path` manipulation anywhere.
+
+> **Correction (2026-07-26): the claim below (module-scope `set_page_config`) is wrong and no longer matches
+> the code.** `app/streamlit_app.py` now calls `st.set_page_config()` (and any other per-run Streamlit call,
+> e.g. CSS injection) as the **first statement inside `main()`**, not at module scope. Module-scope
+> `st.*` calls in `app/streamlit_app.py` only execute once — on the process's first-ever script run — and
+> silently no-op on every later rerun or new session. See **"Gotcha: module-level `st.*` calls in
+> `app/streamlit_app.py` only run once per process"** (added under Phase 9, below) for the full mechanism,
+> how it was diagnosed, and what to do instead. The paragraph immediately below is preserved for history but
+> should not be followed.
+
+> ~~`app/streamlit_app.py` keeps `st.set_page_config()` at module scope — it runs on import, before any other
+> Streamlit call, which is required.~~
 
 Same commit: delete the dead commented-out `sys.path` block at `app/streamlit_app.py:5-11`, and update the
 run command to `streamlit run streamlit_app.py` in `README.md`, `CONTRIBUTING.md`, and `CLAUDE.md`.
@@ -2683,24 +2815,26 @@ cron (which only schedules from the default branch) and gives SCC a stable branc
 8. Reboot the app from the SCC menu so it picks up the new secrets.
 9. Tick the Phase 0 HTTPS-redirect-URI checkbox.
 
-### 10i. Verification
+### 10i. Verification — partially confirmed (2026-07-26)
 
 1. `streamlit run streamlit_app.py` from the repo root works locally.
 2. Prove the entry-point fix is real and not masked by the editable install: in a scratch venv without
    `pip install -e .`, `streamlit run streamlit_app.py` must still start. (`streamlit run
    app/streamlit_app.py` is expected to fail with `ModuleNotFoundError: core` — that is the bug being fixed.)
-3. `python -m unittest discover -s tests -v` still green — this phase adds no logic.
-4. Desktop: the `.streamlit.app` URL renders the sign-in page, "Continue with Google" opens a **new tab**
-   (Phase 2.6a — SCC's own hosting iframe blocks same-tab navigation; this differs from local behavior
-   described in Phase 2.6), completes sign-in there, an allowlisted account reaches the dashboard, a
-   non-allowlisted one is refused.
-5. Mobile: same URL, both allowlisted accounts — this is the case the HTTPS redirect URI exists for, and it
-   re-runs global verification item 15.
-6. The dashboard shows the same transactions the pipeline last wrote.
-7. Push a trivial commit to `main` → SCC auto-redeploys.
-8. Confirm sign-in genuinely completes against the **live deployed SCC URL**, not just locally — Phase 2.6a
-   was found precisely because every earlier verification pass in this phase and Phase 2.6 only ever ran
-   locally, where the SCC-specific iframe that broke it doesn't exist.
+3. `python -m unittest discover -s tests -v` still green — 118 tests, confirmed passing (2026-07-26).
+4. **[x] Desktop, `jacosse1@gmail.com`:** the `.streamlit.app` URL renders the sign-in page, "Continue with
+   Google" opens a **new tab** (Phase 2.6a — SCC's own hosting iframe blocks same-tab navigation; this
+   differs from local behavior described in Phase 2.6), completes sign-in there, and reaches the dashboard.
+   **[ ] Still open:** the same check with `lapointe.alexie@gmail.com`, and confirming a non-allowlisted
+   account is refused.
+5. **[ ] Not yet done.** Mobile: same URL, both allowlisted accounts — this is the case the HTTPS redirect
+   URI exists for, and it re-runs global verification item 15. Blocked on Phase 9 not being started.
+6. **[x] Confirmed 2026-07-26** — the dashboard shows the expected transaction data after signing in.
+7. **[x] Done** — `dev` merged to `main` and pushed (`9f0b34d`); confirmed via
+   `git merge-base --is-ancestor` that `dev`'s tip is an ancestor of `origin/main`.
+8. **[x] Confirmed 2026-07-26** — sign-in genuinely completes against the **live deployed SCC URL**, not
+   just locally. Phase 2.6a was found precisely because every earlier verification pass in this phase and
+   Phase 2.6 only ever ran locally, where the SCC-specific iframe that broke it doesn't exist.
 
 ---
 
@@ -2837,6 +2971,342 @@ mismatch this function exists to prevent. Comments and unrelated `.env` keys are
 
 ---
 
+## Phase 12 — Transaction identity and duplicate handling — DONE (2026-07-27)
+
+> **Status:** implemented on `dev` and run against production. 685 → 639 transactions, 17 accounts, 0
+> duplicate `external_id`s, and three consecutive `python main.py` runs that each report `0 new, 0 already
+> present, 0 stale duplicates removed`. Test suite 137 → 145.
+>
+> **Not yet on `main`.** See "Outstanding" at the end of this phase — the daily GitHub Actions run executes
+> `main.py` from `main`, which still carries the old append-only logic.
+
+### The constraint that shapes everything below — read this first
+
+**The user really did make four separate real `IKEA $250.00` charges on 2026-07-02**, tapping repeatedly
+against a $250 contactless limit. Four rows, one account, one date, one description, one amount — all four
+legitimate.
+
+That single fact invalidates the obvious fix. Any rule of the form "two rows on the same account with the
+same date, description and amount are duplicates — delete one" destroys $750 of real spending. It rules out:
+
+- a `UNIQUE` index on `(account_key, transaction_date, description, amount)` (migration 005 had one; 010
+  drops it and forbids recreating it),
+- an account-scoped `transaction_hash` — `transaction_hash` is `UNIQUE`, so whatever it hashes caps the
+  table at one row per that key, and IKEA×4 becomes literally unrepresentable,
+- any dashboard-side or script-side auto-collapse on the natural key.
+
+Every mechanism below was designed around this. Where a rule *is* keyed on the natural key
+(`reconcile_transactions`, migration 011), it is gated by something that can tell four real taps from four
+copies — Plaid's own current count, or a mask restricted to one specific double-Item account.
+
+### The problem: three distinct duplicate mechanisms
+
+Production had visibly duplicated transactions. Investigation found three separate causes, each needing a
+different fix. Conflating them is why earlier single-shot attempts failed.
+
+| | Mechanism | What Plaid does | Why the existing guards missed it | Fix |
+|---|---|---|---|---|
+| **A** | Re-attribution | Plaid moved 60 transactions between two of one owner's chequing accounts, keeping the same `transaction_id` | Every uniqueness guarantee was **account-scoped** — `transactions_natural_key` (005) and `transaction_hash` both key on `account_key`, so the same `transaction_id` under two `account_key`s collides with nothing | Migration 009 (`transactions_external_id` partial unique index) + `build_transaction_hash` keyed on `transaction_id` |
+| **B** | Co-owned account, two Items | The account with mask `4102` is exposed through *both* owners' Plaid Items; **each Item issues its own `transaction_id`s** for the same real transactions | 009 sees two different `external_id`s and allows both; the account-scoped hash only absorbs the copy if it lands on the same canonical `account_key`, which a second Item does not guarantee | `PlaidIngestor.fetch_transactions` claims each real account for one token per run; migration 011 trims the already-stored copies |
+| **C** | Plaid double-post | The same real transaction returned twice under two `transaction_id`s, with **no distinguishing field whatsoever** | Nothing in the payload discriminates it from a genuine repeat | Migration 012 — a user-set `is_duplicate` flag; no automatic rule can be correct |
+
+Mechanism C was verified, not assumed. All 9 affected groups were compared field-by-field across the two
+copies: `pending`, `pending_transaction_id`, `authorized_datetime`, `merchant_entity_id`, `payment_channel`
+and `website` were identical in every group. **Only `transaction_id` differs.** There is no signal to
+automate on — which, combined with the IKEA case, is why C ends in a manual checkbox rather than code.
+
+### 12a. Account identity — making two views of one account merge
+
+**`database/migrations/008_backfill_account_mask.sql`** — recovers `mask` for rows inserted before the
+column existed, by parsing the `(••••NNNN)` suffix `plaid_ingestor.py` already folds into `account_name`:
+
+```sql
+UPDATE accounts
+SET mask = substring(account_name from '\(•+([^)]+)\)$')
+WHERE mask IS NULL
+  AND account_name ~ '\(•+([^)]+)\)$';
+```
+
+End-anchored so names carrying their own parentheses (`"... (FHSA) CAD (••••JJWQ)"`) resolve to the
+trailing group; idempotent, since `ensure_schema()` re-runs every migration on every call. Why it matters:
+`NULL` never disqualifies a candidate in the mask veto below, so two mask-less legacy rows both stay in the
+running, the `len(matches) == 1` guard bails, and the merge is *permanently* blocked. **Validated 16/16
+against known masks, 0 mismatches.**
+
+**`DatabaseClient.canonicalize_account_keys`** (`database/db.py`) — two changes to the fallback identity
+used when `persistent_account_id` is unavailable:
+
+- **`owner_name` dropped from the tuple.** It records *which connection/token revealed the account*, not who
+  owns it. A jointly-held account visible through two tokens carries two different `owner_name`s, buckets
+  separately, and could therefore **never** merge — exactly mechanism B. The tuple is now
+  `(official_name, account_subtype, account_type)` with `mask` as a veto/preference.
+- **Exact-mask preference added.** When the fallback would otherwise be ambiguous (two accounts sharing
+  `official_name`/`subtype`/`type`, one with a known mask and one still `NULL` from before 008), a single
+  exact mask match wins outright instead of the ambiguity guard refusing to act.
+
+`mask` is still deliberately *not required* in the fallback, for the same NULL-never-equals reason 008
+addresses from the other side.
+
+**`ingestion/plaid_ingestor.py::_account_identity`** (new, static) — returns
+`(official_name, account_subtype, account_type, mask)`, or `None` when any field is missing, because a
+partial tuple cannot safely call two accounts the same. It exists so **the ingestor and the database agree
+on what "the same account" means**; if the two tuples drift apart, mechanism B silently returns.
+
+**`scripts/dedupe_accounts.py`** — the canonical row is now the one **Plaid is still syncing**, not the
+oldest:
+
+```python
+group_sorted = sorted(group, key=lambda a: (a["updated_at"], a["mask"] is not None, a["created_at"]),
+                      reverse=True)
+canonical = group_sorted[0]
+```
+
+`upsert_plaid_accounts` bumps `updated_at` on every conflict, so an orphaned `account_key` Plaid no longer
+issues stays frozen while the live one keeps advancing. The old oldest-wins rule picked the dead key as
+canonical — it would have deleted the live rows and let the accounts re-fork on the very next pipeline run.
+
+**`DatabaseClient.merge_account`** — now returns `(moved, dropped)` instead of `None`, deletes natural-key
+collisions on the destination *before* the reassigning `UPDATE` (otherwise the `UPDATE` raises a unique
+violation), and carries `manual_credit_limit` (migration 007) onto the canonical row when the canonical's is
+`NULL`, so a user-entered credit limit is not lost with the deleted account.
+
+**`ingestion/plaid_ingestor.py::fetch_transactions`** — ingests each real account **once per run**. Each
+account identity is claimed by the first token (in `self.access_tokens` order, so the winner is
+deterministic) that reveals it; every later token's `account_id` for that identity goes into
+`skipped_account_ids` and its transactions are dropped at the page loop. Accounts whose identity tuple is
+incomplete are always ingested, never skipped — a partial identity is not enough evidence to discard data.
+This is the fix that stops mechanism B at the source; 011 only cleans up what it already produced.
+
+### 12b. Transaction identity — `transaction_id` as the hash input
+
+**`build_transaction_hash`** (`database/db.py`) now keys on Plaid's `transaction_id` when there is one, and
+falls back to the account-scoped formula only when there isn't:
+
+```python
+external_id = transaction.get("external_id") or transaction.get("transaction_id")
+if external_id:
+    return hashlib.sha256(f"plaid_txn|{external_id}".encode()).hexdigest()
+identity = "|".join([account_key, _canonical_date(date), description, _canonical_amount(amount)])
+```
+
+Three consequences:
+
+1. **The table can now hold IKEA×4.** Four real charges have four `transaction_id`s, four hashes, four rows.
+   The account-scoped formula could hold one.
+2. **The hash is stable across Plaid mutating a transaction.** The pending→posted transition revises
+   `amount`, `date` and `description`; re-attribution changes `account_key`. Under the old formula all four
+   changed the hash and produced a twin. Now they collide on the unchanged hash and `ON CONFLICT` updates
+   the row in place, so `user_category`, `is_recurring` and `created_at` survive.
+3. **What it does *not* catch** is a *re-issued* `transaction_id` (Item re-link, or mechanism B's second
+   Item). That class is handled outside the schema, by `reconcile_transactions`.
+
+Rows with no `transaction_id` (seed data, any future non-Plaid source) keep the account-scoped formula —
+the best identity available for them.
+
+> **This is the third sanctioned change to the hash formula under the Phase 2.7 amendment** (after 2.7's
+> `account_name`→`account_key` and 2.8's type-canonicalization). It ships with `rehash_transactions()`, as
+> that amendment requires: never a silent formula swap. `rehash_transactions` gained a prior pass that
+> collapses rows sharing an `external_id`, keeping the newest by `(created_at, id)` — Plaid's current
+> attribution, matching migration 009.
+
+**`database/migrations/009_transaction_external_id_identity.sql`** — retires stale attributions
+(`DELETE ... USING` keeping the newest per `external_id`), then enforces it going forward:
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS transactions_external_id
+    ON transactions (external_id) WHERE external_id IS NOT NULL;
+```
+
+Partial, because rows without an `external_id` must remain unconstrained. `external_id` is
+account-independent, so this is the one index that catches mechanism A, which no account-identity heuristic
+can see.
+
+**`database/migrations/010_drop_account_scoped_natural_key.sql`** — `DROP INDEX IF EXISTS
+transactions_natural_key`, permanently. The file's comment records the IKEA case as the reason so nobody
+re-adds it.
+
+**`database/migrations/005_transaction_natural_key.sql` neutered to `SELECT 1;`** — the file is *kept, not
+deleted*. `ensure_schema()` re-runs every migration on every call, so leaving the original `CREATE` in place
+would re-create an index that 010 immediately drops — and on this data the `CREATE` now fails outright with
+a `UniqueViolation` before 010 ever runs. The header comment explains both ways 005's guarantee turned out
+to be wrong.
+
+**`database/migrations/011_trim_stale_duplicates.sql`** — a one-off, deliberately narrow trim of the
+mechanism-B backlog: for accounts with `a.mask = '4102'` only, delete later copies sharing
+`(account_key, transaction_date, description, amount)`. Scope is restricted to the double-Item account
+precisely because that shape is *frequently real spending* elsewhere in the table. Written to be idempotent
+(once the later copies are gone it matches nothing) since `ensure_schema()` re-runs it forever.
+
+### 12c. `DatabaseClient.reconcile_transactions` (new) — the only mechanism with enough information
+
+Called from `pipeline/runner.py` **after** `upsert_transactions`, on the frame whose `account_key`s have
+already been remapped through `key_remap`:
+
+```python
+inserted, updated = database.upsert_transactions(transactions)
+removed = database.reconcile_transactions(transactions, start_date, end_date)
+```
+
+The discriminator no index can have: **how many copies does Plaid itself currently return for this natural
+key?** Five stored IKEA rows against four fetched means exactly one is spurious; four against four means
+nothing is.
+
+Three properties, in order of importance:
+
+1. **A natural key Plaid returns *zero* of is skipped outright and never touched.** Plaid's transaction
+   window rolls forward and drops history the database legitimately still holds (`ANTHROPIC* CLAUDE SUB
+   32.19`, and others). Absence from the fetch is not evidence of duplication. This is the single most
+   important safety property in the method.
+2. **Deletion order**, most-expendable last, via `rows.sort(key=lambda r: (r[0], not r[1], r[2], r[3]))`:
+   - user-flagged `is_duplicate` rows first — already judged expendable, so trimming must never remove
+     their unflagged twin and leave the flagged copy behind;
+   - then rows whose `external_id` Plaid **no longer returns**, ahead of ones it still does;
+   - then earliest `(created_at, id)`, so `user_category` / `is_recurring` / `created_at` survive.
+3. **Both sides are compared through `_canonical_amount` / `_canonical_date`.** The frame carries Python
+   floats and `date`/`Timestamp`; Postgres returns `Decimal` and `date`. That exact mismatch already caused
+   a duplicate-insert bug once (Phase 2.8) and is not allowed to recur here.
+
+Returns the number of rows deleted, which `runner.py` logs as `%s stale duplicates removed`.
+
+### 12d. Mechanism C — the manual `Duplicate` flag
+
+No automatic rule can be correct in both directions, so this records the user's judgement.
+
+- **`database/migrations/012_transaction_is_duplicate.sql`** —
+  `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN NOT NULL DEFAULT FALSE;`
+- **`DatabaseClient.update_transaction_duplicate(transaction_hash, is_duplicate)`** — sets the flag and
+  bumps `updated_at`. The row is **retained, never deleted**, so the call is always reversible.
+- **`app/dashboard.py::_section_ledger`** — a `Duplicate` / `Doublon` `CheckboxColumn` in the ledger's
+  `st.data_editor`, alongside the existing category dropdown and `Recurring` checkbox, wired through the
+  same edited-rows dispatch (`col_changes[T["col_duplicate"]] → db.update_transaction_duplicate(...)`).
+- **`_build_sidebar_filters`** — a **"Possible duplicates only"** toggle narrowing the view to rows sharing
+  `(account_key, date, description, amount)` with at least one other row, i.e. exactly the candidates worth
+  inspecting by hand. Grouped on `account_key`, not `account_name`, so two distinct accounts with the same
+  display name don't collapse together.
+- **`load_financial_data`** selects `t.is_duplicate`; flagged rows are then excluded from analytics
+  (`enriched = filtered[~filtered["is_duplicate"].fillna(False).astype(bool)]`, and the same on
+  `all_time_filtered`) while remaining visible in the ledger.
+- **The flag survives pipeline runs** by the Appendix-A "pipeline never writes it" rule that `user_category`
+  and `is_recurring` already follow: `upsert_transactions`' `INSERT ... ON CONFLICT` **never names the
+  `is_duplicate` column**, in either the column list or the `DO UPDATE SET` clause.
+
+### 12e. Dashboard changes that came out of the same investigation
+
+- **Manual credit limits** (`database/migrations/007_manual_credit_limit.sql`, `set_manual_credit_limit`,
+  `_effective_credit_limit`) — for cards where the institution never gives Plaid a `balances.limit`.
+  Deliberately a separate column from `balance_limit`, which `upsert_plaid_accounts` overwrites every run;
+  Plaid's value takes precedence when present, and the UI labels a manual one as such.
+- **Stale-balance warning** — accounts whose `accounts.updated_at` is older than `_STALE_BALANCE_DAYS` are
+  surfaced as `st.warning` with a per-account age in days ("Re-run the pipeline or repair the Plaid
+  connection"). `set_manual_credit_limit` deliberately does *not* touch `updated_at`, so a manual edit can't
+  fake balance freshness.
+- **Duplicate-account warning** — groups `accounts` on `(official_name, account_subtype, account_type,
+  mask)` and warns when any group has more than one `account_key`, pointing at
+  `scripts/dedupe_accounts.py`. The account fork that caused mechanism A was invisible for weeks; this makes
+  the next one visible on the first page load.
+
+Both warning strings exist in `en` and `fr`, per the dashboard's existing `T` dictionary convention.
+
+### Gotcha: three dead ends, each of which cost real time
+
+> Recorded the way the Phase 9 module-level-`st.*` gotcha is: these are not hypotheticals, they happened in
+> this repo, against this database, and a future reader who skips this section will repeat at least one of
+> them. One of them destroyed production data.
+
+**1. An account-scoped `transaction_hash` was tried and reverted.** It looks correct — it is what 2.7 and
+2.8 converged on, and it is what the docstring described for weeks. But `transaction_hash` is `UNIQUE`, so
+it caps the table at exactly one row per `(account_key, date, description, amount)`. IKEA×4 is
+unrepresentable under it; three of the four real charges vanish silently at insert time, with no error, no
+log line, and a plausible-looking row left behind. The same reasoning kills migration 005's index — the two
+failures are the same failure wearing different clothes. If a future change makes the hash account-scoped
+again, it *will* silently delete real spending.
+
+**2. A too-loose collision `DELETE` inside `upsert_transactions` destroyed two legitimate production rows.**
+While the hash was still account-scoped, `upsert_transactions` carried a pre-insert "relocation" step: for
+each incoming row with an `external_id`, if the incoming natural key was already occupied by a different
+row, delete the stale row holding our `external_id`. The implementation deleted the **destination** row
+rather than the stale source. Two real rows went with it — `$0.00 Fixed monthly fees` on ••••9105, dated
+**2026-05-15** and **2026-07-17** — and they are **unrecoverable**: Plaid's window had already rolled past
+them, so no re-ingest brings them back. The relocation step was removed **entirely** once the hash became
+`transaction_id`-stable, because a stable hash makes it unnecessary: a revised or re-attributed transaction
+now arrives with an unchanged hash and is absorbed by `ON CONFLICT`. The lesson is narrower than "be
+careful": *any* `DELETE` inside the write path operates on rows that may be the only surviving copy of real
+history, and this repo has already proven it will not notice for weeks.
+
+**3. Reconciliation initially thrashed 43-in / 43-out on every run.** The first version of
+`reconcile_transactions` sorted purely by `created_at` and kept the *earliest* row. But the earliest row is
+the **stale** copy — the one carrying the obsolete `transaction_id` — while the freshly-ingested row
+carrying the `transaction_id` Plaid actually returns is the newest. So every run deleted the current row,
+kept the dead one, and the next run re-inserted the current row: 43 inserted, 43 deleted, forever, with the
+pipeline reporting apparently-plausible non-zero numbers both ways. Fixed by making "does Plaid still return
+this `external_id`?" outrank `created_at` in the sort key (the `not r[1]` term). **A pipeline that reports
+steady non-zero insert *and* delete counts on an unchanged account is thrashing, not working** — the
+idempotency check below exists to catch exactly this.
+
+### Results
+
+| | Before | After |
+|---|---|---|
+| Transactions | 685 | **639** |
+| Accounts | (forked) | **17** |
+| Duplicate `external_id`s | present | **0** |
+| Pipeline idempotency | 43 in / 43 out per run | **0 new, 0 deleted** across 3 consecutive runs |
+| Tests | 137 | **145** |
+
+The 8 new tests are in `tests/test_account_identity.py`: `CanonicalizeAccountKeysTests` (exact-mask
+preference, matching across differing `owner_name`, refusing to guess between ambiguous NULL-mask
+candidates), `GroupDuplicatesTests` (partitioning by mask while ignoring owner), `MergeAccountTests`
+(collision drop before reassign), `UpsertTransactionsExternalIdTests` (hash keys on `transaction_id`; falls
+back without one; **repeated transactions each persist** — the IKEA guard), `ReconcileTransactionsTests`
+(trims the stale copy not the current one; flagged duplicate deleted before its twin; genuinely repeated
+transactions untouched; a key Plaid returns zero of is never deleted; float/Decimal amounts bucket
+together), `DuplicateFlagTests` (flag written; **`upsert` never writes `is_duplicate`**), and
+`RehashExternalIdPassTests`.
+
+### Verification (all run)
+
+1. `python -m unittest discover -s tests` — **145/145 pass**.
+2. `python -m unittest tests.test_account_identity -v` — all pass, including the two regression guards that
+   encode this phase's hard-won rules (`test_repeated_transactions_each_persist`,
+   `test_key_plaid_no_longer_returns_is_never_deleted`).
+3. **IKEA regression check** — `SELECT count(*) FROM transactions t JOIN accounts a USING (account_key)
+   WHERE t.transaction_date = '2026-07-02' AND t.description ILIKE 'IKEA%' AND t.amount = 250.00` returns
+   **exactly 4**. Re-run this after *any* change to `build_transaction_hash`,
+   `reconcile_transactions`, `merge_account`, or the migration set. If it ever returns fewer than 4, real
+   spending has been deleted.
+4. **Plaid-dropped-history check** — transactions outside Plaid's current window are still present
+   (`ANTHROPIC* CLAUDE SUB 32.19` and the other aged-out rows). Proves `reconcile_transactions`' zero-fetch
+   skip is holding; a regression here deletes real history on every run.
+5. **Idempotency** — three consecutive `python main.py` runs, each logging `0 new transactions, N already
+   present, 0 stale duplicates removed`. Non-zero on both insert *and* delete means dead end 3 has returned.
+6. **Duplicate-`external_id` check** — `SELECT external_id, count(*) FROM transactions WHERE external_id IS
+   NOT NULL GROUP BY 1 HAVING count(*) > 1` returns no rows; `transactions_external_id` exists as a partial
+   unique index.
+7. **Account count** — 17 accounts, and the dashboard's duplicate-account warning does not fire.
+8. **Flag survives a pipeline run** — tick `Duplicate` on a row in the ledger, run `python main.py`, reload
+   the dashboard: the tick is still there, the row is still excluded from every total and chart, and the row
+   itself was not deleted. Same check as Appendix A verification item 19, applied to `is_duplicate`.
+9. **Mask backfill** — 16/16 accounts resolved to their known mask, 0 mismatches, 0 rows left with a
+   parseable `account_name` but a `NULL` mask.
+10. **`ensure_schema()` re-run** — calling it twice in a row is clean: 005 is a no-op `SELECT 1`, 010's
+    `DROP INDEX IF EXISTS` and 011's scoped `DELETE` both match nothing the second time, 012 is
+    `ADD COLUMN IF NOT EXISTS`.
+
+### Outstanding
+
+- **This work is uncommitted on `dev`.** The daily GitHub Actions run executes `python main.py` from
+  **`main`**, which still has the old append-only logic — so until this merges, the scheduled run is
+  actively re-introducing the duplicates this phase removed. Merging `dev → main` is the single action that
+  closes this phase out.
+- Migrations 011 (and, once its work is done, 008) are one-off cleanups that live permanently in the
+  `ensure_schema()` loop. Both are idempotent, so this is correct but not free — worth a pass if the
+  migration list grows further.
+- `upsert_transactions`' docstring still describes the pre-Phase-12 account-scoped hash and its removed
+  relocation pass in places, while the inline comment immediately below it describes current behaviour.
+  Source-level cleanup, not a plan item.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
@@ -2927,8 +3397,12 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 6. Phase 3e (SELECT query with COALESCE + `transaction_hash`) **before** Phase 3l (ledger edit).
 7. Fix case in `analytics/placeholders.py` (`"uncategorized"` → `"Uncategorized"`) **alongside** Phase 3c, before running the pipeline against the seeded categories.
 8. **Don't change `build_transaction_hash` inputs without a rehash + dedup migration** — re-ingest
-   idempotency depends on them. Superseded once, deliberately: see Phase 2.7 for the 2026-07-17 change from
-   `account_name`-keyed to `account_key`-keyed hashing, shipped together with `rehash_transactions()`.
+   idempotency depends on them. Superseded three times, each deliberately and each shipped together with
+   `rehash_transactions()`: Phase 2.7 (2026-07-17, `account_name`-keyed → `account_key`-keyed), Phase 2.8
+   (2026-07-19, amount/date canonicalisation), and Phase 12b (2026-07-27, → Plaid's `transaction_id` when
+   present, with the `account_key`-keyed formula retained only as the fallback for rows without one).
+   Note 12b also makes the hash *account-independent* for Plaid rows, which is what lets a re-attributed or
+   pending→posted-revised transaction update in place instead of inserting a twin.
 9. Seed data must use Plaid sign convention (positive = outflow) or cash flow inverts.
 10. `load_settings()` must never hard-require Plaid credentials — that would break the seed demo and dashboard-only deployments. Plaid validation lives only in `pipeline/runner.py::_build_ingestor`.
 11. Cron goes live only after merge to `main` + GitHub Secrets — Phase 0 owner action, not code.
