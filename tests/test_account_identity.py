@@ -96,9 +96,7 @@ class CanonicalizeAccountKeysTests(unittest.TestCase):
         cursor.fetchone.return_value = None
         cursor.fetchall.return_value = [("plaid:one", None), ("plaid:two", None)]
         with patch("database.db.psycopg.connect", connect):
-            remap = DatabaseClient("postgresql://x").canonicalize_account_keys(
-                [self._account(mask=None)]
-            )
+            remap = DatabaseClient("postgresql://x").canonicalize_account_keys([self._account(mask=None)])
         # No incoming mask and two equally-valid NULL-mask candidates: stay unmapped rather
         # than guess which one is the same physical account.
         self.assertEqual(remap["plaid:new"], "plaid:new")
