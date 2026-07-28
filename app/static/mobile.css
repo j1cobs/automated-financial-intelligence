@@ -1,0 +1,81 @@
+/* Responsive stylesheet for the Streamlit dashboard.
+ *
+ * Loaded once per render by app/streamlit_app.py::_inject_css() via st.html(), which
+ * wraps a .css file in style tags and routes style-only content to the event
+ * container -- so this costs zero layout space and needs no unsafe_allow_html.
+ *
+ * !! Never write a literal style tag (angle brackets) anywhere in this file, not even
+ * inside a comment. Streamlit wraps this whole file in one, and the stray inner tag
+ * corrupts the block during sanitisation -- EVERY rule here is then silently dropped,
+ * with no error in the browser console and no warning in the server log. This cost a
+ * full debugging cycle on 2026-07-27; tests/test_dashboard_helpers.py guards it now.
+ *
+ * Every rule here is purely additive: delete this file and the app falls back to
+ * Streamlit's default desktop-first behaviour. Rules target data-testid hooks, which
+ * are NOT a stable public Streamlit API -- re-verify when the streamlit floor in
+ * requirements.txt moves.
+ */
+
+/* Full-bleed main container (absorbed from the inline st.html block that previously
+ * lived in streamlit_app.py, so all styling has one home). */
+[data-testid="stMainBlockContainer"] {
+  max-width: 100%;
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+
+/* Long unbreakable tokens (e.g. the Supabase URL caption) must not force the sidebar
+ * drawer to scroll horizontally. Applies at every width -- it is correct everywhere. */
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] .stCaption {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  /* Reclaim the horizontal padding the desktop rule above adds. */
+  [data-testid="stMainBlockContainer"] {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  /* Streamlit forces min-width: calc(100% - 1.8rem) on every column below 640px, so
+   * everything stacks 1-up. The problem this creates is vertical sprawl, not squashed
+   * columns: a 6-metric row becomes six full-width cards. Let METRIC-bearing rows pair
+   * up 2-up, roughly halving the Overview scroll.
+   *
+   * The :has() scoping is what keeps this safe -- chart columns keep stacking full
+   * width, which is what charts want. Browser floor: Safari 15.4+ / Chrome 105+.
+   * If :has() ever has to go, wrap each metric row in st.container() and target that. */
+  [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) [data-testid="stColumn"] {
+    min-width: calc(50% - 0.9rem) !important;
+    flex: 1 1 calc(50% - 0.9rem) !important;
+  }
+
+  [data-testid="stMetricValue"] {
+    font-size: 1.25rem;
+  }
+
+  [data-testid="stMetricLabel"] {
+    font-size: 0.75rem;
+  }
+
+  /* Four tabs, and the French labels are longer ("Flux monétaires"), so the bar
+   * overflows sooner in FR. Shrink the labels so all four fit without scrolling. */
+  [data-testid="stTabs"] button {
+    font-size: 0.8rem;
+    padding-left: 0.6rem;
+    padding-right: 0.6rem;
+  }
+
+  /* 44px minimum touch target (Sign out, Save budgets, the language toggle). */
+  [data-testid="stSidebar"] button,
+  .stButton > button,
+  [data-testid="stBaseButton-secondary"],
+  [data-testid="stBaseButton-primary"] {
+    min-height: 44px;
+  }
+
+  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] {
+    font-size: 0.85rem;
+  }
+}

@@ -6,7 +6,15 @@
 
 ## Screenshots
 
-<!-- Add screenshots here once captured on sample data. -->
+All captured on generated sample data (`scripts/seed_sample_data.py`) — no real financial information.
+
+| Overview | Cash flow |
+| --- | --- |
+| ![Overview tab — net worth, savings rate, spending by category](docs/images/overview.png) | ![Cash flow tab — income vs. expenses, 30-day rolling spend](docs/images/cashflow.png) |
+
+| Budget | Transactions |
+| --- | --- |
+| ![Budget tab — monthly limits with projected end-of-month spend](docs/images/budget.png) | ![Transactions tab — ledger with inline category editing and anomaly flags](docs/images/transactions.png) |
 
 ## Architecture
 
@@ -41,12 +49,25 @@ A few decisions worth calling out:
 ## Quickstart (local, no Plaid account needed)
 
 ```bash
-docker compose up -d
+cp .env.example .env          # the defaults already point at the docker database
+docker compose up -d          # Postgres on 127.0.0.1:5433
 python scripts/seed_sample_data.py
 streamlit run streamlit_app.py
 ```
 
-Requires Python 3.12+, and every command runs from the repo root (config and migration paths are relative). Plaid credentials are only needed if you want to pull real transactions with `python main.py`. See [docs/setup-plaid.md](docs/setup-plaid.md) for that.
+That gives you 5 sample accounts and ~140 generated transactions across a trailing 120-day window, complete with categories and three planted anomalies — enough to exercise every tab. The seed writes straight to the database, so no Plaid account is involved.
+
+Requires Python 3.12+ and Docker. Every command runs from the repo root (config and migration paths are relative). Plaid credentials are only needed to pull real transactions with `python main.py` — see [docs/setup-plaid.md](docs/setup-plaid.md).
+
+Signing in still needs Google OAuth credentials in `.env` (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8501/`, and your own address in `GOOGLE_ALLOWED_EMAILS`); the dashboard is gated behind it.
+
+> **Use `127.0.0.1`, not `localhost`, in `DATABASE_URL`.** Compose binds the port on IPv4 only, and on Windows `localhost` resolves to `::1` first — so every connection waits for the IPv6 attempt to time out. That is ~15s per connection instead of 0.1s, which makes the seed script look like it has frozen.
+
+To reset the demo data, recreate the volume — the seed reassigns its sample ids after a date sort, so re-seeding on a *later* day than the last run collides with the stored `external_id`s rather than updating them:
+
+```bash
+docker compose down -v && docker compose up -d && python scripts/seed_sample_data.py
+```
 
 ## Configuration reference
 

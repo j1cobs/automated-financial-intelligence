@@ -42,6 +42,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "categories": "Categories",
         "accounts": "Accounts",
         "amount_range": "Amount range ($)",
+        "filters_more": "More filters",
+        "amount_min": "Min amount ($)",
+        "amount_max": "Max amount ($)",
         "search": "Search description",
         "outliers_only": "Flagged transactions only",
         "duplicates_only": "Possible duplicates only",
@@ -174,6 +177,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "categories": "Catégories",
         "accounts": "Comptes",
         "amount_range": "Plage de montants ($)",
+        "filters_more": "Plus de filtres",
+        "amount_min": "Montant min ($)",
+        "amount_max": "Montant max ($)",
         "search": "Rechercher dans la description",
         "outliers_only": "Transactions signalées uniquement",
         "duplicates_only": "Doublons possibles uniquement",
@@ -291,6 +297,31 @@ _STRINGS: dict[str, dict[str, str]] = {
         "axis_week": "Semaine",
     },
 }
+
+# Plotly renders at 450px tall with a right-hand legend by default, which leaves almost
+# no plot area on a phone once a high-cardinality colour legend eats half the width.
+_CHART_CONFIG = {"displayModeBar": False}
+
+
+def _style_chart(fig, *, height: int = 320, hovermode: str | None = "x unified"):
+    """Apply mobile-safe layout to a Plotly figure. Call before st.plotly_chart.
+
+    A horizontal legend below the plot stops high-cardinality colour legends from
+    consuming half the width; tight margins reclaim ~80px on a 390px screen; an
+    explicit height beats Plotly's 450px default once the legend has moved below.
+
+    hovermode=None leaves Plotly's default in place -- required for pie charts, which
+    have no x-axis for "x unified" to unify along. Horizontal bars want "y unified".
+    """
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=32, b=8),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
+        autosize=True,
+    )
+    if hovermode is not None:
+        fig.update_layout(hovermode=hovermode)
+    return fig
 
 
 def load_financial_data(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -539,7 +570,11 @@ def _section_net_worth(
                 template="plotly_white",
             )
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                _style_chart(fig, hovermode=None),
+                use_container_width=True,
+                config=_CHART_CONFIG,
+            )
 
     with c2:
         owner_data = []
@@ -564,7 +599,7 @@ def _section_net_worth(
             template="plotly_white",
         )
         fig2.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(_style_chart(fig2), use_container_width=True, config=_CHART_CONFIG)
 
     if not credit_df.empty:
         st.markdown(f"**{T['credit_util_heading']}**")
@@ -614,10 +649,14 @@ def _section_net_worth(
                 editor_df.drop(columns=["account_key"]),
                 key="credit_limit_editor",
                 column_config={
-                    T["col_card"]: st.column_config.TextColumn(disabled=True),
-                    T["col_owner"]: st.column_config.TextColumn(disabled=True),
-                    T["col_plaid_limit"]: st.column_config.NumberColumn(disabled=True, format="$%.2f"),
-                    T["col_manual_limit"]: st.column_config.NumberColumn(min_value=0, format="$%.2f"),
+                    T["col_card"]: st.column_config.TextColumn(disabled=True, width="medium"),
+                    T["col_owner"]: st.column_config.TextColumn(disabled=True, width="small"),
+                    T["col_plaid_limit"]: st.column_config.NumberColumn(
+                        disabled=True, format="$%.2f", width="small"
+                    ),
+                    T["col_manual_limit"]: st.column_config.NumberColumn(
+                        min_value=0, format="$%.2f", width="small"
+                    ),
                 },
                 use_container_width=True,
                 hide_index=True,
@@ -703,38 +742,42 @@ def _build_sidebar_filters(
     owners = sorted(df["owner_name"].dropna().unique())
     selected_owners = st.sidebar.multiselect(T["owners"], options=owners, default=owners)
 
-    # Category multiselect
-    cats = sorted(df["category"].dropna().unique())
-    selected_cats = st.sidebar.multiselect(T["categories"], options=cats, default=cats)
-
-    # Account multiselect — options restricted to the selected owners
-    owner_subset = df[df["owner_name"].isin(selected_owners)] if selected_owners else df
-    accounts = sorted(owner_subset["account_name"].dropna().unique())
-    selected_accounts = st.sidebar.multiselect(T["accounts"], options=accounts, default=accounts)
-
-    # Amount range slider
+    # Everything below is secondary: on a phone the sidebar is a full-screen drawer, and
+    # every filter change costs open -> scroll -> change -> close. Period and owners (above)
+    # are the two that actually get changed, so they stay visible; the rest collapse.
     abs_amounts = df["amount"].abs()
     min_amt = float(abs_amounts.min())
     max_amt = float(abs_amounts.max())
-    amt_range = st.sidebar.slider(
-        T["amount_range"],
-        min_value=min_amt,
-        max_value=max_amt,
-        value=(min_amt, max_amt),
-        format="$%.2f",
-    )
 
-    # Description search
-    search = st.sidebar.text_input(T["search"], value="")
+    with st.sidebar.expander(T["filters_more"], expanded=False):
+        # Category multiselect
+        cats = sorted(df["category"].dropna().unique())
+        selected_cats = st.multiselect(T["categories"], options=cats, default=cats)
 
-    # Outliers-only toggle
-    outliers_only = st.sidebar.toggle(T["outliers_only"], value=False)
+        # Account multiselect — options restricted to the selected owners
+        owner_subset = df[df["owner_name"].isin(selected_owners)] if selected_owners else df
+        accounts = sorted(owner_subset["account_name"].dropna().unique())
+        selected_accounts = st.multiselect(T["accounts"], options=accounts, default=accounts)
 
-    # Duplicates-only toggle — narrows the view to rows that share
-    # (account_key, date, description, amount) with at least one other row, i.e. the
-    # candidates the user has to inspect by hand. Grouping on account_key rather than
-    # account_name avoids collapsing two distinct accounts with the same display name.
-    duplicates_only = st.sidebar.toggle(T["duplicates_only"], value=False)
+        # Amount range — two number_inputs rather than a two-handle slider, which is the
+        # hardest widget class to operate by touch and imprecise on any device.
+        st.caption(T["amount_range"])
+        amt_lo = st.number_input(T["amount_min"], min_value=0.0, value=min_amt, step=10.0, format="%.2f")
+        amt_hi = st.number_input(T["amount_max"], min_value=0.0, value=max_amt, step=10.0, format="%.2f")
+        # Tolerate inverted input rather than silently returning zero rows.
+        amt_range = (min(amt_lo, amt_hi), max(amt_lo, amt_hi))
+
+        # Description search
+        search = st.text_input(T["search"], value="")
+
+        # Outliers-only toggle
+        outliers_only = st.toggle(T["outliers_only"], value=False)
+
+        # Duplicates-only toggle — narrows the view to rows that share
+        # (account_key, date, description, amount) with at least one other row, i.e. the
+        # candidates the user has to inspect by hand. Grouping on account_key rather than
+        # account_name avoids collapsing two distinct accounts with the same display name.
+        duplicates_only = st.toggle(T["duplicates_only"], value=False)
 
     desc_mask = (
         df["description"].str.contains(search, case=False, na=False)
@@ -838,7 +881,12 @@ def _section_overview(
                 labels={"abs_amount": T["axis_amount"], "category": T["col_cat"]},
                 template="plotly_white",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            # Horizontal bars unify along y, not x; taller so the category labels fit.
+            st.plotly_chart(
+                _style_chart(fig, height=380, hovermode="y unified"),
+                use_container_width=True,
+                config=_CHART_CONFIG,
+            )
 
     with c2:
         months_sorted = sorted(bounded_all_time["month"].unique())
@@ -861,7 +909,7 @@ def _section_overview(
                 title=T["chart_mom_comparison"],
                 template="plotly_white",
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(_style_chart(fig2), use_container_width=True, config=_CHART_CONFIG)
 
     owner_mask = (
         acct_df["owner_name"].isin(selected_owners)
@@ -904,7 +952,11 @@ def _section_overview(
                 hole=0.35,
                 template="plotly_white",
             )
-            st.plotly_chart(fig_inc, use_container_width=True)
+            st.plotly_chart(
+                _style_chart(fig_inc, hovermode=None),
+                use_container_width=True,
+                config=_CHART_CONFIG,
+            )
 
     with c4:
         monthly = (
@@ -933,7 +985,7 @@ def _section_overview(
                 template="plotly_white",
             )
             fig_sr.add_hline(y=20, line_dash="dot", line_color="green", annotation_text="Target 20%")
-            st.plotly_chart(fig_sr, use_container_width=True)
+            st.plotly_chart(_style_chart(fig_sr), use_container_width=True, config=_CHART_CONFIG)
 
 
 def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
@@ -980,7 +1032,7 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
         template="plotly_white",
         labels={"adjusted_amount": T["axis_amount"], "month": T["axis_month"]},
     )
-    st.plotly_chart(fig_mom, use_container_width=True)
+    st.plotly_chart(_style_chart(fig_mom), use_container_width=True, config=_CHART_CONFIG)
 
     week_summary = (
         df[df["tx_type"] != "transfer"].groupby(["week", "tx_type"], as_index=False)["adjusted_amount"].sum()
@@ -998,7 +1050,7 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
         template="plotly_white",
         labels={"adjusted_amount": T["axis_amount"], "week": T["axis_week"]},
     )
-    st.plotly_chart(fig_week, use_container_width=True)
+    st.plotly_chart(_style_chart(fig_week), use_container_width=True, config=_CHART_CONFIG)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1019,7 +1071,7 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
             labels={"rolling_30d": T["axis_amount"], "date": T["axis_date"]},
             template="plotly_white",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(_style_chart(fig), use_container_width=True, config=_CHART_CONFIG)
 
     with c2:
         split = real.groupby(["month", "owner_name"], as_index=False)["adjusted_amount"].sum()
@@ -1038,7 +1090,7 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
             template="plotly_white",
         )
         fig2.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(_style_chart(fig2), use_container_width=True, config=_CHART_CONFIG)
 
     exp_only = real[real["tx_type"] == "expense"].copy()
     exp_only["abs_amount"] = exp_only["adjusted_amount"].abs()
@@ -1052,7 +1104,7 @@ def _section_cash_flow(df: pd.DataFrame, T: dict[str, str]) -> None:
         labels={"abs_amount": T["axis_amount"], "month": T["axis_month"]},
         template="plotly_white",
     )
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(_style_chart(fig3), use_container_width=True, config=_CHART_CONFIG)
 
 
 def _section_budget(df: pd.DataFrame, T: dict[str, str], database_url: str) -> None:
@@ -1119,9 +1171,9 @@ def _section_budget(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         editor_df,
         key="budget_editor",
         column_config={
-            "category": st.column_config.TextColumn(T["budget_col_category"], disabled=True),
+            "category": st.column_config.TextColumn(T["budget_col_category"], disabled=True, width="medium"),
             "monthly_limit": st.column_config.NumberColumn(
-                T["budget_col_limit"], min_value=0, format="$%.2f"
+                T["budget_col_limit"], min_value=0, format="$%.2f", width="small"
             ),
         },
         use_container_width=True,
@@ -1158,7 +1210,7 @@ def _section_anomalies(df: pd.DataFrame, T: dict[str, str]) -> None:
         labels={"outlier_score": T["axis_score"], "date": T["axis_date"]},
         template="plotly_white",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(_style_chart(fig, height=380), use_container_width=True, config=_CHART_CONFIG)
 
     display = outliers[
         [
@@ -1180,7 +1232,23 @@ def _section_anomalies(df: pd.DataFrame, T: dict[str, str]) -> None:
         T["col_cat"],
         T["col_score"],
     ]
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=360,
+        column_config={
+            T["col_date"]: st.column_config.TextColumn(width="small"),
+            T["col_owner"]: st.column_config.TextColumn(width="small"),
+            T["col_account"]: st.column_config.TextColumn(width="small"),
+            T["col_desc"]: st.column_config.TextColumn(width="medium"),
+            # Without an explicit format this renders full float precision into a
+            # narrow column, which is unreadable on a phone.
+            T["col_amount"]: st.column_config.NumberColumn(width="small", format="$%.2f"),
+            T["col_cat"]: st.column_config.TextColumn(width="small"),
+            T["col_score"]: st.column_config.NumberColumn(width="small", format="%.2f"),
+        },
+    )
 
 
 def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> None:
@@ -1223,6 +1291,11 @@ def _section_ledger(df: pd.DataFrame, T: dict[str, str], database_url: str) -> N
         key=editor_key,
         column_config={
             "hash": None,  # hidden
+            T["col_date"]: st.column_config.TextColumn(width="small"),
+            T["col_owner"]: st.column_config.TextColumn(width="small"),
+            T["col_account"]: st.column_config.TextColumn(width="small"),
+            T["col_desc"]: st.column_config.TextColumn(width="medium"),
+            T["col_amount"]: st.column_config.NumberColumn(width="small", format="$%.2f"),
             T["col_cat"]: st.column_config.SelectboxColumn(T["col_cat"], options=all_cats, required=False),
             T["col_recurring"]: st.column_config.CheckboxColumn(T["col_recurring"]),
             T["col_duplicate"]: st.column_config.CheckboxColumn(T["col_duplicate"]),

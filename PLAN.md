@@ -21,30 +21,27 @@
 
 ## Where things stand (updated 2026-07-27)
 
-**Complete:** Phases 1, 2, 2.5, 2.6, 2.6a, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10a, 11, 12, and Phase 6
-except the optional pytest migration.
+**Complete:** Phases 1, 2, 2.5, 2.6, 2.6a, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10 (10a–10i all done — both
+allowlisted accounts confirmed on desktop and mobile, non-allowlisted account correctly refused), 11, 12, and
+Phase 6 except the optional pytest migration.
 **Partial:** Phase 0 (only README screenshots remain — the HTTPS redirect URI item closed 2026-07-26), Phase
-10 (10a–10h done and deployed live on SCC; 10i is confirmed for desktop/one account, still open for the
-second allowlisted account and all of mobile), Phase 8 (8a done; 8b's manual checklist is a pre-merge
-ritual, not code).
-**Not started:** Phase 9. **Deferred by choice:** Phase 7 (ML), Appendix A, 6h (pytest).
+8 (8a done; 8b's manual checklist is a pre-merge ritual, not code).
+**In progress:** Phase 9 (9a–9f implemented on `dev` 2026-07-27, uncommitted; the 9g device-verification
+matrix is outstanding and gates the phase).
+**Deferred by choice:** Phase 7 (ML), Appendix A, 6h (pytest).
 
-> **Both prior gaps resolved.** The `dev → main` merge is done — `dev`'s tip (`9f0b34d`) is confirmed an
-> ancestor of `origin/main` via `git merge-base --is-ancestor`, so every commit through Phase 11 and Phase
-> 2.6a is on `main`. The dashboard is deployed live on Streamlit Community Cloud, and sign-in is confirmed
-> working end-to-end (desktop, `jacosse1@gmail.com`, real data rendering correctly).
+> **All prior gaps resolved.** The `dev → main` merge is done — `origin/main` is now at `7379d4f` ("fix(db):
+> deduplicate transactions + fix ui"), and `origin/dev` is confirmed an ancestor of `origin/main` via `git
+> merge-base --is-ancestor`. Phase 12 (transaction identity rewrite + `reconcile_transactions`) is on `main`,
+> so the GitHub Actions cron now runs the corrected append/reconcile logic — the double-ingestion and
+> duplicate-recreation bug from 2026-07-27 is resolved in production. The dashboard is deployed live on
+> Streamlit Community Cloud, and sign-in is confirmed working end-to-end (desktop, `jacosse1@gmail.com`,
+> real data rendering correctly).
 
-The dashboard is live and reachable and sign-in works, so the publish-critical path is functionally done.
-
-> **New blocker (2026-07-27): the daily cron is NOT healthy.** Phase 12 rewrote transaction identity and
-> duplicate handling, and **none of it is on `main`** — it is uncommitted on `dev`. The GitHub Actions cron
-> runs `main.py` from `main`, which still has the old append-only logic: it double-ingests the co-owned
-> account, has no `reconcile_transactions`, and re-creates duplicates on every run. The production database
-> was repaired by hand (685 → 639 transactions) and the cron is actively re-dirtying it. **Committing and
-> merging Phase 12 to `main` is now the highest-priority item**, ahead of 10i, Phase 9 and ML.
-
-After that merge: finish 10i's verification matrix (second account, mobile), then Phase 9, then ML — polish
-and features, not blockers.
+The dashboard is live and reachable, sign-in works on both desktop and mobile (both allowlisted accounts
+confirmed, non-allowlisted correctly refused), and the daily cron runs the correct dedup logic — the
+publish-critical path, including Phase 10i verification in full, is done. What's left is a mobile *UX*
+polish pass and feature work, not blockers.
 
 ### Recommended order of work
 
@@ -52,15 +49,14 @@ Ranked by what unblocks the most, not by phase number.
 
 | # | Work | Why here | Effort |
 |---|---|---|---|
-| 1 | **Finish Phase 10i verification** — sign in with `lapointe.alexie@gmail.com`, confirm a non-allowlisted account is refused | The one account tested so far proves the mechanism works, but not that the allowlist itself is correctly enforced end-to-end on the live deployment. Quick to close out. | ~10 min |
-| 2 | **Phase 9** — mobile-friendly dashboard | Mobile sign-in is the main reason the public HTTPS URL exists (constraint 22), and it's still entirely unverified — Phase 10i's mobile item is blocked on this. Largest remaining code effort. | Large |
-| 3 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
-| 4 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
+| 1 | **Phase 9 — 9g visual verification** | 9a–9f are implemented on `dev` (2026-07-27); 152 tests and lint pass, and a browser pass confirmed the stylesheet reaches the DOM with all rules valid (it also caught a bug that had been voiding the whole stylesheet — see Phase 9). But **nothing has been looked at on a narrow viewport**: Chrome would not size below ~1660px and the dashboard sits behind sign-in. 2-up KPI wrap, legend placement, table behaviour and FR tab fit are all still unseen. Needs DevTools device emulation + a signed-in session. | ~30 min |
+| 2 | **Phase 7** — ML activation | Deferred by design; the placeholder seam means this changes no orchestration. | Large |
+| 3 | **Appendix A** — interactivity extras | Explicitly non-blocking. | Varies |
 
-**What changed in this ranking:** the prior #1 (merging `dev → main`) is done, and the SCC deploy itself
-(prior #2) is done and confirmed working — both dropped off entirely. What's left of Phase 10 is narrow
-enough (two remaining verification checks) that it's listed directly rather than as its own phase-sized
-item.
+**What changed in this ranking:** Phase 10i is now **fully closed out** — both allowlisted accounts
+confirmed working, a non-allowlisted account confirmed refused, and mobile sign-in confirmed working
+end-to-end (2026-07-27). No verification items or blockers remain anywhere in the plan; everything left is
+UX polish (Phase 9) and deferred feature work (Phase 7, Appendix A).
 
 ---
 
@@ -609,9 +605,9 @@ handling are unaffected; only how the *outbound* link is rendered changes.
 > **Status (2026-07-26): confirmed fixed on the live deployment.** `target="_blank"` shipped
 > (`e664078`/`9f0b34d`, merged to `main`), and sign-in was verified end-to-end on the live SCC URL with
 > `jacosse1@gmail.com` on desktop — a real request to `accounts.google.com` now fires, the new tab
-> completes sign-in, and the dashboard renders with correct transaction data. **Not yet verified:** the
-> second allowlisted account (`lapointe.alexie@gmail.com`) and mobile sign-in — both still open, tracked in
-> Phase 10i.
+> completes sign-in, and the dashboard renders with correct transaction data. **Confirmed 2026-07-27** for
+> the second allowlisted account (`lapointe.alexie@gmail.com`) too. **Not yet verified:** mobile sign-in —
+> still open, tracked in Phase 10i.
 
 **Problem found after deploying to Streamlit Community Cloud (SCC):** the sign-in button, which passed
 every check above, was a completely dead link on the live SCC deployment — clicking it produced no error,
@@ -2360,8 +2356,96 @@ script is the safe equivalent.
 ## Phase 9 — Mobile-friendly dashboard (all fronts)
 
 > **Goal**: the dashboard is genuinely usable on a phone — every tab, chart, table, and filter — not merely
-> reachable from one. Status: **not started**. **Non-blocking** for the `dev → main` publish merge: the app
-> renders on mobile today, it is just cramped and sprawling. Schedule after Phase 3.
+> reachable from one. Status: **code implemented 2026-07-27 on `dev`, device verification outstanding**.
+> **Non-blocking** for the `dev → main` publish merge: the app renders on mobile today, it is just cramped
+> and sprawling. Schedule after Phase 3.
+>
+> **Implementation status (2026-07-27).** 9a–9f are implemented in the working tree on `dev`; 152 tests pass
+> and `ruff check`/`ruff format` are clean.
+>
+> **Browser-verified so far** (local `streamlit run`, Chrome): the stylesheet reaches the DOM and all 7
+> rules in the `max-width: 640px` block parse as valid, `:has()` included; `initial_sidebar_state="collapsed"`
+> works; and the CSS is present **on the sign-in page while unauthenticated** — the concrete proof of
+> amendment 2, since the originally-specified call site could not have styled that screen. This pass is also
+> what uncovered the literal-style-tag bug documented below, which had been silently voiding the entire
+> stylesheet.
+>
+> **Still unverified — the visual half of 9g.** Chrome refused to size its window below ~1660px and the
+> dashboard itself sits behind Google sign-in, so *none* of the following has been seen: KPI rows wrapping
+> 2-up, chart legends below plots, table behaviour, FR tab-bar fit, or the absence of horizontal page
+> scroll. The rules are known to exist and parse; whether they *look right* at 390px is untested. Use
+> DevTools device emulation (not window resizing) plus a real signed-in session. Treat that as the gate
+> before this phase is called done.
+>
+> Git operations are the user's: nothing here is committed, merged, or pushed.
+
+### Decisions locked (2026-07-27 grilling session)
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | Amount-range two-handle slider → **two `number_input`s**, globally | Sliders are imprecise for numeric entry on any device; touch merely exposes it. Applied to desktop too, because decision 2 of the 2026-07-19 set forbids divergent per-viewport widgets. |
+| 2 | `initial_sidebar_state="collapsed"` | Mobile opens to the dashboard, not the filter drawer. Deliberate tradeoff: desktop gains one click. |
+| 3 | Inject CSS in **`main()`**, absorbing the pre-existing inline block-container rule | See amendment 2 — the originally-specified call site would have left the sign-in page unstyled. |
+| 4 | `column_config` on **all 4** tabular widgets | See amendment 4 — there are 4 now, not the 2 originally scoped. |
+| 5 | Ship 2 unit-test classes: stylesheet integrity + `_style_chart` | Layout regressions here are silent (no exception, no warning) — the same failure class as the gotcha above. Follows the Phase 2.6a precedent of testing an attribute that had already caused two bugs. |
+| 6 | **Skip** `.streamlit/config.toml` | It is global with no viewport targeting, so `[theme] baseFontSize` would change desktop equally; `mobile.css`'s `@media` block achieves mobile-only density with zero desktop impact. Kept as a separate future decision. |
+| 7 | Verify on `dev` via DevTools emulation; real-device pass **after** the user merges | SCC tracks `main` and auto-redeploys, so real devices can only be reached post-merge. Acceptable because every rule is additive — rollback is deleting `mobile.css`. |
+
+### Amendments found by verifying this phase against the code (2026-07-27)
+
+The phase text below was written 2026-07-19 and had drifted. Corrections:
+
+1. **Line numbers drifted ~120–160 lines** — `dashboard.py` was 1325 lines before this phase; the text's
+   highest reference was 1158. Structure was intact (metric rows still 3/5/4/6 columns, still exactly 12
+   `plotly_chart` calls), so only the anchors were stale. **Anchor on symbol names, not line numbers.**
+2. **9a's call site was wrong and is superseded by decision 3.** It specified `render_dashboard`. But
+   `main()` returns early when the user is not signed in, so the **sign-in page — the first screen every
+   mobile user sees — would have received no styling at all.** Injecting in `main()` covers sign-in, sidebar
+   and dashboard alike.
+3. **The module-scope gotcha was already fixed.** `st.set_page_config` and an `st.html` CSS block already sat
+   inside `main()`. The gotcha section stays as documentation; its fix had landed 2026-07-26. That inline
+   rule is now absorbed into `mobile.css` so styling has one home.
+4. **9d undercounted the tables: 4, not 2.** Added since the phase was written: a credit-limit editor in
+   `_section_net_worth` and the budget editor. Both are narrow, so both got width hints only.
+5. **9c's uniform `hovermode="x unified"` was wrong for 3 of the 12 figures** — two are `px.pie` (no x-axis)
+   and one is `orientation="h"` (needs `y unified`). `_style_chart` therefore takes a `hovermode` parameter
+   (`None` = leave Plotly's default). The horizontal bar is also the top-categories chart, so it takes both
+   `height=380` and `hovermode="y unified"`.
+
+### Gotcha: a literal style tag inside the CSS file silently voids the ENTIRE stylesheet
+
+> Found 2026-07-27 during browser verification. Read this before editing `app/static/mobile.css`. Like the
+> module-scope gotcha above, the failure mode is **completely silent** — no browser console error, no server
+> log warning, no exception, and `st.html()` reports success.
+
+**Symptom.** `mobile.css` loaded, `_inject_css()` ran, the sign-in page rendered normally — and *not one*
+rule from the file existed in the browser. Verified via `document.styleSheets`: 519 CSS rules present,
+zero of them ours.
+
+**Root cause.** `st.html()` wraps the whole file as `<style>` + file contents + `</style>`. The file's header
+comment happened to contain the literal text `<style>` (it was *documenting* that very wrapping). That stray
+inner tag corrupts the block during sanitisation, and every rule in the file is discarded.
+
+**Isolated by bisection** — three one-rule CSS files through an otherwise identical minimal app:
+
+| Variant | Content | Rule registered? |
+|---|---|---|
+| A | comment containing the literal text `<style>` | **No** |
+| B | ordinary comment | Yes |
+| C | `:has()` selector + `@media` block | Yes (both) |
+
+So the trigger is narrowly the literal tag text — `:has()` and `@media` are fine, which independently
+validates 9b's approach.
+
+**Fix.** Reworded the comment to say "style tags" without angle brackets, and added
+`test_stylesheet_contains_no_literal_style_tag` to `tests/test_dashboard_helpers.py` asserting neither
+`<style` nor `</style` appears anywhere in the file. The stylesheet itself carries a warning comment.
+
+**Diagnostic that worked**, worth reusing: don't trust a screenshot, and don't trust
+`documentElement.innerHTML` either — Streamlit's emotion CSS is inserted via CSSOM (`insertRule`), so those
+rules have empty `textContent` and never appear in `innerHTML`. Enumerate `document.styleSheets` and search
+`cssRules[].cssText` instead. Then bisect against a *minimal* app on a spare port: that is what separated
+"app structure is wrong" from "CSS content is wrong" in two runs, after four probes down the wrong path.
 >
 > Mobile is a primary use case, not an afterthought: Phase 0 requires an HTTPS redirect URI specifically so
 > the two allowlisted users can sign in from their phones, and verification item 15 already exercises that
@@ -2628,9 +2712,12 @@ tall, and every filter change costs open → scroll → change → close.
   that actually get changed — at the top, always visible.
 - Keep `_build_sidebar_filters`'s signature and return shape (`tuple[pd.DataFrame, pd.DataFrame, list[str]]`)
   unchanged so nothing downstream moves.
-- The two-handle `st.sidebar.slider` amount range (`dashboard.py:592`) is the hardest widget to operate by
-  touch. Either replace it with two `st.sidebar.number_input`s or keep it and document the wart — decide at
-  implementation time and record which was chosen.
+- The two-handle `st.sidebar.slider` amount range is the hardest widget to operate by touch. **Chosen
+  (2026-07-27): replaced with two `number_input`s** (min/max), globally rather than per-viewport — see
+  decision 1 above. Inverted input (min > max) is normalised via `min()`/`max()` rather than silently
+  returning zero rows.
+- The duplicates-only toggle (added by Phase 12, after this phase was drafted) is also secondary and went
+  into the same expander.
 - New `_STRINGS` key `filters_more` in **both** `en` and `fr` (Phase 8b i18n-parity rule).
 - `auth.py:179` renders a raw Supabase URL as a sidebar caption — a long unbreakable token in a narrow drawer.
   Add `overflow-wrap: anywhere` for sidebar captions in `mobile.css`.
@@ -2815,7 +2902,7 @@ cron (which only schedules from the default branch) and gives SCC a stable branc
 8. Reboot the app from the SCC menu so it picks up the new secrets.
 9. Tick the Phase 0 HTTPS-redirect-URI checkbox.
 
-### 10i. Verification — partially confirmed (2026-07-26)
+### 10i. Verification — fully confirmed (2026-07-26, updated 2026-07-27), desktop and mobile
 
 1. `streamlit run streamlit_app.py` from the repo root works locally.
 2. Prove the entry-point fix is real and not masked by the editable install: in a scratch venv without
@@ -2825,10 +2912,13 @@ cron (which only schedules from the default branch) and gives SCC a stable branc
 4. **[x] Desktop, `jacosse1@gmail.com`:** the `.streamlit.app` URL renders the sign-in page, "Continue with
    Google" opens a **new tab** (Phase 2.6a — SCC's own hosting iframe blocks same-tab navigation; this
    differs from local behavior described in Phase 2.6), completes sign-in there, and reaches the dashboard.
-   **[ ] Still open:** the same check with `lapointe.alexie@gmail.com`, and confirming a non-allowlisted
-   account is refused.
-5. **[ ] Not yet done.** Mobile: same URL, both allowlisted accounts — this is the case the HTTPS redirect
-   URI exists for, and it re-runs global verification item 15. Blocked on Phase 9 not being started.
+   **[x] Confirmed (2026-07-27) — `lapointe.alexie@gmail.com`:** same flow works end-to-end on the live SCC
+   deployment; the second allowlisted account signs in and reaches the dashboard. **[x] Confirmed
+   (2026-07-27) — non-allowlisted account:** signing in with an email not in `GOOGLE_ALLOWED_EMAILS` was
+   correctly refused on the live deployment — the allowlist fails closed end-to-end, not just locally. This
+   item is now fully closed.
+5. **[x] Confirmed (2026-07-27).** Mobile: same URL, sign-in works on mobile — this is the case the HTTPS
+   redirect URI exists for, and it re-runs global verification item 15.
 6. **[x] Confirmed 2026-07-26** — the dashboard shows the expected transaction data after signing in.
 7. **[x] Done** — `dev` merged to `main` and pushed (`9f0b34d`); confirmed via
    `git merge-base --is-ancestor` that `dev`'s tip is an ancestor of `origin/main`.
@@ -3294,10 +3384,10 @@ together), `DuplicateFlagTests` (flag written; **`upsert` never writes `is_dupli
 
 ### Outstanding
 
-- **This work is uncommitted on `dev`.** The daily GitHub Actions run executes `python main.py` from
-  **`main`**, which still has the old append-only logic — so until this merges, the scheduled run is
-  actively re-introducing the duplicates this phase removed. Merging `dev → main` is the single action that
-  closes this phase out.
+- ~~This work is uncommitted on `dev`.~~ **Resolved 2026-07-27**: `dev → main` merged; `origin/main` is now
+  at `7379d4f` ("fix(db): deduplicate transactions + fix ui") with `dev` confirmed an ancestor via `git
+  merge-base --is-ancestor`. The daily GitHub Actions cron now runs the corrected logic — Phase 12 is fully
+  closed out.
 - Migrations 011 (and, once its work is done, 008) are one-off cleanups that live permanently in the
   `ensure_schema()` loop. Both are idempotent, so this is correct but not free — worth a pass if the
   migration list grows further.
