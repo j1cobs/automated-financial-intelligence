@@ -204,7 +204,13 @@ class AccountsForSourceTests(unittest.TestCase):
             result = DatabaseClient("postgresql://x").accounts_for_source("sample")
         self.assertEqual(
             result,
-            [{"account_key": "sample:Alex Chequing", "account_name": "Alex Chequing", "transaction_count": 10}],
+            [
+                {
+                    "account_key": "sample:Alex Chequing",
+                    "account_name": "Alex Chequing",
+                    "transaction_count": 10,
+                }
+            ],
         )
         sql, params = cursor.execute.call_args[0]
         self.assertIn("WHERE a.source = %s", sql)

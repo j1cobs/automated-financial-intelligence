@@ -202,7 +202,10 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 cur.execute(sql)
                 rows = cur.fetchall()
-        return {source: {"accounts": accounts, "transactions": transactions} for source, accounts, transactions in rows}
+        return {
+            source: {"accounts": accounts, "transactions": transactions}
+            for source, accounts, transactions in rows
+        }
 
     def accounts_for_source(self, source: str) -> list[dict[str, Any]]:
         """Per-account breakdown (account_key, account_name, transaction count) for one source."""
@@ -218,9 +221,7 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 cur.execute(sql, (source,))
                 rows = cur.fetchall()
-        return [
-            {"account_key": r[0], "account_name": r[1], "transaction_count": r[2]} for r in rows
-        ]
+        return [{"account_key": r[0], "account_name": r[1], "transaction_count": r[2]} for r in rows]
 
     def purge_source(self, source: str) -> tuple[int, int]:
         """Delete every transaction belonging to `source`'s accounts, then the accounts

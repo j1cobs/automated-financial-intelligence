@@ -77,7 +77,9 @@ class DuplicateAccountSkipLoggingTests(unittest.TestCase):
 
         with (
             patch.object(ingestor, "_fetch_accounts_raw", side_effect=[[account_a], [account_b]]),
-            patch.object(ingestor, "_request_page", return_value={"transactions": [], "total_transactions": 0}),
+            patch.object(
+                ingestor, "_request_page", return_value={"transactions": [], "total_transactions": 0}
+            ),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
             ingestor.fetch_transactions(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))

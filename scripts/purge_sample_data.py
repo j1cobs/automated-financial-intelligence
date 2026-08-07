@@ -27,9 +27,7 @@ SAMPLE_SOURCE = "sample"
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--apply", action="store_true", help="Perform the deletion (default: dry run)"
-    )
+    parser.add_argument("--apply", action="store_true", help="Perform the deletion (default: dry run)")
     args = parser.parse_args()
 
     settings = load_settings()
@@ -50,8 +48,12 @@ def main() -> int:
     other_transactions = sum(c["transactions"] for s, c in counts.items() if s != SAMPLE_SOURCE)
 
     if not args.apply:
-        LOGGER.info("[dry run] would delete %d transactions, %d accounts", total_transactions, len(sample_accounts))
-        LOGGER.info("Real (non-sample) rows untouched: %d txns / %d accounts", other_transactions, other_accounts)
+        LOGGER.info(
+            "[dry run] would delete %d transactions, %d accounts", total_transactions, len(sample_accounts)
+        )
+        LOGGER.info(
+            "Real (non-sample) rows untouched: %d txns / %d accounts", other_transactions, other_accounts
+        )
         LOGGER.info("Re-run with --apply to delete.")
         return 0
 
