@@ -154,7 +154,7 @@ class LogPipelineRunTests(unittest.TestCase):
     def test_success_row(self) -> None:
         import datetime as dt
 
-        started_at = dt.datetime(2026, 8, 7, 7, 0, 0, tzinfo=dt.timezone.utc)
+        started_at = dt.datetime(2026, 8, 7, 7, 0, 0, tzinfo=dt.UTC)
         connect, cursor = _mock_connect()
         with patch("database.db.psycopg.connect", connect):
             DatabaseClient("postgresql://x").log_pipeline_run(
@@ -172,7 +172,7 @@ class LogPipelineRunTests(unittest.TestCase):
     def test_failure_row_defaults_counts_to_none(self) -> None:
         import datetime as dt
 
-        started_at = dt.datetime(2026, 8, 7, 7, 0, 0, tzinfo=dt.timezone.utc)
+        started_at = dt.datetime(2026, 8, 7, 7, 0, 0, tzinfo=dt.UTC)
         connect, cursor = _mock_connect()
         with patch("database.db.psycopg.connect", connect):
             DatabaseClient("postgresql://x").log_pipeline_run(

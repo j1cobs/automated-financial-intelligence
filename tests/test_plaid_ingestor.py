@@ -4,6 +4,8 @@ import unittest
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from ingestion.plaid_ingestor import PlaidIngestor
 
 
@@ -22,13 +24,13 @@ class PostErrorLoggingTests(unittest.TestCase):
             "error_message": "account_id abc123 for user Alex is invalid",
             "request_id": "req-1",
         }
-        response.raise_for_status.side_effect = Exception("http error")
+        response.raise_for_status.side_effect = requests.HTTPError("http error")
 
         with (
             patch("ingestion.plaid_ingestor.requests.post", return_value=response),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
-            with self.assertRaises(Exception):
+            with self.assertRaises(requests.HTTPError):
                 _ingestor()._post("transactions/get", {})
 
         logger.error.assert_called_once()
@@ -43,13 +45,13 @@ class PostErrorLoggingTests(unittest.TestCase):
         response.ok = False
         response.status_code = 502
         response.json.side_effect = ValueError("not json")
-        response.raise_for_status.side_effect = Exception("http error")
+        response.raise_for_status.side_effect = requests.HTTPError("http error")
 
         with (
             patch("ingestion.plaid_ingestor.requests.post", return_value=response),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
-            with self.assertRaises(Exception):
+            with self.assertRaises(requests.HTTPError):
                 _ingestor()._post("transactions/get", {})
 
         logger.error.assert_called_once()
