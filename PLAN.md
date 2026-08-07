@@ -3397,6 +3397,182 @@ together), `DuplicateFlagTests` (flag written; **`upsert` never writes `is_dupli
 
 ---
 
+## Phase 13 — Purge accidental seed data + seed-script guardrails — code DONE, prod purge PENDING (2026-08-02)
+
+> **Status:** `purge_sample_data.py`, the guardrails, and their tests are implemented and merged on
+> `dev` (165 tests green). **Not yet run against the affected production database** — that is a
+> manual step for the user: `python scripts/purge_sample_data.py` (dry run) then `--apply`. Triggered
+> by `scripts/seed_sample_data.py` having been run once against production by mistake.
+
+### What happened, and why it was recoverable
+
+`scripts/seed_sample_data.py` was run with `DATABASE_URL` pointed at production (real Plaid data)
+instead of a local/disposable database. No real rows were damaged: every write the seed makes is
+namespaced and cannot collide with a real row —
+
+| What | Seed value | Real Plaid value |
+|---|---|---|
+| `accounts.account_key` | `sample:Alex Chequing`, … | Plaid `account_id`-derived |
+| `accounts.source` | `"sample"` — the only writer of that literal in the repo | `"plaid"` |
+| `transactions.external_id` | `SAMPLE-00000`… | Plaid `transaction_id` |
+| `transactions.transaction_hash` | `sha256("plaid_txn\|SAMPLE-000NN")` | hash of the real txn id |
+
+`upsert_plaid_accounts` conflicts on `account_key`, `upsert_transactions` on `transaction_hash` — so
+the damage was purely additive. It was also self-perpetuating: `reconcile_transactions` (Phase 12)
+deliberately skips natural keys Plaid returns zero of, so the daily pipeline would never have
+cleaned these rows up on its own.
+
+### Fix 1 — `scripts/purge_sample_data.py` (new)
+
+Dry-run by default, `--apply` to delete — same convention as `scripts/dedupe_accounts.py`. Backed by
+three new `DatabaseClient` methods in `database/db.py`:
+
+- `count_by_source()` — `{source: {"accounts": n, "transactions": m}}`, used to report the
+  surviving non-sample totals so the operator can eyeball that real history is untouched.
+- `accounts_for_source(source)` — per-account breakdown for the dry-run report.
+- `purge_source(source)` — deletes transactions (via a subquery on `accounts.source`), then
+  accounts, in one connection/commit. Raises `ValueError` on an empty source; hardcoded in the
+  script to `"sample"` — there is no `--source` flag, so this can't become a general delete tool.
+
+Seeded `categories` rows are left alone: all 11 the seed uses are canonical entries already seeded
+by migration 003, so deleting them would break the category picker for real transactions.
+
+### Fix 2 — guardrails on `seed_sample_data.py`
+
+Two independent layers, since either one failing alone should not be enough to repeat this:
+
+1. **`SEED_DATABASE_URL`, not `DATABASE_URL`.** New optional `Settings.seed_database_url` field in
+   `core/config.py`, TLS-enforced like `database_url` when set. The seed script reads only this var;
+   if unset, it logs an explanation and exits 1 *before constructing a `DatabaseClient`* — so a bare
+   `.env` copied from prod (which has `DATABASE_URL` but not `SEED_DATABASE_URL`) fails closed
+   instead of silently seeding prod. This also keeps `ensure_schema()` (which re-runs every
+   migration, including the 011 DELETE) off prod's path by construction.
+2. **Refuse a database that already holds real rows.** Defense in depth for the case where
+   `SEED_DATABASE_URL` is itself misconfigured. After `ensure_schema()`, `count_by_source()` sums
+   every non-`"sample"` source; if non-zero, the script logs the counts and the **target host only**
+   (never the DSN — it has a password) and exits 1. `--force` overrides, explicit and env-var-free.
+
+`.env.example` gained a `SEED_DATABASE_URL` block pointed at the same local docker instance as
+`DATABASE_URL`, with a comment warning not to point it at production.
+
+### Tests
+
+- `tests/test_seed_sample_data.py` — new cases: no `seed_database_url` → exit 1, `DatabaseClient`
+  never constructed; non-sample rows present → exit 1, no writes; same + `--force` → writes proceed;
+  only sample rows present → writes proceed.
+- `tests/test_purge_sample_data.py` (new) — no sample data is a no-op; dry run issues no delete;
+  `--apply` calls `purge_source("sample")`.
+- `tests/test_db_upserts.py` — `count_by_source`, `accounts_for_source`, `purge_source` (delete
+  order: transactions before accounts, per the `account_key` FK; empty-source `ValueError`).
+- `tests/test_config.py` — `SEED_DATABASE_URL` absent → `None`; present → TLS-enforced for remote
+  hosts, untouched for localhost.
+
+Full suite: 165 tests, all green (`python -m unittest discover -s tests -v`).
+
+### Verification performed vs. outstanding
+
+Done:
+- Full test suite green (165 tests) after adding the new coverage listed above.
+- Code review of `purge_source`'s DELETE ordering (transactions before accounts, per the
+  `account_key` FK) and of the guardrail logic in `seed_sample_data.py::main()`.
+
+Outstanding (user to run against the real database):
+1. `python scripts/purge_sample_data.py` (dry run) — confirm the reported sample account keys are
+   exactly the 5 `sample:*` names, and the surviving non-sample totals match expected real history.
+2. `python scripts/purge_sample_data.py --apply`, then re-run the bare command — should report
+   `No sample data found.`
+3. `streamlit run streamlit_app.py` — confirm real accounts/balances unchanged, demo accounts gone.
+4. Confirm `SEED_DATABASE_URL` is set locally (not to prod) before ever running
+   `seed_sample_data.py` again.
+
+---
+
+## Phase 14 — Stop logging financial data to GitHub Actions; log runs to Postgres instead — code DONE, live-run verification PENDING (2026-08-07)
+
+> **Status:** implemented on `dev`, full test suite green (174 tests). Triggered by a request to
+> make sure no transaction-level data can ever reach the GitHub Actions run log, which is visible
+> to anyone with repo read access (public, if the repo is public). **Not yet exercised against a
+> live database or a real `workflow_dispatch` run** — that verification is a manual step, listed
+> below.
+
+### What the audit found
+
+The pipeline code path GitHub Actions actually runs (`main.py` → `pipeline/runner.py::main()`)
+already logged only counts, dates, and hashes — no `description`, `amount`, or `category` value
+was ever logged. Two real leak vectors existed in `ingestion/plaid_ingestor.py`, both reachable
+from the scheduled run:
+
+1. `_post()` logged Plaid's full raw HTTP error response body (`response.text`) unscrubbed on any
+   non-2xx response.
+2. The duplicate-account skip path logged the Plaid account mask (last-4 digits).
+
+### Fix 1 — scrub the two leak vectors in `ingestion/plaid_ingestor.py`
+
+- `_post()` now logs only `status_code`, `error_type`, and `error_code` parsed from Plaid's JSON
+  error body (falling back to a plain status-code message if the body isn't JSON) — never the raw
+  body.
+- The duplicate-account skip log no longer includes the account mask; `account_id` and the token
+  suffix (`token[-6:]`, the pattern already used everywhere else in this file) are enough to debug
+  which account was skipped.
+
+### Fix 2 — `pipeline_runs` table replaces per-run detail in the GH Actions log
+
+New `database/migrations/013_pipeline_runs.sql`: `pipeline_runs(id, started_at, finished_at,
+status, transactions_inserted, transactions_updated, stale_duplicates_removed, error_class,
+error_message)`, no FK (a run row must be insertable even if the run failed before touching
+`accounts`/`transactions`). New `DatabaseClient.log_pipeline_run(...)` in `database/db.py`, same
+connect/commit shape as every other method.
+
+`pipeline/runner.py::main()` now records `started_at`, calls `run_pipeline()` (which returns a new
+`PipelineResult` NamedTuple — `transactions, inserted, updated, removed` — instead of a bare
+DataFrame), and on every exit path — success, `psycopg.OperationalError`, or any other exception —
+writes one row to `pipeline_runs` before returning/raising. `OperationalError` logs `error_class`
+only (no message — connection errors can embed the DSN); any other exception logs `error_class`
+plus `str(error)[:500]`, truncated defensively. `run_pipeline()`'s per-stage `LOGGER.info` calls
+were removed; `main()` now prints a single terminal `Pipeline run: success`/`failed` line, so the
+GitHub Actions log is pass/fail only (plus, on a Plaid API failure, the scrubbed error line from
+Fix 1). A `ConfigError` raised before `DatabaseClient` construction (e.g. missing `DATABASE_URL`)
+has nothing to log into, so it skips `log_pipeline_run` and falls straight through to
+`LOGGER.exception`/re-raise.
+
+### Tests
+
+- `tests/test_pipeline_runner.py` — `RunPipelineTests` updated for the `PipelineResult` return
+  shape; new `MainTests` covering all four `main()` exit paths (success, `OperationalError`, generic
+  exception, `ConfigError` before `DatabaseClient` construction) and asserting exactly what
+  `log_pipeline_run` was/wasn't called with on each.
+- `tests/test_db_upserts.py` — new `LogPipelineRunTests` for the INSERT and bound params, including
+  that omitted optional fields bind as `None`.
+- `tests/test_plaid_ingestor.py` (new file — no prior test coverage existed for this module) —
+  covers the scrubbed `_post()` error log (JSON and non-JSON bodies) and the mask-free
+  duplicate-account skip log.
+
+Full suite: 174 tests, all green (`python -m unittest discover -s tests -v`).
+
+### Docs
+
+`CLAUDE.md` updated: the `ingestion/` bullet notes the scrubbed Plaid error logging standard; the
+`database/` bullet documents `pipeline_runs` (migration count 001–013) as where per-run detail now
+lives instead of the GitHub Actions log.
+
+### Verification performed vs. outstanding
+
+Done:
+- Full test suite green (174 tests) after adding the new coverage listed above.
+- `import pipeline.runner, database.db, ingestion.plaid_ingestor` sanity-checked with no errors.
+
+Outstanding (requires a live database / a real GitHub Actions run):
+1. Run `python main.py` locally against a disposable/local database (not prod — see the
+   `SEED_DATABASE_URL` guardrail rationale in Phase 13 for why) and confirm a `pipeline_runs` row
+   lands with the right counts and `status='success'`.
+2. Force a failure path (bad `DATABASE_URL` for the `OperationalError` branch, or a bad Plaid token
+   for a `requests.RequestException`) and confirm: (a) `pipeline_runs` gets a `status='failed'` row
+   with a non-transaction error message, and (b) stdout shows no response body/mask.
+3. Manually trigger the GitHub Actions workflow (`workflow_dispatch`) once secrets are populated,
+   and read the resulting Actions log end-to-end to confirm it's pass/fail only.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working

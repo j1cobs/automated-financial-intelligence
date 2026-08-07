@@ -39,7 +39,10 @@ When extending, prefer wiring the existing real modules onto the live path over 
 - Mint/repair a Plaid access token: `python scripts/plaid_link.py create --append` (sandbox is headless; production
   opens Plaid Link in your browser) or `python scripts/plaid_link.py repair` (Link update mode for a broken Item —
   e.g. a `NO_ACCOUNTS` error — without rotating the token)
-- Seed demo data (no Plaid credentials needed): `python scripts/seed_sample_data.py`
+- Seed demo data (no Plaid credentials needed): `python scripts/seed_sample_data.py`. Reads
+  `SEED_DATABASE_URL`, never `DATABASE_URL` — see Architecture note below.
+- Remove seeded demo data (e.g. if it was accidentally seeded into a real database):
+  `python scripts/purge_sample_data.py` (dry run; add `--apply` to delete)
 
 Run all commands from the repo root: `database/db.py` globs the migrations via the relative path
 `database/migrations/`, and config loads `.env` / `.streamlit/secrets.toml` relative to the CWD.
@@ -54,14 +57,22 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   `BaseIngestor` remains as the interface seam for future sources. Each real account is ingested once per run:
   `fetch_transactions` claims an account for the first token that reveals it and skips it for later tokens, using the
   same identity tuple `canonicalize_account_keys` matches on. That is what keeps a co-owned account visible through
-  two Plaid Items from delivering every transaction twice.
+  two Plaid Items from delivering every transaction twice. `_post()`'s error logging is deliberately scrubbed: on a
+  non-2xx response it logs only `status_code`/`error_type`/`error_code` parsed from Plaid's JSON body, never the raw
+  `response.text` — the daily pipeline's stdout becomes the GitHub Actions run log, which is visible to anyone with
+  repo read access, so nothing account- or transaction-identifying (e.g. an account mask) belongs in it. Keep new log
+  statements in this file to that same standard.
 - `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
   but the pipeline currently uses `analytics/placeholders.py` (`build_placeholder_models`), which stamps
   `category="uncategorized"`, `outlier_score=0.0`, `is_outlier=False`. The data path is wired end-to-end before ML is
   switched on (Phase 1). When changing "the classifier," check which module `runner.py` actually imports.
 - `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
-  (currently 001–012) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
-  (`DATABASE_URL`). Transaction identity, and the duplicate handling built on it, is the subtlest part of this layer:
+  (currently 001–013) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
+  (`DATABASE_URL`). `pipeline_runs` (migration 013) is where per-run detail lives — `pipeline/runner.py::main()`
+  writes one row per run via `log_pipeline_run()` (counts on success; `error_class`/a truncated `error_message` on
+  failure, never a raw exception that could embed transaction content) — instead of putting that detail in the
+  GitHub Actions log, which is visible to anyone with repo read access. Transaction identity, and the duplicate
+  handling built on it, is the subtlest part of this layer:
   - `build_transaction_hash` hashes Plaid's `transaction_id` when the row has one, and falls back to
     `account_key|date|description|amount` only for rows without one (seed data, future non-Plaid sources). Upserts are
     idempotent via `ON CONFLICT (transaction_hash) DO UPDATE`, and because the hash tracks the `transaction_id`, a
@@ -89,8 +100,13 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   sign-out) and `dashboard.py` (DB reads + Plotly rendering). The transactions table is where the user sets
   `is_duplicate`; a "Possible duplicates only" sidebar filter surfaces the candidates.
 - `scripts/` — `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
-  underlying `PlaidLinkClient`) and `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
-  no ingestion, no credentials).
+  underlying `PlaidLinkClient`), `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
+  no ingestion, no credentials), and `purge_sample_data.py` (deletes it again). Seeding is intentionally
+  `SEED_DATABASE_URL`-only — it never reads `DATABASE_URL` — so an accidental run cannot land demo data in a
+  production database; it also refuses to write into any database already holding non-sample rows unless
+  `--force` is passed. Every row the seed writes is namespaced (`accounts.source = "sample"`, `account_key`
+  prefixed `sample:`, `transactions.external_id` prefixed `SAMPLE-`), which is what makes `purge_sample_data.py`
+  safe to point at a real database: it only ever touches rows under `source = "sample"`.
 
 ## Configuration
 

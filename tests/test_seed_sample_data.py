@@ -79,17 +79,24 @@ class GenerateTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def _settings(self, **overrides) -> MagicMock:
+        defaults = {"seed_database_url": "postgresql://x", "database_url": "postgresql://prod"}
+        defaults.update(overrides)
+        return MagicMock(**defaults)
+
     def test_main_calls_db_in_order(self) -> None:
         db_instance = MagicMock()
         db_instance.upsert_transactions.return_value = (1, 0)
+        db_instance.count_by_source.return_value = {"sample": {"accounts": 0, "transactions": 0}}
         with (
             patch("scripts.seed_sample_data.load_settings") as load_settings,
             patch("scripts.seed_sample_data.DatabaseClient", return_value=db_instance),
             patch("sys.argv", ["seed_sample_data.py"]),
         ):
-            load_settings.return_value = MagicMock(database_url="postgresql://x")
-            main()
+            load_settings.return_value = self._settings()
+            exit_code = main()
 
+        self.assertEqual(exit_code, 0)
         db_instance.ensure_schema.assert_called_once()
         db_instance.upsert_plaid_accounts.assert_called_once()
         db_instance.upsert_categories.assert_called_once()
@@ -105,6 +112,54 @@ class MainTests(unittest.TestCase):
         ]
         filtered = [name for name in call_names if name in expected_order]
         self.assertEqual(filtered, expected_order)
+
+    def test_main_requires_seed_database_url(self) -> None:
+        db_class = MagicMock()
+        with (
+            patch("scripts.seed_sample_data.load_settings") as load_settings,
+            patch("scripts.seed_sample_data.DatabaseClient", db_class),
+            patch("sys.argv", ["seed_sample_data.py"]),
+        ):
+            load_settings.return_value = self._settings(seed_database_url=None)
+            exit_code = main()
+
+        self.assertEqual(exit_code, 1)
+        db_class.assert_not_called()
+
+    def test_main_refuses_when_real_rows_present(self) -> None:
+        db_instance = MagicMock()
+        db_instance.count_by_source.return_value = {
+            "sample": {"accounts": 0, "transactions": 0},
+            "plaid": {"accounts": 2, "transactions": 50},
+        }
+        with (
+            patch("scripts.seed_sample_data.load_settings") as load_settings,
+            patch("scripts.seed_sample_data.DatabaseClient", return_value=db_instance),
+            patch("sys.argv", ["seed_sample_data.py"]),
+        ):
+            load_settings.return_value = self._settings()
+            exit_code = main()
+
+        self.assertEqual(exit_code, 1)
+        db_instance.upsert_plaid_accounts.assert_not_called()
+        db_instance.upsert_transactions.assert_not_called()
+
+    def test_main_force_overrides_refusal(self) -> None:
+        db_instance = MagicMock()
+        db_instance.upsert_transactions.return_value = (1, 0)
+        db_instance.count_by_source.return_value = {
+            "plaid": {"accounts": 2, "transactions": 50},
+        }
+        with (
+            patch("scripts.seed_sample_data.load_settings") as load_settings,
+            patch("scripts.seed_sample_data.DatabaseClient", return_value=db_instance),
+            patch("sys.argv", ["seed_sample_data.py", "--force"]),
+        ):
+            load_settings.return_value = self._settings()
+            exit_code = main()
+
+        self.assertEqual(exit_code, 0)
+        db_instance.upsert_transactions.assert_called_once()
 
 
 if __name__ == "__main__":

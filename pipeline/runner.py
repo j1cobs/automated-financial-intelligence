@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import NamedTuple
 
 import pandas as pd
 import psycopg
@@ -12,6 +13,13 @@ from database.db import DatabaseClient
 from ingestion.plaid_ingestor import PlaidIngestor
 
 LOGGER = logging.getLogger(__name__)
+
+
+class PipelineResult(NamedTuple):
+    transactions: pd.DataFrame
+    inserted: int
+    updated: int
+    removed: int
 
 
 def _build_ingestor(settings):
@@ -33,7 +41,7 @@ def _build_ingestor(settings):
     )
 
 
-def run_pipeline(days_back: int = 90) -> pd.DataFrame:
+def run_pipeline(days_back: int = 90) -> PipelineResult:
     settings = load_settings()
 
     end_date = date.today()
@@ -58,11 +66,9 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
         account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
 
-    LOGGER.info("Fetching transactions from %s to %s (%s days)", start_date, end_date, days_back)
     transactions = ingestor.fetch_transactions(start_date=start_date, end_date=end_date)
     if transactions.empty:
-        LOGGER.info("No transactions fetched. Pipeline complete.")
-        return transactions
+        return PipelineResult(transactions, 0, 0, 0)
     transactions["account_key"] = transactions["account_key"].map(lambda key: key_remap.get(key, key))
 
     models = build_placeholder_models()
@@ -77,13 +83,7 @@ def run_pipeline(days_back: int = 90) -> pd.DataFrame:
     # Plaid just returned trims those stale leftovers. Must run after upsert_transactions, and
     # on the frame whose account_key has already been remapped through key_remap above.
     removed = database.reconcile_transactions(transactions, start_date, end_date)
-    LOGGER.info(
-        "Pipeline completed: %s new transactions, %s already present, %s stale duplicates removed",
-        inserted,
-        updated,
-        removed,
-    )
-    return transactions
+    return PipelineResult(transactions, inserted, updated, removed)
 
 
 def main() -> None:
@@ -92,11 +92,36 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
+    started_at = datetime.now(UTC)
+    database = None
     try:
-        run_pipeline()
-    except psycopg.OperationalError as error:
-        LOGGER.error("Pipeline failed: database connection error (%s)", type(error).__name__)
-        raise SystemExit(1) from None
-    except Exception:
+        settings = load_settings()
+        database = DatabaseClient(settings.database_url)
+    except ConfigError:
         LOGGER.exception("Pipeline failed")
         raise
+
+    try:
+        result = run_pipeline()
+    except psycopg.OperationalError as error:
+        database.log_pipeline_run(started_at, "failed", error_class=type(error).__name__)
+        LOGGER.error("Pipeline run: failed (database connection error)")
+        raise SystemExit(1) from None
+    except Exception as error:
+        database.log_pipeline_run(
+            started_at,
+            "failed",
+            error_class=type(error).__name__,
+            error_message=str(error)[:500],
+        )
+        LOGGER.exception("Pipeline run: failed")
+        raise
+
+    database.log_pipeline_run(
+        started_at,
+        "success",
+        transactions_inserted=result.inserted,
+        transactions_updated=result.updated,
+        stale_duplicates_removed=result.removed,
+    )
+    LOGGER.info("Pipeline run: success")

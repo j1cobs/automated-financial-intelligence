@@ -150,6 +150,95 @@ class UpsertTransactionsFieldTests(unittest.TestCase):
         self.assertEqual(rows[0][2], "unknown:unknown")  # account_key
 
 
+class LogPipelineRunTests(unittest.TestCase):
+    def test_success_row(self) -> None:
+        import datetime as dt
+
+        started_at = dt.datetime(2026, 8, 7, 7, 0, 0, tzinfo=dt.UTC)
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").log_pipeline_run(
+                started_at,
+                "success",
+                transactions_inserted=3,
+                transactions_updated=1,
+                stale_duplicates_removed=2,
+            )
+
+        sql, params = cursor.execute.call_args[0]
+        self.assertIn("INSERT INTO pipeline_runs", sql)
+        self.assertEqual(params, (started_at, "success", 3, 1, 2, None, None))
+
+    def test_failure_row_defaults_counts_to_none(self) -> None:
+        import datetime as dt
+
+        started_at = dt.datetime(2026, 8, 7, 7, 0, 0, tzinfo=dt.UTC)
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").log_pipeline_run(
+                started_at, "failed", error_class="OperationalError"
+            )
+
+        sql, params = cursor.execute.call_args[0]
+        self.assertEqual(params, (started_at, "failed", None, None, None, "OperationalError", None))
+
+
+class CountBySourceTests(unittest.TestCase):
+    def test_returns_mapping(self) -> None:
+        connect, cursor = _mock_connect([("sample", 1, 10), ("plaid", 3, 500)])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").count_by_source()
+        self.assertEqual(
+            result,
+            {
+                "sample": {"accounts": 1, "transactions": 10},
+                "plaid": {"accounts": 3, "transactions": 500},
+            },
+        )
+
+
+class AccountsForSourceTests(unittest.TestCase):
+    def test_returns_list(self) -> None:
+        connect, cursor = _mock_connect([("sample:Alex Chequing", "Alex Chequing", 10)])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").accounts_for_source("sample")
+        self.assertEqual(
+            result,
+            [
+                {
+                    "account_key": "sample:Alex Chequing",
+                    "account_name": "Alex Chequing",
+                    "transaction_count": 10,
+                }
+            ],
+        )
+        sql, params = cursor.execute.call_args[0]
+        self.assertIn("WHERE a.source = %s", sql)
+        self.assertEqual(params, ("sample",))
+
+
+class PurgeSourceTests(unittest.TestCase):
+    def test_deletes_transactions_then_accounts(self) -> None:
+        from unittest.mock import PropertyMock
+
+        connect, cursor = _mock_connect()
+        type(cursor).rowcount = PropertyMock(side_effect=[10, 1])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").purge_source("sample")
+
+        self.assertEqual(result, (10, 1))
+        calls = cursor.execute.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertIn("DELETE FROM transactions", calls[0][0][0])
+        self.assertEqual(calls[0][0][1], ("sample",))
+        self.assertIn("DELETE FROM accounts", calls[1][0][0])
+        self.assertEqual(calls[1][0][1], ("sample",))
+
+    def test_empty_source_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            DatabaseClient("postgresql://x").purge_source("")
+
+
 class UpsertCategoriesTests(unittest.TestCase):
     def test_dedup_and_sort(self) -> None:
         connect, cursor = _mock_connect()

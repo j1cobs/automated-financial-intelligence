@@ -68,6 +68,7 @@ class Settings:
     plaid_access_token_owners: list[str]
     plaid_base_url: str
     database_url: str
+    seed_database_url: str | None
     model_path: str
     labeled_dataset_path: str
 
@@ -92,6 +93,8 @@ def load_settings() -> Settings:
         )
     ]
 
+    seed_database_url = _read_value("SEED_DATABASE_URL", secrets)
+
     return Settings(
         supabase_url=_read_value("SUPABASE_URL", secrets),
         google_oauth_client_id=google_oauth_client_id,
@@ -105,6 +108,7 @@ def load_settings() -> Settings:
         plaid_base_url=_read_value("PLAID_BASE_URL", secrets, "https://sandbox.plaid.com")
         or "https://sandbox.plaid.com",
         database_url=enforce_tls(database_url),
+        seed_database_url=enforce_tls(seed_database_url) if seed_database_url else None,
         model_path=_read_value("MODEL_PATH", secrets, "artifacts/classifier.joblib")
         or "artifacts/classifier.joblib",
         labeled_dataset_path=_read_value("LABELED_DATASET_PATH", secrets, "labeled_transactions.csv")

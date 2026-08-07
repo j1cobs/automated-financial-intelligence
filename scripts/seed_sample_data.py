@@ -15,20 +15,30 @@ rows). Re-running on a later day shifts the window and inserts the newly covered
 Usage:
     python scripts/seed_sample_data.py [--days 120]
 
-Requires only DATABASE_URL (via load_settings()) — no Plaid credentials needed.
+Reads SEED_DATABASE_URL (not DATABASE_URL) via load_settings() — a dedicated variable so
+this script cannot accidentally seed a production database just because DATABASE_URL
+happens to point at one. As a second line of defense, it also refuses to write into any
+database that already holds non-sample (real) rows unless --force is passed. To undo an
+accidental seed, see scripts/purge_sample_data.py.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import random
 from datetime import date, timedelta
+from urllib.parse import urlsplit
 
 import pandas as pd
 
 from core.config import load_settings
 from database.db import DatabaseClient
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+LOGGER = logging.getLogger(__name__)
+
+SAMPLE_SOURCE = "sample"
 SEED = 42
 
 ACCOUNTS = [
@@ -245,25 +255,57 @@ def generate(days: int = 120) -> tuple[list[dict], pd.DataFrame]:
     return accounts, frame
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=120)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Seed even if the target database already holds non-sample (real) rows.",
+    )
     args = parser.parse_args()
 
     settings = load_settings()
-    db = DatabaseClient(settings.database_url)
+    if not settings.seed_database_url:
+        LOGGER.error(
+            "SEED_DATABASE_URL is not set. This script deliberately does not fall back to "
+            "DATABASE_URL, so an accidental seed can never land in a production database. "
+            "Set SEED_DATABASE_URL to a disposable/local database and re-run."
+        )
+        return 1
+
+    db = DatabaseClient(settings.seed_database_url)
     db.ensure_schema()
+
+    counts = db.count_by_source()
+    real_accounts = sum(c["accounts"] for s, c in counts.items() if s != SAMPLE_SOURCE)
+    real_transactions = sum(c["transactions"] for s, c in counts.items() if s != SAMPLE_SOURCE)
+    host = urlsplit(settings.seed_database_url).hostname
+    if (real_accounts or real_transactions) and not args.force:
+        LOGGER.error(
+            "Refusing to seed %s: it already holds %d transactions across %d non-sample "
+            "accounts. This looks like a live database. Pass --force only if you are certain.",
+            host,
+            real_transactions,
+            real_accounts,
+        )
+        return 1
 
     accounts, frame = generate(days=args.days)
     db.upsert_plaid_accounts(accounts)
     db.upsert_categories(frame["category"].dropna().unique().tolist())
     inserted, updated = db.upsert_transactions(frame)
 
-    print(
-        f"Seeded {len(accounts)} accounts and {len(frame)} transactions "
-        f"({inserted} new, {updated} already present)."
+    LOGGER.info(
+        "Seeded %s: %d accounts and %d transactions (%d new, %d already present).",
+        host,
+        len(accounts),
+        len(frame),
+        inserted,
+        updated,
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

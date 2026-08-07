@@ -110,6 +110,42 @@ class DatabaseClient:
                     cursor.execute(sql_file.read_text(encoding="utf-8"))
             connection.commit()
 
+    def log_pipeline_run(
+        self,
+        started_at: dt.datetime,
+        status: str,
+        *,
+        transactions_inserted: int | None = None,
+        transactions_updated: int | None = None,
+        stale_duplicates_removed: int | None = None,
+        error_class: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Record one pipeline run for private, queryable history — this is where per-run detail
+        (counts, errors) lives instead of the GitHub Actions log, which is visible to anyone with
+        repo read access."""
+        sql = """
+        INSERT INTO pipeline_runs (
+            started_at, status, transactions_inserted, transactions_updated,
+            stale_duplicates_removed, error_class, error_message
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        with psycopg.connect(self.database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    sql,
+                    (
+                        started_at,
+                        status,
+                        transactions_inserted,
+                        transactions_updated,
+                        stale_duplicates_removed,
+                        error_class,
+                        error_message,
+                    ),
+                )
+            connection.commit()
+
     def upsert_plaid_accounts(self, accounts: list[dict[str, Any]]) -> None:
         sql = """
         INSERT INTO accounts (
@@ -153,6 +189,59 @@ class DatabaseClient:
         ]
         if rows:
             self._execute_many(sql, rows)
+
+    def count_by_source(self) -> dict[str, dict[str, int]]:
+        """{source: {"accounts": n, "transactions": m}} for every source present in `accounts`."""
+        sql = """
+        SELECT a.source, COUNT(DISTINCT a.account_key), COUNT(t.id)
+        FROM accounts a
+        LEFT JOIN transactions t ON t.account_key = a.account_key
+        GROUP BY a.source
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {
+            source: {"accounts": accounts, "transactions": transactions}
+            for source, accounts, transactions in rows
+        }
+
+    def accounts_for_source(self, source: str) -> list[dict[str, Any]]:
+        """Per-account breakdown (account_key, account_name, transaction count) for one source."""
+        sql = """
+        SELECT a.account_key, a.account_name, COUNT(t.id) AS transaction_count
+        FROM accounts a
+        LEFT JOIN transactions t ON t.account_key = a.account_key
+        WHERE a.source = %s
+        GROUP BY a.account_key, a.account_name
+        ORDER BY a.account_key
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (source,))
+                rows = cur.fetchall()
+        return [{"account_key": r[0], "account_name": r[1], "transaction_count": r[2]} for r in rows]
+
+    def purge_source(self, source: str) -> tuple[int, int]:
+        """Delete every transaction belonging to `source`'s accounts, then the accounts
+        themselves. Returns (transactions_deleted, accounts_deleted)."""
+        if not source:
+            raise ValueError("source must be a non-empty string")
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM transactions
+                    WHERE account_key IN (SELECT account_key FROM accounts WHERE source = %s)
+                    """,
+                    (source,),
+                )
+                transactions_deleted = cur.rowcount
+                cur.execute("DELETE FROM accounts WHERE source = %s", (source,))
+                accounts_deleted = cur.rowcount
+            conn.commit()
+        return transactions_deleted, accounts_deleted
 
     def canonicalize_account_keys(self, accounts: list[dict[str, Any]]) -> dict[str, str]:
         """Map each incoming account's raw account_key to an existing account_key already

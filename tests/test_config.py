@@ -86,6 +86,28 @@ class LoadSettingsTests(unittest.TestCase):
         settings = self._load({"DATABASE_URL": "postgresql://u:p@db.example.com/x"})
         self.assertIn("sslmode=require", settings.database_url)
 
+    def test_seed_database_url_absent_by_default(self) -> None:
+        settings = self._load({"DATABASE_URL": "postgresql://localhost/db"})
+        self.assertIsNone(settings.seed_database_url)
+
+    def test_seed_database_url_read_and_tls_enforced(self) -> None:
+        settings = self._load(
+            {
+                "DATABASE_URL": "postgresql://localhost/db",
+                "SEED_DATABASE_URL": "postgresql://u:p@seed.example.com/x",
+            }
+        )
+        self.assertIn("sslmode=require", settings.seed_database_url)
+
+    def test_seed_database_url_localhost_no_tls(self) -> None:
+        settings = self._load(
+            {
+                "DATABASE_URL": "postgresql://localhost/db",
+                "SEED_DATABASE_URL": "postgresql://u:p@127.0.0.1:5433/finance",
+            }
+        )
+        self.assertEqual(settings.seed_database_url, "postgresql://u:p@127.0.0.1:5433/finance")
+
 
 class EnforceTlsTests(unittest.TestCase):
     def test_appends_sslmode_for_remote_host(self) -> None:
