@@ -5,9 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import psycopg
 
 from core.config import ConfigError
-from pipeline.runner import _build_ingestor, run_pipeline
+from pipeline.runner import _build_ingestor, main, run_pipeline
 
 
 def _settings(**overrides) -> SimpleNamespace:
@@ -97,10 +98,12 @@ class RunPipelineTests(unittest.TestCase):
 
         database.upsert_categories.assert_called_once()
         database.upsert_transactions.assert_called_once()
-        self.assertIn("category", result.columns)
-        self.assertIn("is_outlier", result.columns)
-        self.assertTrue(all(isinstance(value, str) for value in result["category"]))
-        self.assertTrue(all(isinstance(value, (bool,)) for value in result["is_outlier"]))
+        self.assertIn("category", result.transactions.columns)
+        self.assertIn("is_outlier", result.transactions.columns)
+        self.assertTrue(all(isinstance(value, str) for value in result.transactions["category"]))
+        self.assertTrue(all(isinstance(value, (bool,)) for value in result.transactions["is_outlier"]))
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.updated, 0)
 
     def test_empty_frame(self) -> None:
         settings = _settings()
@@ -131,7 +134,10 @@ class RunPipelineTests(unittest.TestCase):
 
         database.upsert_categories.assert_not_called()
         database.upsert_transactions.assert_not_called()
-        self.assertTrue(result.empty)
+        self.assertTrue(result.transactions.empty)
+        self.assertEqual(result.inserted, 0)
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(result.removed, 0)
 
     def test_calls_upsert_plaid_accounts(self) -> None:
         settings = _settings()
@@ -157,6 +163,79 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor.fetch_accounts.assert_called_once_with(owner_by_token)
         database.upsert_plaid_accounts.assert_called_once_with(accounts)
+
+
+class MainTests(unittest.TestCase):
+    def test_success_logs_run_with_counts(self) -> None:
+        settings = _settings()
+        database = MagicMock()
+        result = SimpleNamespace(transactions=pd.DataFrame(), inserted=3, updated=1, removed=2)
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.run_pipeline", return_value=result),
+        ):
+            main()
+
+        database.log_pipeline_run.assert_called_once()
+        _, kwargs = database.log_pipeline_run.call_args
+        self.assertEqual(kwargs["transactions_inserted"], 3)
+        self.assertEqual(kwargs["transactions_updated"], 1)
+        self.assertEqual(kwargs["stale_duplicates_removed"], 2)
+        args = database.log_pipeline_run.call_args[0]
+        self.assertEqual(args[1], "success")
+
+    def test_operational_error_logs_failure_without_message(self) -> None:
+        settings = _settings()
+        database = MagicMock()
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch(
+                "pipeline.runner.run_pipeline",
+                side_effect=psycopg.OperationalError("connection refused"),
+            ),
+        ):
+            with self.assertRaises(SystemExit):
+                main()
+
+        database.log_pipeline_run.assert_called_once()
+        args, kwargs = database.log_pipeline_run.call_args
+        self.assertEqual(args[1], "failed")
+        self.assertEqual(kwargs["error_class"], "OperationalError")
+        self.assertNotIn("error_message", kwargs)
+
+    def test_generic_exception_logs_failure_with_message(self) -> None:
+        settings = _settings()
+        database = MagicMock()
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.run_pipeline", side_effect=RuntimeError("boom")),
+        ):
+            with self.assertRaises(RuntimeError):
+                main()
+
+        database.log_pipeline_run.assert_called_once()
+        args, kwargs = database.log_pipeline_run.call_args
+        self.assertEqual(args[1], "failed")
+        self.assertEqual(kwargs["error_class"], "RuntimeError")
+        self.assertEqual(kwargs["error_message"], "boom")
+
+    def test_config_error_before_database_construction_skips_logging(self) -> None:
+        database_class = MagicMock()
+
+        with (
+            patch("pipeline.runner.load_settings", side_effect=ConfigError("DATABASE_URL is required")),
+            patch("pipeline.runner.DatabaseClient", database_class),
+        ):
+            with self.assertRaises(ConfigError):
+                main()
+
+        database_class.assert_not_called()
 
 
 if __name__ == "__main__":
