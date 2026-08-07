@@ -34,7 +34,16 @@ class PlaidIngestor(BaseIngestor):
             timeout=self.timeout_seconds,
         )
         if not response.ok:
-            LOGGER.error("Plaid error response: %s", response.text)
+            try:
+                body = response.json()
+                LOGGER.error(
+                    "Plaid error response: status=%s error_type=%s error_code=%s",
+                    response.status_code,
+                    body.get("error_type"),
+                    body.get("error_code"),
+                )
+            except ValueError:
+                LOGGER.error("Plaid error response: status=%s (non-JSON body)", response.status_code)
         response.raise_for_status()
         return response.json()
 
@@ -162,9 +171,8 @@ class PlaidIngestor(BaseIngestor):
                 elif claimed_by != account_id:
                     skipped_account_ids.add(account_id)
                     LOGGER.info(
-                        "Skipping duplicate Plaid account mask=%s (account_id=%s) for token "
+                        "Skipping duplicate Plaid account (account_id=%s) for token "
                         "suffix=%s; already ingested via account_id=%s from an earlier token",
-                        account.get("mask"),
                         account_id,
                         access_token[-6:],
                         claimed_by,
