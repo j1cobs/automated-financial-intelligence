@@ -57,6 +57,8 @@ streamlit run streamlit_app.py
 
 That gives you 5 sample accounts and ~140 generated transactions across a trailing 120-day window, complete with categories and three planted anomalies — enough to exercise every tab. The seed writes straight to the database, so no Plaid account is involved.
 
+The seed script reads `SEED_DATABASE_URL`, not `DATABASE_URL` — a separate variable so a stray run can never write demo data into a real database. `.env.example` points it at the same local docker instance as `DATABASE_URL` by default. It also refuses to seed any database that already holds non-sample rows (pass `--force` to override). To undo an accidental seed into a real database, run `python scripts/purge_sample_data.py` (dry run by default; add `--apply` to delete).
+
 Requires Python 3.12+ and Docker. Every command runs from the repo root (config and migration paths are relative). Plaid credentials are only needed to pull real transactions with `python main.py` — see [docs/setup-plaid.md](docs/setup-plaid.md).
 
 Signing in still needs Google OAuth credentials in `.env` (`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8501/`, and your own address in `GOOGLE_ALLOWED_EMAILS`); the dashboard is gated behind it.
@@ -76,6 +78,7 @@ All configuration is read by `core/config.py::load_settings()`, in this order: e
 | Variable                     | Required                     | Default                       | Notes                                                                                   |
 | ---------------------------- | ---------------------------- | ----------------------------- | --------------------------------------------------------------------------------------- |
 | `DATABASE_URL`               | Yes                          | none                          | The only variable `load_settings()` enforces. TLS is auto-appended for non-local hosts. |
+| `SEED_DATABASE_URL`          | For `seed_sample_data.py`    | none                          | Seed script writes here only, never to `DATABASE_URL`. TLS auto-appended for non-local hosts. |
 | `GOOGLE_OAUTH_CLIENT_ID`     | For the dashboard            | none                          | See [docs/setup-google-oauth.md](docs/setup-google-oauth.md)                            |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | For the dashboard            | none                          |                                                                                         |
 | `GOOGLE_OAUTH_REDIRECT_URI`  | For the dashboard            | none                          | Must exactly match the URI registered in the Google console                             |
