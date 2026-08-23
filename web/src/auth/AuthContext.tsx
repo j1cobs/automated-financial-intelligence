@@ -48,11 +48,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     return onUnauthorized(() => {
       setCsrfToken(null);
-      // `resetQueries` (not `setQueryData(undefined)`, which is a no-op —
-      // an `undefined` update is ignored by TanStack Query) both purges the
-      // cached user, so `isAuthenticated` doesn't keep stale data around,
-      // and refetches the active query in one step.
-      queryClient.resetQueries({ queryKey: AUTH_ME_QUERY_KEY });
+      // Only act when we currently hold a session. If /auth/me *itself* just 401'd there is
+      // nothing to invalidate — its own error state already routes the app to the sign-in
+      // page — and resetting here would refetch it, 401 again, fire this listener again, and
+      // loop forever, pinning `isFetching` true so App never leaves <LoadingScreen />.
+      // `resetQueries` (not `setQueryData(undefined)`, which is a no-op — an `undefined`
+      // update is ignored by TanStack Query) both purges the cached user and refetches in one
+      // step; the purge is what makes the follow-up 401 find no data and stop the cycle.
+      if (queryClient.getQueryData(AUTH_ME_QUERY_KEY) !== undefined) {
+        queryClient.resetQueries({ queryKey: AUTH_ME_QUERY_KEY });
+      }
     });
   }, [queryClient]);
 
@@ -64,11 +69,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [query.data, query.isError]);
 
-  // `isPending` covers the initial "no data, no error yet" state; `isFetching`
-  // stays true across every cold-start retry attempt. Together they cover
-  // "still trying" and go false only once the query settles (success, or a
-  // 401 that's exhausted its retries — see `shouldRetry` in queryClient.ts).
-  const isLoading = query.isPending || query.isFetching;
+  // v5's `isLoading` is `isPending && isFetching` — true for the genuine first load *and*
+  // every cold-start retry (no data yet, request in flight), false once the query settles
+  // (success, or a 401 that won't be retried — see `shouldRetry` in queryClient.ts).
+  // Deliberately NOT `isPending || isFetching`: that form also goes true for *background*
+  // refetches after data exists, which would flip the whole signed-in dashboard back to
+  // <LoadingScreen /> on every revalidation.
+  const isLoading = query.isLoading;
 
   const value: AuthContextValue = {
     user: query.data ? { email: query.data.email, name: query.data.name, picture: query.data.picture } : null,
