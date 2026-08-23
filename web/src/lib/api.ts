@@ -1,15 +1,23 @@
 /**
  * Typed fetch wrapper for every call into the FastAPI backend. Used inside
  * every TanStack Query `queryFn`/`mutationFn` — never call `fetch` directly
- * elsewhere, so the cross-origin cookie/CSRF handling stays in one place.
+ * elsewhere, so the cookie/CSRF handling stays in one place.
  *
- * - `credentials: 'include'` on every request: the API's session cookie is
- *   cross-origin by design (web and api are hosted on different platform
- *   subdomains), so without this the cookie is neither sent nor stored.
+ * - Requests go to the relative `/api` prefix, never an absolute cross-origin
+ *   URL. In production, `web/vercel.json` rewrites `/api/*` to the Render API
+ *   server-to-server; in dev, `web/vite.config.ts`'s `server.proxy` does the
+ *   same against localhost. Either way the *browser* only ever talks to one
+ *   origin (Vercel's, or Vite's own dev server), so the session cookie the
+ *   API sets is first-party, not third-party — this is what fixes iOS
+ *   Safari's ITP blocking the cookie and looping the sign-in flow.
+ * - `credentials: 'include'` is kept even though the request is same-origin:
+ *   harmless there, and still required for the pre-proxy direct-Render calls
+ *   used in local `curl`/manual testing.
  * - `X-CSRF-Token` header attached on every non-GET request, sourced from
  *   `authStore` (populated from the `csrf_token` field of the most recent
  *   `GET /auth/me` response). The API rejects writes without a matching
- *   token (double-submit CSRF check, see api/deps.py::require_csrf).
+ *   token (double-submit CSRF check, see api/deps.py::require_csrf) — kept
+ *   as defense-in-depth even though the cookie is now first-party.
  * - A 401 response throws `UnauthorizedError` AND fires the `authStore`
  *   unauthorized-listener callback, so `AuthProvider` can react globally
  *   (any 401 after a prior successful sign-in means "session expired").
@@ -17,7 +25,7 @@
 
 import { getCsrfToken, notifyUnauthorized } from './authStore';
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+const API_URL = '/api';
 
 export class UnauthorizedError extends Error {
   constructor() {
@@ -41,9 +49,9 @@ export interface ApiRequestOptions extends Omit<RequestInit, 'body'> {
 }
 
 /**
- * Fetch a path relative to `VITE_API_URL`. Pass a JSON-serializable value as
- * `body`; it's serialized and given a `Content-Type: application/json`
- * header automatically. GET requests should omit `body`.
+ * Fetch a path relative to the `/api` proxy prefix. Pass a JSON-serializable
+ * value as `body`; it's serialized and given a `Content-Type:
+ * application/json` header automatically. GET requests should omit `body`.
  */
 export async function apiFetch<T = unknown>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const { body, headers, method, ...rest } = options;

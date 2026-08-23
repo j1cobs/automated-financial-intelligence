@@ -1,9 +1,12 @@
 import { API_URL } from '../lib/api';
 
 /**
- * A real cross-origin navigation, not a fetch — the browser needs to follow
- * Google's OAuth redirect chain and land back on the API's callback, which
- * then redirects to this app with the session cookie already set.
+ * A real navigation, not a fetch — the browser needs to follow Google's
+ * OAuth redirect chain and land back on the API's callback, which then
+ * redirects to this app with the session cookie already set. The `/api`
+ * prefix is same-origin (proxied to the API — see `lib/api.ts`'s top
+ * comment), which is what makes the resulting cookie first-party and
+ * avoids iOS Safari's ITP blocking it.
  */
 const GOOGLE_START_URL = `${API_URL}/auth/google/start`;
 
