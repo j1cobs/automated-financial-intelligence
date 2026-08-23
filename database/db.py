@@ -153,6 +153,59 @@ class DatabaseClient:
                 )
             connection.commit()
 
+    def store_pending_oauth_state(self, state: str, code_verifier: str) -> None:
+        """Persist a PKCE pending state for the API's OAuth flow (replaces the in-process
+        dict `app/auth.py` uses, which does not survive multiple workers/restarts).
+
+        Mirrors `app/auth.py::_prune_pending_sessions`: prunes rows older than
+        `_PENDING_TTL_SECONDS` (600s) and, if the table would still hold `_PENDING_MAX_ENTRIES`
+        (32) or more rows after the insert, deletes the oldest down to that cap. Pruning runs
+        in the same call/transaction as the insert, same as the dict version pruning on every
+        `start_google_sign_in`.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM oauth_pending_state WHERE created_at < NOW() - INTERVAL '600 seconds'"
+                )
+                cur.execute(
+                    "INSERT INTO oauth_pending_state (state, code_verifier) VALUES (%s, %s) "
+                    "ON CONFLICT (state) DO UPDATE SET code_verifier = EXCLUDED.code_verifier, "
+                    "created_at = NOW()",
+                    (state, code_verifier),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM oauth_pending_state
+                    WHERE state IN (
+                        SELECT state FROM oauth_pending_state
+                        ORDER BY created_at ASC
+                        OFFSET 32
+                    )
+                    """
+                )
+            conn.commit()
+
+    def pop_pending_oauth_state(self, state: str) -> str | None:
+        """One-time-use lookup of a PKCE pending state: returns the stored `code_verifier`
+        for `state` and deletes it, or None if the state is unknown or expired (older than
+        `_PENDING_TTL_SECONDS` = 600s) — checked here too, since a stale row might not yet
+        have been pruned by `store_pending_oauth_state`. Mirrors the dict's `.pop()` semantics
+        in `app/auth.py::consume_google_callback`.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM oauth_pending_state WHERE state = %s "
+                    "AND created_at >= NOW() - INTERVAL '600 seconds' "
+                    "RETURNING code_verifier",
+                    (state,),
+                )
+                row = cur.fetchone()
+                cur.execute("DELETE FROM oauth_pending_state WHERE state = %s", (state,))
+            conn.commit()
+        return row[0] if row else None
+
     def upsert_plaid_accounts(self, accounts: list[dict[str, Any]]) -> None:
         sql = """
         INSERT INTO accounts (

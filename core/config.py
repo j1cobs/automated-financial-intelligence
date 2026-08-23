@@ -72,6 +72,8 @@ class Settings:
     github_event_name: str | None
     model_path: str
     labeled_dataset_path: str
+    jwt_secret: str | None
+    frontend_origin: str | None
 
 
 def load_settings() -> Settings:
@@ -115,4 +117,6 @@ def load_settings() -> Settings:
         or "artifacts/classifier.joblib",
         labeled_dataset_path=_read_value("LABELED_DATASET_PATH", secrets, "labeled_transactions.csv")
         or "labeled_transactions.csv",
+        jwt_secret=_read_value("JWT_SECRET", secrets),
+        frontend_origin=_read_value("FRONTEND_ORIGIN", secrets),
     )
