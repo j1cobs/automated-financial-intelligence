@@ -19,11 +19,13 @@
 
 ---
 
-## Where things stand (updated 2026-07-27)
+## Where things stand (updated 2026-08-22)
 
 **Complete:** Phases 1, 2, 2.5, 2.6, 2.6a, 2.7, 2.8, 3 (3a–3s, all), 4, 5, 8a, 10 (10a–10i all done — both
-allowlisted accounts confirmed on desktop and mobile, non-allowlisted account correctly refused), 11, 12, and
-Phase 6 except the optional pytest migration.
+allowlisted accounts confirmed on desktop and mobile, non-allowlisted account correctly refused), 11, 12, 13
+(production purge confirmed run — demo/sample accounts are gone from the live database), 14 (code committed
+as `d9e1a9f` and live-run verified 2026-08-22 — no leaked data, correct `pipeline_runs` row), and Phase 6
+except the optional pytest migration.
 **Partial:** Phase 0 (only README screenshots remain — the HTTPS redirect URI item closed 2026-07-26), Phase
 8 (8a done; 8b's manual checklist is a pre-merge ritual, not code).
 **In progress:** Phase 9 (9a–9f implemented on `dev` 2026-07-27, uncommitted; the 9g device-verification
@@ -55,8 +57,10 @@ Ranked by what unblocks the most, not by phase number.
 
 **What changed in this ranking:** Phase 10i is now **fully closed out** — both allowlisted accounts
 confirmed working, a non-allowlisted account confirmed refused, and mobile sign-in confirmed working
-end-to-end (2026-07-27). No verification items or blockers remain anywhere in the plan; everything left is
-UX polish (Phase 9) and deferred feature work (Phase 7, Appendix A).
+end-to-end (2026-07-27). Phase 13's production purge is confirmed done (2026-08-22) — the accidental sample
+data is gone from the live database. Phase 14 is now **fully closed** (2026-08-22) — code committed and its
+live-run verification confirmed working. No blockers remain anywhere in the plan; the only thing left before
+everything else is deferred feature work is **Phase 9g** (mobile visual verification).
 
 ---
 
@@ -3397,12 +3401,12 @@ together), `DuplicateFlagTests` (flag written; **`upsert` never writes `is_dupli
 
 ---
 
-## Phase 13 — Purge accidental seed data + seed-script guardrails — code DONE, prod purge PENDING (2026-08-02)
+## Phase 13 — Purge accidental seed data + seed-script guardrails — DONE (2026-08-22)
 
 > **Status:** `purge_sample_data.py`, the guardrails, and their tests are implemented and merged on
-> `dev` (165 tests green). **Not yet run against the affected production database** — that is a
-> manual step for the user: `python scripts/purge_sample_data.py` (dry run) then `--apply`. Triggered
-> by `scripts/seed_sample_data.py` having been run once against production by mistake.
+> `dev` (165 tests green). **Run against the affected production database on 2026-08-22** — user
+> confirmed the sample/demo accounts are gone from the live database. Triggered by
+> `scripts/seed_sample_data.py` having been run once against production by mistake.
 
 ### What happened, and why it was recoverable
 
@@ -3475,25 +3479,23 @@ Done:
 - Full test suite green (165 tests) after adding the new coverage listed above.
 - Code review of `purge_source`'s DELETE ordering (transactions before accounts, per the
   `account_key` FK) and of the guardrail logic in `seed_sample_data.py::main()`.
+- **2026-08-22:** `python scripts/purge_sample_data.py --apply` run against production — user
+  confirmed the demo/sample accounts are gone and real accounts/balances are unaffected. Phase 13 is
+  fully closed.
 
-Outstanding (user to run against the real database):
-1. `python scripts/purge_sample_data.py` (dry run) — confirm the reported sample account keys are
-   exactly the 5 `sample:*` names, and the surviving non-sample totals match expected real history.
-2. `python scripts/purge_sample_data.py --apply`, then re-run the bare command — should report
-   `No sample data found.`
-3. `streamlit run streamlit_app.py` — confirm real accounts/balances unchanged, demo accounts gone.
-4. Confirm `SEED_DATABASE_URL` is set locally (not to prod) before ever running
-   `seed_sample_data.py` again.
+Remaining discipline (not a task, an ongoing rule): confirm `SEED_DATABASE_URL` is set locally (not
+to prod) before ever running `seed_sample_data.py` again.
 
 ---
 
-## Phase 14 — Stop logging financial data to GitHub Actions; log runs to Postgres instead — code DONE, live-run verification PENDING (2026-08-07)
+## Phase 14 — Stop logging financial data to GitHub Actions; log runs to Postgres instead — DONE (2026-08-22)
 
-> **Status:** implemented on `dev`, full test suite green (174 tests). Triggered by a request to
-> make sure no transaction-level data can ever reach the GitHub Actions run log, which is visible
-> to anyone with repo read access (public, if the repo is public). **Not yet exercised against a
-> live database or a real `workflow_dispatch` run** — that verification is a manual step, listed
-> below.
+> **Status:** implemented on `dev` through Follow-ups 1–3, full test suite green (179 tests as of the
+> last recorded run), and committed as `d9e1a9f` ("fix(pipeline): replace duplicate-account-skip log
+> with a count, scrub tracebacks, add trigger_type"). Triggered by a request to make sure no
+> transaction-level data can ever reach the GitHub Actions run log, which is visible to anyone with
+> repo read access (public, if the repo is public). **Live-run verification confirmed 2026-08-22** —
+> a real run showed the expected `pipeline_runs` row with no leaked data. Phase 14 is fully closed.
 
 ### What the audit found
 
