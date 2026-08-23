@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 import requests
 
-from ingestion.base import BaseIngestor
+from ingestion.base import BaseIngestor, IngestResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,8 +88,12 @@ class PlaidIngestor(BaseIngestor):
             try:
                 accounts = self._fetch_accounts_raw(token, owner_by_token.get(token, ""))
                 all_accounts.extend(accounts)
-            except requests.RequestException:
-                LOGGER.exception("Failed to fetch accounts for token suffix=%s", token[-6:])
+            except requests.RequestException as error:
+                LOGGER.error(
+                    "Failed to fetch accounts for token suffix=%s (%s)",
+                    token[-6:],
+                    type(error).__name__,
+                )
                 raise
         return all_accounts
 
@@ -132,11 +136,12 @@ class PlaidIngestor(BaseIngestor):
             return None
         return (str(fields[0]), str(fields[1]), str(fields[2]), str(fields[3]))
 
-    def fetch_transactions(self, start_date: date, end_date: date) -> pd.DataFrame:
+    def fetch_transactions(self, start_date: date, end_date: date) -> IngestResult:
         if not self.access_tokens:
             raise ValueError("At least one PLAID_ACCESS_TOKEN must be configured")
 
         records: list[dict] = []
+        duplicate_accounts_skipped = 0
         # A jointly-held account can be exposed by more than one Plaid Item, and each Item
         # issues its own account_id *and* its own transaction_ids for the same real
         # transactions. `DatabaseClient.canonicalize_account_keys` merges those accounts into
@@ -170,23 +175,18 @@ class PlaidIngestor(BaseIngestor):
                     claimed_identities[identity] = account_id
                 elif claimed_by != account_id:
                     skipped_account_ids.add(account_id)
-                    LOGGER.info(
-                        "Skipping duplicate Plaid account (account_id=%s) for token "
-                        "suffix=%s; already ingested via account_id=%s from an earlier token",
-                        account_id,
-                        access_token[-6:],
-                        claimed_by,
-                    )
+                    duplicate_accounts_skipped += 1
 
             offset = 0
             total = None
             while total is None or offset < total:
                 try:
                     payload = self._request_page(access_token, start_date, end_date, offset)
-                except requests.RequestException:
-                    LOGGER.exception(
-                        "Plaid API request failed for token suffix=%s",
+                except requests.RequestException as error:
+                    LOGGER.error(
+                        "Plaid API request failed for token suffix=%s (%s)",
                         access_token[-6:],
+                        type(error).__name__,
                     )
                     raise
 
@@ -216,7 +216,7 @@ class PlaidIngestor(BaseIngestor):
                     break
 
         if not records:
-            return pd.DataFrame(
+            empty = pd.DataFrame(
                 columns=[
                     "transaction_id",
                     "date",
@@ -228,4 +228,5 @@ class PlaidIngestor(BaseIngestor):
                     "source",
                 ]
             )
-        return pd.DataFrame.from_records(records)
+            return IngestResult(empty, duplicate_accounts_skipped)
+        return IngestResult(pd.DataFrame.from_records(records), duplicate_accounts_skipped)

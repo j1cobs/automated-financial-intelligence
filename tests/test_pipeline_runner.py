@@ -19,6 +19,7 @@ def _settings(**overrides) -> SimpleNamespace:
         plaid_access_tokens=["token-1", "token-2"],
         plaid_access_token_owners=["Alex", "Sam"],
         plaid_base_url="https://sandbox.plaid.com",
+        github_event_name=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -87,7 +88,7 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = [{"account_key": "plaid:acc1"}]
-        ingestor.fetch_transactions.return_value = self._transactions_frame()
+        ingestor.fetch_transactions.return_value = (self._transactions_frame(), 2)
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
@@ -104,6 +105,7 @@ class RunPipelineTests(unittest.TestCase):
         self.assertTrue(all(isinstance(value, (bool,)) for value in result.transactions["is_outlier"]))
         self.assertEqual(result.inserted, 1)
         self.assertEqual(result.updated, 0)
+        self.assertEqual(result.duplicate_accounts_skipped, 2)
 
     def test_empty_frame(self) -> None:
         settings = _settings()
@@ -112,7 +114,7 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = []
-        ingestor.fetch_transactions.return_value = pd.DataFrame(
+        empty_frame = pd.DataFrame(
             columns=[
                 "transaction_id",
                 "date",
@@ -124,6 +126,7 @@ class RunPipelineTests(unittest.TestCase):
                 "source",
             ]
         )
+        ingestor.fetch_transactions.return_value = (empty_frame, 0)
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
@@ -138,6 +141,7 @@ class RunPipelineTests(unittest.TestCase):
         self.assertEqual(result.inserted, 0)
         self.assertEqual(result.updated, 0)
         self.assertEqual(result.removed, 0)
+        self.assertEqual(result.duplicate_accounts_skipped, 0)
 
     def test_calls_upsert_plaid_accounts(self) -> None:
         settings = _settings()
@@ -152,7 +156,7 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = accounts
-        ingestor.fetch_transactions.return_value = self._transactions_frame()
+        ingestor.fetch_transactions.return_value = (self._transactions_frame(), 0)
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
@@ -167,9 +171,11 @@ class RunPipelineTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def test_success_logs_run_with_counts(self) -> None:
-        settings = _settings()
+        settings = _settings(github_event_name="workflow_dispatch")
         database = MagicMock()
-        result = SimpleNamespace(transactions=pd.DataFrame(), inserted=3, updated=1, removed=2)
+        result = SimpleNamespace(
+            transactions=pd.DataFrame(), inserted=3, updated=1, removed=2, duplicate_accounts_skipped=4
+        )
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
@@ -183,11 +189,30 @@ class MainTests(unittest.TestCase):
         self.assertEqual(kwargs["transactions_inserted"], 3)
         self.assertEqual(kwargs["transactions_updated"], 1)
         self.assertEqual(kwargs["stale_duplicates_removed"], 2)
+        self.assertEqual(kwargs["duplicate_accounts_skipped"], 4)
+        self.assertEqual(kwargs["trigger_type"], "workflow_dispatch")
         args = database.log_pipeline_run.call_args[0]
         self.assertEqual(args[1], "success")
 
+    def test_success_defaults_trigger_type_to_local(self) -> None:
+        settings = _settings()  # github_event_name defaults to None
+        database = MagicMock()
+        result = SimpleNamespace(
+            transactions=pd.DataFrame(), inserted=0, updated=0, removed=0, duplicate_accounts_skipped=0
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.run_pipeline", return_value=result),
+        ):
+            main()
+
+        _, kwargs = database.log_pipeline_run.call_args
+        self.assertEqual(kwargs["trigger_type"], "local")
+
     def test_operational_error_logs_failure_without_message(self) -> None:
-        settings = _settings()
+        settings = _settings(github_event_name="schedule")
         database = MagicMock()
 
         with (
@@ -205,16 +230,18 @@ class MainTests(unittest.TestCase):
         args, kwargs = database.log_pipeline_run.call_args
         self.assertEqual(args[1], "failed")
         self.assertEqual(kwargs["error_class"], "OperationalError")
+        self.assertEqual(kwargs["trigger_type"], "schedule")
         self.assertNotIn("error_message", kwargs)
 
     def test_generic_exception_logs_failure_with_message(self) -> None:
-        settings = _settings()
+        settings = _settings(github_event_name="schedule")
         database = MagicMock()
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
             patch("pipeline.runner.DatabaseClient", return_value=database),
             patch("pipeline.runner.run_pipeline", side_effect=RuntimeError("boom")),
+            patch("pipeline.runner.LOGGER") as logger,
         ):
             with self.assertRaises(RuntimeError):
                 main()
@@ -224,6 +251,12 @@ class MainTests(unittest.TestCase):
         self.assertEqual(args[1], "failed")
         self.assertEqual(kwargs["error_class"], "RuntimeError")
         self.assertEqual(kwargs["error_message"], "boom")
+        self.assertEqual(kwargs["trigger_type"], "schedule")
+
+        logger.exception.assert_not_called()
+        logger.error.assert_called_once()
+        error_args = logger.error.call_args[0]
+        self.assertEqual(error_args[1:], ("RuntimeError",))
 
     def test_config_error_before_database_construction_skips_logging(self) -> None:
         database_class = MagicMock()

@@ -60,8 +60,8 @@ class PostErrorLoggingTests(unittest.TestCase):
         self.assertEqual(args[1], 502)
 
 
-class DuplicateAccountSkipLoggingTests(unittest.TestCase):
-    def test_skip_log_omits_mask(self) -> None:
+class DuplicateAccountSkipCountTests(unittest.TestCase):
+    def test_skip_is_counted_not_logged(self) -> None:
         ingestor = PlaidIngestor(client_id="cid", secret="secret", access_tokens=["tok-a", "tok-b"])
 
         account_a = {
@@ -82,13 +82,47 @@ class DuplicateAccountSkipLoggingTests(unittest.TestCase):
             ),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
-            ingestor.fetch_transactions(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))
+            result = ingestor.fetch_transactions(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))
 
-        skip_calls = [c for c in logger.info.call_args_list if "Skipping duplicate" in c[0][0]]
-        self.assertEqual(len(skip_calls), 1)
-        args = skip_calls[0][0]
-        self.assertNotIn("mask", args[0])
-        self.assertEqual(args[1:], ("acc-b", "tok-b"[-6:], "acc-a"))
+        self.assertEqual(result.duplicate_accounts_skipped, 1)
+        logger.info.assert_not_called()
+
+
+class RequestFailureLoggingTests(unittest.TestCase):
+    def test_fetch_accounts_logs_class_name_only_no_traceback(self) -> None:
+        ingestor = _ingestor()
+
+        with (
+            patch.object(
+                ingestor, "_fetch_accounts_raw", side_effect=requests.ConnectionError("boom")
+            ),
+            patch("ingestion.plaid_ingestor.LOGGER") as logger,
+        ):
+            with self.assertRaises(requests.ConnectionError):
+                ingestor.fetch_accounts({})
+
+        logger.error.assert_called_once()
+        logger.exception.assert_not_called()
+        args = logger.error.call_args[0]
+        self.assertEqual(args[1:], ("123456", "ConnectionError"))
+
+    def test_fetch_transactions_page_request_logs_class_name_only_no_traceback(self) -> None:
+        ingestor = _ingestor()
+
+        with (
+            patch.object(ingestor, "_fetch_accounts_raw", return_value=[]),
+            patch.object(
+                ingestor, "_request_page", side_effect=requests.Timeout("boom")
+            ),
+            patch("ingestion.plaid_ingestor.LOGGER") as logger,
+        ):
+            with self.assertRaises(requests.Timeout):
+                ingestor.fetch_transactions(start_date=date(2026, 1, 1), end_date=date(2026, 1, 2))
+
+        logger.error.assert_called_once()
+        logger.exception.assert_not_called()
+        args = logger.error.call_args[0]
+        self.assertEqual(args[1:], ("123456", "Timeout"))
 
 
 if __name__ == "__main__":

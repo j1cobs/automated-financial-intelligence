@@ -108,6 +108,19 @@ class LoadSettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.seed_database_url, "postgresql://u:p@127.0.0.1:5433/finance")
 
+    def test_github_event_name_absent_by_default(self) -> None:
+        settings = self._load({"DATABASE_URL": "postgresql://localhost/db"})
+        self.assertIsNone(settings.github_event_name)
+
+    def test_github_event_name_read_through(self) -> None:
+        settings = self._load(
+            {
+                "DATABASE_URL": "postgresql://localhost/db",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+            }
+        )
+        self.assertEqual(settings.github_event_name, "workflow_dispatch")
+
 
 class EnforceTlsTests(unittest.TestCase):
     def test_appends_sslmode_for_remote_host(self) -> None:
