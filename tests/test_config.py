@@ -121,6 +121,22 @@ class LoadSettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.github_event_name, "workflow_dispatch")
 
+    def test_jwt_secret_and_frontend_origin_absent_by_default(self) -> None:
+        settings = self._load({"DATABASE_URL": "postgresql://localhost/db"})
+        self.assertIsNone(settings.jwt_secret)
+        self.assertIsNone(settings.frontend_origin)
+
+    def test_jwt_secret_and_frontend_origin_read_through(self) -> None:
+        settings = self._load(
+            {
+                "DATABASE_URL": "postgresql://localhost/db",
+                "JWT_SECRET": "super-secret",
+                "FRONTEND_ORIGIN": "https://example.vercel.app",
+            }
+        )
+        self.assertEqual(settings.jwt_secret, "super-secret")
+        self.assertEqual(settings.frontend_origin, "https://example.vercel.app")
+
 
 class EnforceTlsTests(unittest.TestCase):
     def test_appends_sslmode_for_remote_host(self) -> None:

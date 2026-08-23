@@ -15,7 +15,7 @@ dynamic = ["dependencies"]
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
-include = ["analytics*", "app*", "core*", "database*", "ingestion*", "pipeline*"]
+include = ["analytics*", "api*", "app*", "core*", "database*", "ingestion*", "pipeline*"]
 
 [tool.ruff]
 line-length = 110

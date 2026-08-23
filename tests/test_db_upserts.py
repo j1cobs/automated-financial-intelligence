@@ -333,5 +333,48 @@ class EnsureSchemaTests(unittest.TestCase):
         self.assertEqual(calls[1][0][0], "-- content b")
 
 
+class StorePendingOauthStateTests(unittest.TestCase):
+    def test_prunes_expired_inserts_and_caps_entries(self) -> None:
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").store_pending_oauth_state("state-1", "verifier-1")
+
+        self.assertEqual(cursor.execute.call_count, 3)
+        prune_expired_sql = cursor.execute.call_args_list[0][0][0]
+        insert_sql = cursor.execute.call_args_list[1][0][0]
+        insert_args = cursor.execute.call_args_list[1][0][1]
+        cap_sql = cursor.execute.call_args_list[2][0][0]
+
+        self.assertIn("DELETE FROM oauth_pending_state", prune_expired_sql)
+        self.assertIn("600 seconds", prune_expired_sql)
+        self.assertIn("INSERT INTO oauth_pending_state", insert_sql)
+        self.assertEqual(insert_args, ("state-1", "verifier-1"))
+        self.assertIn("OFFSET 32", cap_sql)
+        connect.return_value.commit.assert_called_once()
+
+
+class PopPendingOauthStateTests(unittest.TestCase):
+    def test_returns_code_verifier_when_present(self) -> None:
+        connect, cursor = _mock_connect()
+        cursor.fetchone.return_value = ("verifier-1",)
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").pop_pending_oauth_state("state-1")
+
+        self.assertEqual(result, "verifier-1")
+        delete_returning_sql = cursor.execute.call_args_list[0][0][0]
+        self.assertIn("RETURNING code_verifier", delete_returning_sql)
+        self.assertIn("600 seconds", delete_returning_sql)
+
+    def test_returns_none_when_missing_or_expired(self) -> None:
+        connect, cursor = _mock_connect()
+        cursor.fetchone.return_value = None
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").pop_pending_oauth_state("unknown-state")
+
+        self.assertIsNone(result)
+        # Second DELETE (unconditional cleanup) still runs even when nothing matched.
+        self.assertEqual(cursor.execute.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
