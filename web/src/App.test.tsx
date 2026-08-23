@@ -85,4 +85,23 @@ describe('auth flow', () => {
       expect(screen.getByRole('link', { name: /sign in with google/i })).toBeInTheDocument();
     });
   });
+
+  // Guards the `notifyUnauthorized -> resetQueries` path against becoming self-perpetuating.
+  // The other tests mock apiFetch wholesale, so notifyUnauthorized() never fires in them;
+  // this one reproduces the real side effect (apiFetch calls it before throwing) and asserts
+  // the app still settles on sign-in with a bounded number of fetches.
+  it('settles on the sign-in page with bounded fetches when the first /auth/me 401s', async () => {
+    const { notifyUnauthorized } = await import('./lib/authStore');
+    mockedApiFetch.mockImplementation(async () => {
+      notifyUnauthorized();
+      throw new UnauthorizedError();
+    });
+
+    renderApp();
+
+    expect(await screen.findByRole('link', { name: /sign in with google/i })).toBeInTheDocument();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mockedApiFetch.mock.calls.length).toBeLessThanOrEqual(2);
+  });
 });
