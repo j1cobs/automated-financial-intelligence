@@ -93,9 +93,7 @@ class RequestFailureLoggingTests(unittest.TestCase):
         ingestor = _ingestor()
 
         with (
-            patch.object(
-                ingestor, "_fetch_accounts_raw", side_effect=requests.ConnectionError("boom")
-            ),
+            patch.object(ingestor, "_fetch_accounts_raw", side_effect=requests.ConnectionError("boom")),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
             with self.assertRaises(requests.ConnectionError):
@@ -111,9 +109,7 @@ class RequestFailureLoggingTests(unittest.TestCase):
 
         with (
             patch.object(ingestor, "_fetch_accounts_raw", return_value=[]),
-            patch.object(
-                ingestor, "_request_page", side_effect=requests.Timeout("boom")
-            ),
+            patch.object(ingestor, "_request_page", side_effect=requests.Timeout("boom")),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
             with self.assertRaises(requests.Timeout):
