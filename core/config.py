@@ -69,6 +69,7 @@ class Settings:
     plaid_base_url: str
     database_url: str
     seed_database_url: str | None
+    github_event_name: str | None
     model_path: str
     labeled_dataset_path: str
 
@@ -109,6 +110,7 @@ def load_settings() -> Settings:
         or "https://sandbox.plaid.com",
         database_url=enforce_tls(database_url),
         seed_database_url=enforce_tls(seed_database_url) if seed_database_url else None,
+        github_event_name=_read_value("GITHUB_EVENT_NAME", secrets),
         model_path=_read_value("MODEL_PATH", secrets, "artifacts/classifier.joblib")
         or "artifacts/classifier.joblib",
         labeled_dataset_path=_read_value("LABELED_DATASET_PATH", secrets, "labeled_transactions.csv")

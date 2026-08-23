@@ -118,17 +118,22 @@ class DatabaseClient:
         transactions_inserted: int | None = None,
         transactions_updated: int | None = None,
         stale_duplicates_removed: int | None = None,
+        duplicate_accounts_skipped: int | None = None,
         error_class: str | None = None,
         error_message: str | None = None,
+        trigger_type: str | None = None,
     ) -> None:
         """Record one pipeline run for private, queryable history — this is where per-run detail
         (counts, errors) lives instead of the GitHub Actions log, which is visible to anyone with
-        repo read access."""
+        repo read access. `trigger_type` ("schedule" / "workflow_dispatch" / "local") distinguishes
+        the daily cron from a manual run, so two same-day rows are self-explanatory rather than
+        looking like a duplicate-write bug."""
         sql = """
         INSERT INTO pipeline_runs (
             started_at, status, transactions_inserted, transactions_updated,
-            stale_duplicates_removed, error_class, error_message
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            stale_duplicates_removed, duplicate_accounts_skipped, error_class, error_message,
+            trigger_type
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with psycopg.connect(self.database_url) as connection:
             with connection.cursor() as cursor:
@@ -140,8 +145,10 @@ class DatabaseClient:
                         transactions_inserted,
                         transactions_updated,
                         stale_duplicates_removed,
+                        duplicate_accounts_skipped,
                         error_class,
                         error_message,
+                        trigger_type,
                     ),
                 )
             connection.commit()
@@ -635,12 +642,6 @@ class DatabaseClient:
                     cur.execute("DELETE FROM transactions WHERE id = ANY(%s)", (doomed_ids,))
                 conn.commit()
 
-        LOGGER.info(
-            "Reconciled transactions against Plaid counts for %s..%s: deleted %s duplicate rows",
-            start_date,
-            end_date,
-            len(doomed_ids),
-        )
         return len(doomed_ids)
 
     def upsert_transactions(self, frame: pd.DataFrame) -> tuple[int, int]:
@@ -743,10 +744,4 @@ class DatabaseClient:
 
         updated = len(existing_hashes)
         inserted = len(rows) - updated
-        LOGGER.info(
-            "Upserted %s transactions (%s new, %s already present)",
-            len(rows),
-            inserted,
-            updated,
-        )
         return inserted, updated

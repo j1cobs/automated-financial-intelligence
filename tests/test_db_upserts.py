@@ -163,11 +163,12 @@ class LogPipelineRunTests(unittest.TestCase):
                 transactions_inserted=3,
                 transactions_updated=1,
                 stale_duplicates_removed=2,
+                trigger_type="schedule",
             )
 
         sql, params = cursor.execute.call_args[0]
         self.assertIn("INSERT INTO pipeline_runs", sql)
-        self.assertEqual(params, (started_at, "success", 3, 1, 2, None, None))
+        self.assertEqual(params, (started_at, "success", 3, 1, 2, None, None, None, "schedule"))
 
     def test_failure_row_defaults_counts_to_none(self) -> None:
         import datetime as dt
@@ -180,7 +181,9 @@ class LogPipelineRunTests(unittest.TestCase):
             )
 
         sql, params = cursor.execute.call_args[0]
-        self.assertEqual(params, (started_at, "failed", None, None, None, "OperationalError", None))
+        self.assertEqual(
+            params, (started_at, "failed", None, None, None, None, "OperationalError", None, None)
+        )
 
 
 class CountBySourceTests(unittest.TestCase):

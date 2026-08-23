@@ -120,10 +120,13 @@ the full variable list. The same env-var names are used by GitHub Actions secret
 ## Automation
 
 `.github/workflows/daily-finance-pipeline.yml` is **defined but not yet live**: it declares a daily `cron`
-(07:00 UTC) and `workflow_dispatch` to run `python main.py` with credentials injected from GitHub Secrets, but
+(05:00 UTC) and `workflow_dispatch` to run `python main.py` with credentials injected from GitHub Secrets, but
 automatic runs are not active yet — the workflow is committed but inert until required Secrets are populated on
 the default branch, and GitHub only schedules workflows from the default branch (`main`). Treat scheduled
-automation as a goal, not current behavior.
+automation as a goal, not current behavior. `pipeline_runs.trigger_type` (`"schedule"` / `"workflow_dispatch"` /
+`"local"`) records which of these actually produced a given run — a manual `workflow_dispatch` run and that
+day's cron run are both legitimate, independent executions, so seeing two rows on the same day is expected,
+not a duplicate-write bug.
 
 ## Notes
 

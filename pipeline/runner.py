@@ -20,6 +20,7 @@ class PipelineResult(NamedTuple):
     inserted: int
     updated: int
     removed: int
+    duplicate_accounts_skipped: int
 
 
 def _build_ingestor(settings):
@@ -66,9 +67,11 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
         account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
 
-    transactions = ingestor.fetch_transactions(start_date=start_date, end_date=end_date)
+    transactions, duplicate_accounts_skipped = ingestor.fetch_transactions(
+        start_date=start_date, end_date=end_date
+    )
     if transactions.empty:
-        return PipelineResult(transactions, 0, 0, 0)
+        return PipelineResult(transactions, 0, 0, 0, duplicate_accounts_skipped)
     transactions["account_key"] = transactions["account_key"].map(lambda key: key_remap.get(key, key))
 
     models = build_placeholder_models()
@@ -83,7 +86,7 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # Plaid just returned trims those stale leftovers. Must run after upsert_transactions, and
     # on the frame whose account_key has already been remapped through key_remap above.
     removed = database.reconcile_transactions(transactions, start_date, end_date)
-    return PipelineResult(transactions, inserted, updated, removed)
+    return PipelineResult(transactions, inserted, updated, removed, duplicate_accounts_skipped)
 
 
 def main() -> None:
@@ -100,11 +103,14 @@ def main() -> None:
     except ConfigError:
         LOGGER.exception("Pipeline failed")
         raise
+    trigger_type = settings.github_event_name or "local"
 
     try:
         result = run_pipeline()
     except psycopg.OperationalError as error:
-        database.log_pipeline_run(started_at, "failed", error_class=type(error).__name__)
+        database.log_pipeline_run(
+            started_at, "failed", error_class=type(error).__name__, trigger_type=trigger_type
+        )
         LOGGER.error("Pipeline run: failed (database connection error)")
         raise SystemExit(1) from None
     except Exception as error:
@@ -113,8 +119,9 @@ def main() -> None:
             "failed",
             error_class=type(error).__name__,
             error_message=str(error)[:500],
+            trigger_type=trigger_type,
         )
-        LOGGER.exception("Pipeline run: failed")
+        LOGGER.error("Pipeline run: failed (%s)", type(error).__name__)
         raise
 
     database.log_pipeline_run(
@@ -123,5 +130,7 @@ def main() -> None:
         transactions_inserted=result.inserted,
         transactions_updated=result.updated,
         stale_duplicates_removed=result.removed,
+        duplicate_accounts_skipped=result.duplicate_accounts_skipped,
+        trigger_type=trigger_type,
     )
     LOGGER.info("Pipeline run: success")

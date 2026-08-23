@@ -3,7 +3,10 @@ name: Daily Finance Pipeline
 
 on:
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "0 5 * * *"
+  # Manual runs write their own pipeline_runs row (trigger_type='workflow_dispatch'), independent
+  # of the daily cron (trigger_type='schedule') — seeing both on the same day is expected, not a
+  # duplicate-write bug.
   workflow_dispatch:
 
 permissions:
@@ -33,6 +36,7 @@ jobs:
 
       - name: Run pipeline
         env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
           PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
           PLAID_ACCESS_TOKENS: ${{ secrets.PLAID_ACCESS_TOKENS }}

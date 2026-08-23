@@ -3568,8 +3568,110 @@ Outstanding (requires a live database / a real GitHub Actions run):
 2. Force a failure path (bad `DATABASE_URL` for the `OperationalError` branch, or a bad Plaid token
    for a `requests.RequestException`) and confirm: (a) `pipeline_runs` gets a `status='failed'` row
    with a non-transaction error message, and (b) stdout shows no response body/mask.
-3. Manually trigger the GitHub Actions workflow (`workflow_dispatch`) once secrets are populated,
-   and read the resulting Actions log end-to-end to confirm it's pass/fail only.
+3. ~~Manually trigger the GitHub Actions workflow~~ — **done**, via the real daily cron run on
+   2026-08-09 after merging to `main`. Result: **partial failure**, see follow-up below.
+
+### Follow-up (2026-08-09) — two log lines in `database/db.py` still reached the log
+
+The real production run confirmed Phase 14 was incomplete. `main`'s daily run produced:
+
+```
+2026-08-09 07:56:02,455 | INFO | database.db | Upserted 274 transactions (8 new, 266 already present)
+2026-08-09 07:56:02,519 | INFO | database.db | Reconciled transactions against Plaid counts for 2026-05-11..2026-08-09: deleted 3 duplicate rows
+2026-08-09 07:56:02,580 | INFO | pipeline.runner | Pipeline run: success
+```
+
+Root cause: `pipeline/runner.py`'s per-stage logging was removed as planned, but two `LOGGER.info`
+calls inside `database/db.py` (`reconcile_transactions()`, `upsert_transactions()`) were
+deliberately left in place at the time, since the original audit judged their content non-sensitive
+(counts and a date range, no transaction data). That judgment about *content* was right, but missed
+the actual goal — these calls use the `database.db` logger, which propagates to the same root
+logger `pipeline/runner.py::main()` configures via `logging.basicConfig`, so they still landed in
+the GitHub Actions log. Confirmed via `grep` these were the only two `LOGGER.*` calls in the file.
+
+Fix: deleted both log calls outright rather than relocating them — their counts are already
+captured with zero information loss. `run_pipeline()` already returns them via `PipelineResult`,
+and `main()` already writes them into `pipeline_runs`; the only other caller,
+`scripts/seed_sample_data.py`, already prints its own summary from the same returned tuple. No
+signature or return-value changes, so no caller needed updating. Full suite re-run: 174 tests green,
+`ruff check` clean. Live-run confirmation (merge to `main`, next scheduled/`workflow_dispatch` run
+showing pass/fail only) is still outstanding.
+
+### Follow-up 2 (2026-08-09) — duplicate-account-skip log replaced with a DB count; traceback leaks closed
+
+A live run also surfaced a third leftover log line:
+
+```
+2026-08-09 13:35:35,155 | INFO | ingestion.plaid_ingestor | Skipping duplicate Plaid account (account_id=VNvKbJPe3pCywJ5jQ85oiPgBKyaVgOHaL9gYe) for token suffix=fa17bf; already ingested via account_id=NYvoPXBEpJC9yPAeQ9ANixYo7EX9VPU5VvxrP from an earlier token
+```
+
+Unlike Follow-up 1, the user asked for this one to get a **database replacement**, not just be
+deleted — and asked for every previously-deleted log line in this effort to be re-verified against
+its DB equivalent before moving on. Audit result:
+
+| Removed log | DB replacement | Status |
+|---|---|---|
+| `database/db.py::reconcile_transactions()` "Reconciled transactions..." | `pipeline_runs.stale_duplicates_removed` | ✅ verified |
+| `database/db.py::upsert_transactions()` "Upserted %s transactions..." | `pipeline_runs.transactions_inserted` / `.transactions_updated` | ✅ verified |
+| `pipeline/runner.py` original per-stage logs | Same `pipeline_runs` row (`started_at` + the count columns above) | ✅ verified |
+| `ingestion/plaid_ingestor.py` "Skipping duplicate Plaid account..." | `pipeline_runs.duplicate_accounts_skipped` (new) | Fixed below |
+
+Fix: `database/migrations/014_pipeline_runs_duplicate_accounts.sql` adds
+`duplicate_accounts_skipped INTEGER` to `pipeline_runs`. `PlaidIngestor.fetch_transactions()` no
+longer logs each skip — it increments a counter and now returns `IngestResult(transactions,
+duplicate_accounts_skipped)` (moved to `ingestion/base.py` since it's an interface-level type,
+`BaseIngestor.fetch_transactions`'s abstract signature updated to match).
+`pipeline.runner.PipelineResult` gained a `duplicate_accounts_skipped` field threaded through both
+`run_pipeline()` return points; `main()` passes it to `log_pipeline_run(...)`.
+
+While auditing, three more log statements were found that print full exception tracebacks
+(`LOGGER.exception`, which includes `exc_info`) to the same stdout — never explicitly "deleted"
+before, but the same category of leak. User asked to fold in a fix: swapped all three to
+`LOGGER.error(..., type(error).__name__)` (matching the existing `OperationalError` pattern),
+dropping the traceback while `pipeline_runs.error_class`/`.error_message` keep the full detail:
+`pipeline/runner.py::main()`'s generic-exception handler, `PlaidIngestor.fetch_accounts()`, and
+`PlaidIngestor.fetch_transactions()`'s page-request loop. All three still re-raise unchanged.
+
+Tests: `tests/test_plaid_ingestor.py::DuplicateAccountSkipCountTests` (replaces the old
+log-assertion test) asserts the returned count and that `LOGGER.info` is never called;
+`RequestFailureLoggingTests` (new) covers both scrubbed request-failure logs; `test_pipeline_runner.py`
+updated for the new `IngestResult`/`PipelineResult` shapes and the `LOGGER.error`-not-`.exception`
+assertion; `test_db_upserts.py::LogPipelineRunTests` updated for the 8-column INSERT. Full suite:
+176 tests green, `ruff check` clean. Live-run confirmation still outstanding.
+
+### Follow-up 3 (2026-08-09) — two same-day `pipeline_runs` rows explained; `trigger_type` added; schedule pinned to 05:00 UTC
+
+User noticed two `pipeline_runs` rows on the same day and asked for a code-level investigation
+before accepting "probably two triggers" as the answer. Audit performed: re-read `main()` in full
+(exactly one `log_pipeline_run` call per mutually-exclusive branch, no loop/retry); confirmed
+`tenacity` in `requirements.lock` is only a transitive `streamlit` dependency, never imported by
+this codebase; read the full git history of `daily-finance-pipeline.yml` (4 commits) — always
+exactly one `schedule:` entry, no second workflow ever ran `python main.py`
+(`.github/workflows/ci.yml` is test/lint-only). No code-level double-write path exists. **User
+confirmed the cause**: a manual `workflow_dispatch` run (triggered earlier in this session to test
+the Phase 14 fix) landed on the same calendar day as the scheduled cron run — two real, correct
+executions of the pipeline, not a bug. `concurrency: { group: daily-pipeline, cancel-in-progress:
+false }` means overlapping triggers queue and both still run to completion, reinforcing that two
+same-day triggers reliably produce two rows.
+
+Fix: added `trigger_type` to `pipeline_runs` (`database/migrations/015_pipeline_runs_trigger_type.sql`),
+storing GitHub's own event-name vocabulary directly — `"schedule"`, `"workflow_dispatch"`, or
+`"local"` for a run started outside GitHub Actions. The workflow now passes `GITHUB_EVENT_NAME: ${{
+github.event_name }}` to the pipeline step; `core/config.py::Settings` gained an optional
+`github_event_name` field (same pattern as the Plaid vars — absent is fine, e.g. for local runs);
+`database/db.py::log_pipeline_run` and all three call sites in `pipeline/runner.py::main()` (success,
+`OperationalError`, generic exception) now pass `trigger_type=settings.github_event_name or "local"`,
+so a failed run is just as attributable as a successful one. Also pinned the daily cron from `0 7 * *
+*` to `0 5 * * *` (05:00 UTC) per the user's request for a fixed daily time — noting GitHub Actions
+schedules are documented as best-effort and may be delayed under platform load, which no code change
+can guarantee around.
+
+Tests: `test_config.py` covers `github_event_name` absent/present; `test_db_upserts.py::LogPipelineRunTests`
+updated for the 9-column INSERT; `test_pipeline_runner.py::MainTests` extended with a
+`trigger_type="workflow_dispatch"` case, a `trigger_type` default-to-`"local"` case, and `"schedule"`
+on both failure paths. Full suite: 179 tests green, `ruff check` clean. Live-run confirmation (one
+`workflow_dispatch` row showing `trigger_type='workflow_dispatch'`, one cron row showing
+`trigger_type='schedule'`) still outstanding.
 
 ---
 
