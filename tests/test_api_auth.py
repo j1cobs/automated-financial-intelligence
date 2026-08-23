@@ -216,5 +216,27 @@ class GoogleStartTests(ApiAuthTestCase):
         self.assertEqual(len(args), 2)  # (state, code_verifier)
 
 
+class LifespanTests(unittest.TestCase):
+    """`api.main.lifespan` calls `ensure_schema()` once at startup so a fresh/lagging local DB
+    (missing e.g. migration 016) doesn't 500 on first request -- see the bug this fixed. Uses
+    the TestClient *context manager* form deliberately, since plain `TestClient(app)` (as used
+    everywhere else in this file) never triggers lifespan at all."""
+
+    def test_ensure_schema_runs_once_on_startup(self) -> None:
+        with patch("api.main.DatabaseClient") as mock_db_client_cls:
+            mock_db_client_cls.return_value = MagicMock()
+            with TestClient(app):
+                pass
+            mock_db_client_cls.assert_called_once_with(os.environ["DATABASE_URL"])
+            mock_db_client_cls.return_value.ensure_schema.assert_called_once()
+
+    def test_ensure_schema_failure_prevents_startup(self) -> None:
+        with patch("api.main.DatabaseClient") as mock_db_client_cls:
+            mock_db_client_cls.return_value.ensure_schema.side_effect = RuntimeError("bad DATABASE_URL")
+            with self.assertRaises(RuntimeError):
+                with TestClient(app):
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()
