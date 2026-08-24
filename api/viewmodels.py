@@ -472,7 +472,15 @@ def build_overview(
     non_transfer = all_time_df[all_time_df["tx_type"] != "transfer"]
     if not non_transfer.empty:
         by_month = non_transfer.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0.0)
-        for month_key in sorted(by_month.index):
+        current_month = date.today().strftime("%Y-%m")
+        # Excludes only the in-progress current month, not the stricter 28-day-coverage
+        # rule complete_month_keys applies elsewhere (Fix 3c) — that rule is for
+        # averages, where a ragged edge month would skew the mean, but this is a trend
+        # line over full history, where a genuinely partial *historical* month (e.g. the
+        # very first month of data) is still real data worth showing. Only today's
+        # still-accumulating month has a ratio that visibly moves with every new
+        # transaction, which is what read as "random".
+        for month_key in sorted(k for k in by_month.index if k != current_month):
             month_income = float(by_month.get("income", pd.Series(dtype=float)).get(month_key, 0.0))
             month_expenses = abs(float(by_month.get("expense", pd.Series(dtype=float)).get(month_key, 0.0)))
             rate = (

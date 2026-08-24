@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import date, timedelta
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
 
@@ -131,6 +132,23 @@ class SavingsRateTrendTests(unittest.TestCase):
         df = _frame([_tx("2026-05-01", MIN_MONTHLY_INCOME_FOR_RATE, _INCOME)])
         trend = build_overview(df, pd.DataFrame([]))["savings_rate_trend"]
         self.assertAlmostEqual(trend[0]["savings_rate"], 1.0)
+
+    def test_current_month_is_excluded_from_the_trend(self) -> None:
+        # The in-progress current month's ratio swings with every new transaction posted
+        # (one payday landed, few expenses yet) and looked "random" on the chart; it must
+        # not appear in the trend at all. `older` is >1 year back so it can never land in
+        # the same calendar month as "today", whenever the test happens to run.
+        older = date.today() - timedelta(days=400)
+        df = _frame(
+            [
+                _tx(older.isoformat(), 2000.0, _INCOME),
+                _tx((older + timedelta(days=4)).isoformat(), 500.0, _EXPENSE),
+                _tx(date.today().isoformat(), 5000.0, _INCOME),
+            ]
+        )
+        trend_months = {p["month"] for p in build_overview(df, pd.DataFrame([]))["savings_rate_trend"]}
+        self.assertNotIn(date.today().strftime("%Y-%m"), trend_months)
+        self.assertIn(older.strftime("%Y-%m"), trend_months)
 
 
 class CompleteMonthTests(unittest.TestCase):
