@@ -186,6 +186,49 @@ class LogPipelineRunTests(unittest.TestCase):
         )
 
 
+class RecordBalanceSnapshotsTests(unittest.TestCase):
+    def test_writes_one_row_per_account_for_the_given_date(self) -> None:
+        import datetime as dt
+
+        accounts = [
+            {"account_key": "plaid:acc1", "balance_current": 200.0, "balance_available": 190.0},
+            {"account_key": "plaid:acc2", "balance_current": 15.26},
+        ]
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").record_balance_snapshots(
+                accounts, snapshot_date=dt.date(2026, 8, 24)
+            )
+
+        cursor.executemany.assert_called_once()
+        sql, rows = cursor.executemany.call_args[0]
+        self.assertIn("INSERT INTO account_balance_snapshots", sql)
+        self.assertIn("ON CONFLICT (account_key, snapshot_date) DO UPDATE", sql)
+        self.assertEqual(
+            rows,
+            [
+                ("plaid:acc1", dt.date(2026, 8, 24), 200.0, 190.0),
+                ("plaid:acc2", dt.date(2026, 8, 24), 15.26, None),
+            ],
+        )
+
+    def test_defaults_to_today_when_no_date_given(self) -> None:
+        import datetime as dt
+
+        accounts = [{"account_key": "plaid:acc1", "balance_current": 200.0}]
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").record_balance_snapshots(accounts)
+
+        rows = cursor.executemany.call_args[0][1]
+        self.assertEqual(rows[0][1], dt.date.today())
+
+    def test_empty_list_skips(self) -> None:
+        with patch.object(DatabaseClient, "_execute_many") as execute_many:
+            DatabaseClient("postgresql://x").record_balance_snapshots([])
+        execute_many.assert_not_called()
+
+
 class CountBySourceTests(unittest.TestCase):
     def test_returns_mapping(self) -> None:
         connect, cursor = _mock_connect([("sample", 1, 10), ("plaid", 3, 500)])

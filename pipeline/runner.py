@@ -66,6 +66,7 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     for account in accounts:
         account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
+    database.record_balance_snapshots(accounts)
 
     transactions, duplicate_accounts_skipped = ingestor.fetch_transactions(
         start_date=start_date, end_date=end_date

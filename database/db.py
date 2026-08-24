@@ -250,6 +250,32 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
+    def record_balance_snapshots(
+        self, accounts: list[dict[str, Any]], snapshot_date: dt.date | None = None
+    ) -> None:
+        """One row per account per calendar day, capturing the balance just written by
+        `upsert_plaid_accounts`. `accounts.balance_current` is overwritten in place on every
+        run, so this is the only place net-worth-over-time can be reconstructed from. A
+        same-day re-run (the daily schedule plus a manual workflow_dispatch, or a local run,
+        can both legitimately hit the same day) overwrites that day's row rather than creating
+        a second one -- only the latest balance observed that day is meaningful."""
+        snapshot_date = snapshot_date or dt.date.today()
+        sql = """
+        INSERT INTO account_balance_snapshots (
+            account_key, snapshot_date, balance_current, balance_available
+        ) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (account_key, snapshot_date) DO UPDATE
+        SET balance_current   = EXCLUDED.balance_current,
+            balance_available = EXCLUDED.balance_available,
+            updated_at        = NOW()
+        """
+        rows = [
+            (a["account_key"], snapshot_date, a.get("balance_current"), a.get("balance_available"))
+            for a in accounts
+        ]
+        if rows:
+            self._execute_many(sql, rows)
+
     def count_by_source(self) -> dict[str, dict[str, int]]:
         """{source: {"accounts": n, "transactions": m}} for every source present in `accounts`."""
         sql = """

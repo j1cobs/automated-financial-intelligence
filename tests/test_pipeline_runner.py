@@ -168,6 +168,34 @@ class RunPipelineTests(unittest.TestCase):
         ingestor.fetch_accounts.assert_called_once_with(owner_by_token)
         database.upsert_plaid_accounts.assert_called_once_with(accounts)
 
+    def test_records_balance_snapshots_after_upserting_accounts(self) -> None:
+        settings = _settings()
+        database = MagicMock()
+        database.canonicalize_account_keys.return_value = {}
+        database.upsert_transactions.return_value = (1, 0)
+
+        accounts = [{"account_key": "plaid:acc1", "account_name": "Checking", "balance_current": 200.0}]
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = accounts
+        ingestor.fetch_transactions.return_value = (self._transactions_frame(), 0)
+
+        call_order: list[str] = []
+        database.upsert_plaid_accounts.side_effect = lambda *_: call_order.append("upsert_plaid_accounts")
+        database.record_balance_snapshots.side_effect = lambda *_: call_order.append(
+            "record_balance_snapshots"
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+        ):
+            run_pipeline()
+
+        database.record_balance_snapshots.assert_called_once_with(accounts)
+        self.assertEqual(call_order, ["upsert_plaid_accounts", "record_balance_snapshots"])
+
 
 class MainTests(unittest.TestCase):
     def test_success_logs_run_with_counts(self) -> None:
