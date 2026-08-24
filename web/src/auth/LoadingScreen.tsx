@@ -5,14 +5,14 @@
  */
 export function LoadingScreen() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
+    <div className="flex min-h-screen items-center justify-center bg-surface-page px-4">
       <div className="flex flex-col items-center gap-3 text-center">
         <div
-          className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-slate-900"
+          className="h-8 w-8 animate-spin rounded-full border-2 border-strong border-t-ink"
           role="status"
           aria-label="Loading"
         />
-        <p className="text-sm text-slate-500">Waking up the server&hellip; this can take up to a minute.</p>
+        <p className="text-sm text-ink-muted">Waking up the server&hellip; this can take up to a minute.</p>
       </div>
     </div>
   );

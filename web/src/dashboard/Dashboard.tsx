@@ -70,12 +70,12 @@ export function Dashboard() {
 
   return (
     <FilterProvider>
-      <div className="min-h-screen bg-slate-50">
-        <header className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4">
-          <p className="text-sm text-slate-600">Signed in as {user?.email}</p>
+      <div className="min-h-screen bg-surface-page">
+        <header className="flex items-center justify-between gap-4 border-b border-hairline bg-surface-1 px-6 py-4">
+          <p className="text-sm text-ink-secondary">Signed in as {user?.email}</p>
           <ThemeToggle />
         </header>
-        <nav className="border-b border-slate-200 bg-white px-3 sm:px-6">
+        <nav className="border-b border-hairline bg-surface-1 px-3 sm:px-6">
           <div className="flex gap-2 sm:gap-4 overflow-x-auto">
             {TABS.map((tab) => (
               <button
@@ -85,8 +85,8 @@ export function Dashboard() {
                 aria-current={activeTab === tab.id ? 'page' : undefined}
                 className={`border-b-2 px-2 sm:px-2 py-3 sm:py-3 text-xs sm:text-sm font-medium transition-colors min-h-11 flex items-center whitespace-nowrap ${
                   activeTab === tab.id
-                    ? 'border-slate-800 text-slate-900'
-                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                    ? 'border-ink text-ink'
+                    : 'border-transparent text-ink-muted hover:text-ink-secondary'
                 }`}
               >
                 {tab.label}

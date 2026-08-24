@@ -48,6 +48,7 @@
   --text-muted: #898781; /* 3.50:1 -- large/decorative text only */
   --text-on-dark-fill: #ffffff; /* label set inside a saturated fill */
   --text-on-light-fill: #0b0b0b;
+  --text-on-emphasis: var(--text-on-dark-fill); /* label on a bg-ink button; ink is dark here */
 
   /* --- chart chrome ------------------------------------------------------ */
   --chart-surface: #fcfcfb;
@@ -136,6 +137,7 @@
     --text-muted: #898781;
     --text-on-dark-fill: #ffffff;
     --text-on-light-fill: #0b0b0b;
+    --text-on-emphasis: var(--text-on-light-fill); /* ink is light here */
 
     --chart-surface: #1a1a19;
     --chart-grid: #2c2c2a;
@@ -201,6 +203,7 @@
   --text-muted: #898781;
   --text-on-dark-fill: #ffffff;
   --text-on-light-fill: #0b0b0b;
+  --text-on-emphasis: var(--text-on-light-fill); /* ink is light here */
 
   --chart-surface: #1a1a19;
   --chart-grid: #2c2c2a;
@@ -266,6 +269,7 @@
   --color-ink: var(--text-primary);
   --color-ink-secondary: var(--text-secondary);
   --color-ink-muted: var(--text-muted);
+  --color-on-emphasis: var(--text-on-emphasis);
 
   --color-cat-1: var(--cat-1);
   --color-cat-2: var(--cat-2);
@@ -301,4 +305,16 @@ body {
     -apple-system,
     'Segoe UI',
     sans-serif;
+}
+
+/* Theme swap is a token change, not a DOM change, so without this every colour
+   on the page snaps instantly on toggle. Scoped to the properties the token
+   layer actually drives; skipped entirely under reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  * {
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+  }
 }
