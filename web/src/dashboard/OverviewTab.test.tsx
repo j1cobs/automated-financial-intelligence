@@ -1,9 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { OverviewTab } from './OverviewTab';
+import { FilterProvider } from '../lib/FilterContext';
 import type { OverviewResponse } from '../lib/types';
 import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
+
+// OverviewTab reads `useFilters()` directly (Fix 14 cross-filtering), so it
+// needs a real FilterProvider ancestor even though `useOverview` is mocked.
+function renderOverviewTab() {
+  return render(
+    <FilterProvider>
+      <OverviewTab />
+    </FilterProvider>,
+  );
+}
 
 // Mock the queries module
 vi.mock('../lib/queries', () => ({
@@ -110,6 +121,40 @@ const mockOverviewData: OverviewResponse = {
     avg_monthly_income: 15000,
     avg_monthly_net: 7615,
     complete_months: 3,
+    metrics: {
+      avg_monthly_income: {
+        key: 'avg_monthly_income',
+        value: 15000,
+        baseline: 13000,
+        delta_pct: 0.1538,
+        baseline_months: 3,
+        sparkline: [12000, 13500, 15000],
+      },
+      avg_monthly_expense: {
+        key: 'avg_monthly_expense',
+        value: 7385,
+        baseline: 7000,
+        delta_pct: 0.055,
+        baseline_months: 3,
+        sparkline: [6800, 7100, 7385],
+      },
+      avg_monthly_net: {
+        key: 'avg_monthly_net',
+        value: 7615,
+        baseline: 6000,
+        delta_pct: 0.269,
+        baseline_months: 3,
+        sparkline: [5200, 6400, 7615],
+      },
+      savings_rate: {
+        key: 'savings_rate',
+        value: 0.6,
+        baseline: null,
+        delta_pct: null,
+        baseline_months: 0,
+        sparkline: [],
+      },
+    },
     top_categories: [
       { category: 'Groceries', amount: 1200 },
       { category: 'Utilities', amount: 350 },
@@ -146,6 +191,13 @@ describe('OverviewTab', () => {
     } as unknown as UseMutationResult<void, Error, { accountKey: string; limit: number | null }>);
   });
 
+  // FilterProvider syncs filter state to the URL via replaceState; reset it so
+  // one test's click-to-filter doesn't leak into the next test's initial
+  // filter state via a shared jsdom `window`.
+  afterEach(() => {
+    window.history.replaceState(null, '', window.location.pathname);
+  });
+
   it('renders loading state while data is being fetched', () => {
     mockedUseOverview.mockReturnValue({
       data: undefined,
@@ -153,7 +205,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Loading overview...')).toBeInTheDocument();
   });
@@ -166,7 +218,7 @@ describe('OverviewTab', () => {
       error: new Error(errorMsg),
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Error loading overview')).toBeInTheDocument();
     expect(screen.getByText(errorMsg)).toBeInTheDocument();
@@ -179,7 +231,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('No data available')).toBeInTheDocument();
   });
@@ -198,7 +250,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.queryByText('No data available')).not.toBeInTheDocument();
     const netWorthLabel = screen.getByText('Net Worth');
@@ -214,7 +266,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Net Worth')).toBeInTheDocument();
     expect(screen.getByText('$500,000')).toBeInTheDocument();
@@ -238,7 +290,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Monthly Income')).toBeInTheDocument();
     expect(screen.getByText('$15,000')).toBeInTheDocument();
@@ -265,7 +317,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getAllByText('not enough complete months').length).toBe(3);
   });
@@ -277,7 +329,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Savings Rate Trend')).toBeInTheDocument();
     // One month (2026-02) has savings_rate: null in the fixture.
@@ -298,7 +350,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Savings Rate Trend')).toBeInTheDocument();
     expect(screen.queryByText(/hidden — no recorded income/)).not.toBeInTheDocument();
@@ -311,7 +363,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Asset Mix')).toBeInTheDocument();
   });
@@ -323,7 +375,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     const heading = screen.getByText('Owner Balances');
     const chartCard = heading.closest('div');
@@ -345,7 +397,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Top Expense Categories')).toBeInTheDocument();
   });
@@ -357,7 +409,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     // Fix 10: the bare tile became a card with a progress bar toward the
     // 6-month goal — see "renders an emergency fund progress bar..." below.
@@ -372,9 +424,11 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
-    expect(screen.getByText('Flagged Transactions')).toBeInTheDocument();
+    // Label comes from the metricInfo registry now (Fix 13): "Flagged", not
+    // "Flagged Transactions" -- one source of truth so label and tooltip agree.
+    expect(screen.getByText('Flagged')).toBeInTheDocument();
   });
 
   it('renders sync-health warning for stale accounts, with correct wording', () => {
@@ -384,7 +438,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Balances may be out of date')).toBeInTheDocument();
     expect(screen.getByText(/Old Savings.*balance last refreshed 45 days ago/)).toBeInTheDocument();
@@ -406,7 +460,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.queryByText('Balances may be out of date')).not.toBeInTheDocument();
   });
@@ -418,7 +472,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('1 account with no activity in 90+ days')).toBeInTheDocument();
     expect(screen.getByText(/Forgotten Savings.*no activity in 120 days/)).toBeInTheDocument();
@@ -431,7 +485,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     const heading = screen.getByText('Credit Utilization');
     const card = heading.closest('div');
@@ -471,7 +525,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText(/manually set limit/)).toBeInTheDocument();
   });
@@ -500,7 +554,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     const heading = screen.getByText('Credit Utilization');
     const card = heading.closest('div');
@@ -523,7 +577,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.queryByText('Credit Utilization')).not.toBeInTheDocument();
   });
@@ -535,7 +589,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     const input = screen.getByLabelText('Credit limit for Chase Card');
     fireEvent.change(input, { target: { value: '5000' } });
@@ -551,7 +605,7 @@ describe('OverviewTab', () => {
       isLoading: false,
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
-    const { rerender } = render(<OverviewTab />);
+    const { rerender } = renderOverviewTab();
 
     expect(screen.queryByText('These accounts appear more than once')).not.toBeInTheDocument();
 
@@ -564,7 +618,11 @@ describe('OverviewTab', () => {
       isLoading: false,
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
-    rerender(<OverviewTab />);
+    rerender(
+      <FilterProvider>
+        <OverviewTab />
+      </FilterProvider>,
+    );
 
     expect(screen.getByText('These accounts appear more than once')).toBeInTheDocument();
     expect(screen.getByText('Joint Checking, Old Savings')).toBeInTheDocument();
@@ -577,7 +635,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Income Sources')).toBeInTheDocument();
   });
@@ -589,7 +647,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Month-over-Month by Category')).toBeInTheDocument();
   });
@@ -601,7 +659,7 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Emergency Fund')).toBeInTheDocument();
     expect(screen.getByText('Liquid savings ÷ average monthly expenses.')).toBeInTheDocument();
@@ -615,11 +673,90 @@ describe('OverviewTab', () => {
       error: null,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
-    render(<OverviewTab />);
+    renderOverviewTab();
 
     expect(screen.getByText('Weekly Expenses')).toBeInTheDocument();
     expect(screen.getByText('$1,846')).toBeInTheDocument();
     expect(screen.getByText('Weekly Income')).toBeInTheDocument();
     expect(screen.getByText('$3,462')).toBeInTheDocument();
+  });
+
+  it('renders a baseline comparison for a metric tile with API-provided context', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    // avg_monthly_income: delta_pct 0.1538 vs a 3-month baseline -> "15% above ...".
+    expect(screen.getByText('15% above your 3-month average')).toBeInTheDocument();
+  });
+
+  it('renders no comparison when a metric has no baseline (savings_rate in the fixture)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    expect(screen.queryByText(/vs your .*-month average/)).not.toBeInTheDocument();
+  });
+
+  it('opens the metric info tooltip by keyboard and closes it on Escape (Fix 13)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const trigger = screen.getByRole('button', { name: 'More about Net Worth' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText("What you'd have left if you settled every account today.")).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('patches the category filter when a Top Categories bar is clicked (Fix 14)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    const { container } = renderOverviewTab();
+
+    const heading = screen.getByText('Top Expense Categories');
+    const card = heading.closest('div');
+    expect(card).not.toBeNull();
+    const bar = card!.querySelectorAll('.recharts-bar-rectangle')[0];
+    expect(bar).toBeTruthy();
+    fireEvent.click(bar!);
+
+    expect(new URLSearchParams(window.location.search).getAll('categories')).toContain('Groceries');
+    expect(container).toContainElement(card);
+  });
+
+  it('renders a discoverability hint above the clickable Top Categories chart', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    expect(screen.getByText('Click a bar to add that category to your filters.')).toBeInTheDocument();
   });
 });

@@ -11,6 +11,7 @@ import jwt as pyjwt  # noqa: E402
 import pandas as pd  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from api import dataload  # noqa: E402
 from api.deps import get_db, get_settings  # noqa: E402
 from api.main import app  # noqa: E402
 from api.security import COOKIE_NAME  # noqa: E402
@@ -108,6 +109,9 @@ def _acct_df() -> pd.DataFrame:
 
 class ApiDataTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        # The frame cache is process-global; without this, one test's fixture leaks into
+        # the next and failures depend on execution order.
+        dataload.clear()
         self.settings = _settings()
         self.mock_db = MagicMock()
         self.mock_db.database_url = self.settings.database_url
@@ -119,6 +123,7 @@ class ApiDataTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
+        dataload.clear()
 
     def _mint(self, **claim_overrides) -> str:
         payload = {
@@ -139,7 +144,9 @@ class ApiDataTestCase(unittest.TestCase):
 
     def _load_financial_data_patch(self, tx_df=None, acct_df=None):
         return patch(
-            "api.routers.data.load_financial_data",
+            # Patched where it is USED, not where it was defined: the loader moved
+            # behind `api/dataload.py`'s TTL cache.
+            "api.dataload.load_financial_data",
             return_value=(
                 tx_df if tx_df is not None else _tx_df(),
                 acct_df if acct_df is not None else _acct_df(),

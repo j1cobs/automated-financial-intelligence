@@ -45,6 +45,13 @@ export const METRIC_POLARITY: Readonly<Record<string, Polarity>> = Object.freeze
   net_worth: 'normal',
   assets: 'normal',
   net_flow: 'normal',
+  // The API emits `total_assets`/`avg_monthly_net`/`emergency_fund_months`; keys here
+  // must match the view-model field names exactly or they silently fall through to
+  // `DEFAULT_POLARITY` and render an unvalenced grey badge on a metric that has a
+  // perfectly clear direction.
+  total_assets: 'normal',
+  avg_monthly_net: 'normal',
+  emergency_fund_months: 'normal',
   savings_rate: 'normal',
   income: 'normal',
   total_income: 'normal',
@@ -55,6 +62,7 @@ export const METRIC_POLARITY: Readonly<Record<string, Polarity>> = Object.freeze
 
   // more is worse
   expenses: 'inverse',
+  total_liabilities: 'inverse',
   total_expenses: 'inverse',
   avg_monthly_expense: 'inverse',
   avg_weekly_expense: 'inverse',

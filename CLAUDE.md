@@ -120,6 +120,17 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   - **Series are returned wide, not long.** `{month, income, expenses, net}`, not
     `{month, tx_type, amount}`. The long shape forced the frontend to pivot on a `tx_type` string and
     it matched the wrong case, so a chart rendered axes and no bars. Keep the pivot server-side.
+  - **Reads go through `dataload.load_frames()`, a 60-second TTL cache**, because
+    `load_financial_data` is an unbounded `SELECT` and every read endpoint used to run it plus a full
+    re-enrichment per request. The cached frames are shared across requests, so **treat them as
+    read-only** — copy before mutating (every builder already does). **Every write endpoint must call
+    `dataload.invalidate(db.database_url)`**; without it an edit returns 204, the frontend refetches,
+    and the API serves the pre-edit rows back for up to a minute, so the edit looks like it silently
+    failed. `tests/test_api_dataload.py` enforces both rules.
+  - `filters.py` is a hand-written **port** of `app/dashboard.py::_build_sidebar_filters`, not a shared
+    module — the freeze forbids extracting it. It carries three load-bearing invariants (two frames,
+    enrich-before-filter, whole-month periods) documented in its docstring and pinned by
+    `tests/test_api_filters.py`. Read that docstring before touching it.
 - `web/` — React + TypeScript dashboard (Vite, Tailwind v4, TanStack Query, Recharts). `lib/api.ts`
   owns the cross-origin cookie + CSRF concerns; `lib/types.ts` mirrors the Pydantic response models
   field-for-field and must be updated in the same change as `api/routers/data.py`, or `tsc -b` is the

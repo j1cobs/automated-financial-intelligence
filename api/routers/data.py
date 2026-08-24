@@ -16,8 +16,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
-from app.dashboard import load_financial_data
-
+from ..dataload import invalidate as invalidate_cache
+from ..dataload import load_frames
 from ..deps import CurrentUserDep, DbDep, RequireCsrfDep
 from ..filters import FiltersDep, apply_filters, build_filter_options
 from ..viewmodels import (
@@ -28,15 +28,13 @@ from ..viewmodels import (
     build_net_worth,
     build_overview,
     exclude_duplicate_rows,
-    prepare_transactions,
 )
 
 router = APIRouter(tags=["data"])
 
 
 def _load(db: DbDep):
-    tx_df, acct_df = load_financial_data(db.database_url)
-    return prepare_transactions(tx_df), acct_df
+    return load_frames(db.database_url)
 
 
 def _load_filtered(db: DbDep, filters: FiltersDep):
@@ -148,6 +146,29 @@ class SavingsRateTrendItem(BaseModel):
     expenses: float
 
 
+class MetricSummary(BaseModel):
+    """A headline figure plus the context needed to read it.
+
+    Answers "is this normal for me?", which a bare number cannot. Whether a positive
+    `delta_pct` is good or bad is deliberately NOT encoded here — that is polarity, and
+    it belongs to the UI (`web/src/lib/polarity.ts`), because expenses rising and income
+    rising are the same arithmetic and opposite news.
+    """
+
+    key: str
+    value: float
+    """The figure for the selected period."""
+    baseline: float | None
+    """The same quantity averaged over every complete month of history. None when there
+    is not a single complete month to average."""
+    delta_pct: float | None
+    """Fraction: `(value - baseline) / abs(baseline)`. None when baseline is absent or
+    zero. Divided by the ABSOLUTE baseline so the sign always means above/below."""
+    baseline_months: int
+    sparkline: list[float]
+    """Up to the last 12 complete months of the underlying monthly series."""
+
+
 class Overview(BaseModel):
     income: float
     expenses: float
@@ -162,6 +183,8 @@ class Overview(BaseModel):
     avg_monthly_net: float
     complete_months: int
     """How many whole calendar months the monthly averages above are computed over."""
+    metrics: dict[str, MetricSummary]
+    """Baseline/sparkline context, keyed by the field name it annotates."""
     top_categories: list[TopCategoryItem]
     month_over_month: list[MonthOverMonthItem]
     emergency_fund_months: float | None
@@ -393,6 +416,7 @@ def update_credit_limit(
     db: DbDep,
 ) -> Response:
     db.set_manual_credit_limit(account_key, body.limit)
+    invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -405,6 +429,7 @@ def update_budget(
     db: DbDep,
 ) -> Response:
     db.upsert_budget(category, body.monthly_limit)
+    invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -417,6 +442,7 @@ def update_transaction_category(
     db: DbDep,
 ) -> Response:
     db.update_transaction_category(transaction_hash, body.category)
+    invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -429,6 +455,7 @@ def update_transaction_recurring(
     db: DbDep,
 ) -> Response:
     db.update_transaction_recurring(transaction_hash, body.recurring)
+    invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -441,4 +468,5 @@ def update_transaction_duplicate(
     db: DbDep,
 ) -> Response:
     db.update_transaction_duplicate(transaction_hash, body.duplicate)
+    invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

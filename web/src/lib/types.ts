@@ -89,6 +89,20 @@ export interface SavingsRateTrendItem {
   expenses: number;
 }
 
+export interface MetricSummary {
+  key: string;
+  value: number;
+  /** The same quantity averaged over every complete month of history. `null`
+   * when there is not a single complete month to average. */
+  baseline: number | null;
+  /** Fraction: `(value - baseline) / abs(baseline)`. `null` when `baseline`
+   * is absent or zero. */
+  delta_pct: number | null;
+  baseline_months: number;
+  /** Up to the last 12 complete months of the underlying monthly series. */
+  sparkline: number[];
+}
+
 export interface Overview {
   income: number;
   expenses: number;
@@ -101,6 +115,8 @@ export interface Overview {
   avg_monthly_income: number;
   avg_monthly_net: number;
   complete_months: number;
+  /** Baseline/sparkline context, keyed by the field name it annotates. */
+  metrics: Record<string, MetricSummary>;
   top_categories: TopCategoryItem[];
   month_over_month: MonthOverMonthItem[];
   emergency_fund_months: number | null;

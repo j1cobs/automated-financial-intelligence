@@ -20,7 +20,9 @@ import pandas as pd  # noqa: E402
 from api.viewmodels import (  # noqa: E402
     DORMANT_DAYS,
     MIN_MONTHLY_INCOME_FOR_RATE,
+    SPARKLINE_MONTHS,
     SYNC_STALE_DAYS,
+    _build_metric,
     build_cash_flow,
     build_net_worth,
     build_overview,
@@ -328,6 +330,81 @@ class RollingSpendTests(unittest.TestCase):
             ]
         )
         self.assertTrue(build_cash_flow(df)["rolling_30d_spend"])
+
+
+class MetricBaselineTests(unittest.TestCase):
+    """Fix 12 — every headline figure ships with the baseline that makes it legible."""
+
+    def _two_years(self) -> pd.DataFrame:
+        # Six complete months, expenses climbing 100 -> 600.
+        rows = []
+        for i, month in enumerate(["01", "02", "03", "04", "05", "06"], start=1):
+            rows.append(_tx(f"2026-{month}-02", 1000.0, _INCOME, transaction_hash=f"i{month}"))
+            rows.append(_tx(f"2026-{month}-15", i * 100.0, _EXPENSE, transaction_hash=f"e{month}"))
+            # Boundary coverage so each month counts as complete.
+            rows.append(_tx(f"2026-{month}-01", 1.0, _EXPENSE, transaction_hash=f"a{month}"))
+            rows.append(_tx(f"2026-{month}-28", 1.0, _EXPENSE, transaction_hash=f"z{month}"))
+        return _frame(rows)
+
+    def test_every_headline_metric_carries_context(self) -> None:
+        metrics = build_overview(self._two_years(), pd.DataFrame([]))["metrics"]
+        self.assertEqual(
+            set(metrics),
+            {"avg_monthly_income", "avg_monthly_expense", "avg_monthly_net", "savings_rate"},
+        )
+        for key, metric in metrics.items():
+            with self.subTest(key=key):
+                self.assertEqual(metric["key"], key)
+                self.assertIsNotNone(metric["baseline"])
+                self.assertGreater(metric["baseline_months"], 0)
+                self.assertTrue(metric["sparkline"])
+
+    def test_sparkline_is_chronological_and_capped(self) -> None:
+        metric = build_overview(self._two_years(), pd.DataFrame([]))["metrics"]["avg_monthly_expense"]
+        spark = metric["sparkline"]
+        self.assertLessEqual(len(spark), SPARKLINE_MONTHS)
+        # Expenses climb month over month, so the series must too — if it came back
+        # unsorted the sparkline would draw a meaningless shape.
+        self.assertEqual(spark, sorted(spark))
+
+    def test_delta_is_zero_when_the_period_is_all_history(self) -> None:
+        # Comparing every complete month against the average of those same months.
+        metric = build_overview(self._two_years(), pd.DataFrame([]))["metrics"]["avg_monthly_expense"]
+        self.assertAlmostEqual(metric["delta_pct"], 0.0, places=6)
+
+    def test_delta_sign_survives_a_negative_baseline(self) -> None:
+        # Net flow is routinely negative. Dividing by a signed baseline would invert the
+        # comparison exactly when someone is overspending, reporting "improving" for a
+        # month that got worse.
+        metric = _build_metric("net", -50.0, pd.Series({"2026-01": -100.0, "2026-02": -100.0}))
+        self.assertAlmostEqual(metric["baseline"], -100.0)
+        # -50 is ABOVE -100 (less negative), so the delta must be positive.
+        self.assertGreater(metric["delta_pct"], 0)
+
+    def test_absent_history_yields_no_baseline_rather_than_a_fake_one(self) -> None:
+        metric = _build_metric("x", 42.0, pd.Series(dtype=float))
+        self.assertIsNone(metric["baseline"])
+        self.assertIsNone(metric["delta_pct"])
+        self.assertEqual(metric["sparkline"], [])
+
+    def test_zero_baseline_does_not_divide(self) -> None:
+        metric = _build_metric("x", 10.0, pd.Series({"2026-01": 0.0}))
+        self.assertIsNone(metric["delta_pct"])
+
+    def test_savings_rate_baseline_skips_no_income_months(self) -> None:
+        df = _frame(
+            [
+                _tx("2026-01-02", 1000.0, _INCOME, transaction_hash="i1"),
+                _tx("2026-01-03", 500.0, _EXPENSE, transaction_hash="e1"),
+                _tx("2026-01-28", 1.0, _EXPENSE, transaction_hash="z1"),
+                # February: spending, no income. Must not drag the baseline to -infinity.
+                _tx("2026-02-01", 300.0, _EXPENSE, transaction_hash="e2"),
+                _tx("2026-02-28", 1.0, _EXPENSE, transaction_hash="z2"),
+            ]
+        )
+        metric = build_overview(df, pd.DataFrame([]))["metrics"]["savings_rate"]
+        self.assertIsNotNone(metric["baseline"])
+        self.assertGreater(metric["baseline"], -1.0)
 
 
 class EmptyFrameTests(unittest.TestCase):

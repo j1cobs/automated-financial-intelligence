@@ -14,6 +14,9 @@ import {
 } from 'recharts';
 import type { TooltipContentProps } from 'recharts';
 import { useCashFlow } from '../lib/queries';
+import { useFilters } from '../lib/FilterContext';
+import { MetricInfoBadge } from './MetricTile';
+import { strings } from '../lib/strings';
 import type {
   RollingSpendItem,
   CashFlowSeriesItem,
@@ -194,6 +197,7 @@ function StatTile({
   format,
   tone,
   sign,
+  metricKey,
 }: {
   label: string;
   value: number;
@@ -201,6 +205,10 @@ function StatTile({
   tone: Tone;
   /** For `pos-neg`, the value whose sign decides the colour (usually `value` itself). */
   sign?: number;
+  /** Optional metricInfo key (Fix 13) -- renders the hover/tap tooltip badge.
+   *  Not every tile here has a registry entry (`income`/`expenses`/`net_flow`
+   *  are period totals, not one of the `avg_*` metrics `metricInfo.ts` covers). */
+  metricKey?: string;
 }) {
   const formatted =
     format === 'currency'
@@ -218,7 +226,10 @@ function StatTile({
 
   return (
     <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-      <p className="text-xs sm:text-sm font-medium text-ink-secondary">{label}</p>
+      <div className="flex items-start justify-between gap-1">
+        <p className="text-xs sm:text-sm font-medium text-ink-secondary">{label}</p>
+        {metricKey && <MetricInfoBadge metricKey={metricKey} />}
+      </div>
       <p className={`mt-1 sm:mt-2 text-lg sm:text-2xl font-bold tabular-nums ${valueClass}`}>{formatted}</p>
     </div>
   );
@@ -287,7 +298,19 @@ function FlowBarChart({
  */
 export function CashFlowTab() {
   const { data, isLoading, error } = useCashFlow();
+  const { filters, patchFilters } = useFilters();
   const themeEpoch = useChartTheme();
+
+  // Cross-filtering (Fix 14): clicking a category segment adds it to the
+  // active filters via the shared FilterContext. `OTHER_LABEL` is a
+  // synthetic aggregate (categories past the 8 categorical slots), not a
+  // real category, so it is never filterable.
+  function addCategoryFilter(category: string) {
+    if (category === OTHER_LABEL) return;
+    const current = filters.categories ?? [];
+    if (current.includes(category)) return;
+    patchFilters({ categories: [...current, category] });
+  }
 
   if (isLoading) {
     return (
@@ -342,9 +365,22 @@ export function CashFlowTab() {
           format="percent"
           tone="pos-neg"
           sign={data.net_flow}
+          metricKey="savings_rate"
         />
-        <StatTile label="Transfers" value={data.transfer_count} format="number" tone="neutral" />
-        <StatTile label="Flagged" value={data.flagged_count} format="number" tone="warn" />
+        <StatTile
+          label="Transfers"
+          value={data.transfer_count}
+          format="number"
+          tone="neutral"
+          metricKey="transfer_count"
+        />
+        <StatTile
+          label="Flagged"
+          value={data.flagged_count}
+          format="number"
+          tone="warn"
+          metricKey="flagged_count"
+        />
       </div>
       <p className="text-xs text-ink-muted">
         Inter-account transfers are excluded from income and expense totals.
@@ -442,9 +478,10 @@ export function CashFlowTab() {
       {/* Monthly expense breakdown by category */}
       {categoryRows.length > 0 && (
         <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-          <h3 className="mb-4 text-sm sm:text-base font-semibold text-ink">
+          <h3 className="mb-1 text-sm sm:text-base font-semibold text-ink">
             Monthly expense breakdown by category
           </h3>
+          <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>
           <div className="h-56 sm:h-80 w-full">
             <ResponsiveContainer key={themeEpoch} width="100%" height="100%">
               <BarChart data={categoryRows} margin={{ ...CHART_MARGIN.default }}>
@@ -465,6 +502,8 @@ export function CashFlowTab() {
                       maxBarSize={BAR_MAX_SIZE}
                       radius={index === categories.length - 1 ? BAR_RADIUS : STACK_SEGMENT_RADIUS}
                       label={directLabelProps(index, fill)}
+                      cursor={category === OTHER_LABEL ? 'default' : 'pointer'}
+                      onClick={() => addCategoryFilter(category)}
                       {...surfaceGapProps()}
                     />
                   );

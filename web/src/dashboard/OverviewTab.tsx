@@ -1,8 +1,16 @@
 import { useState, type ReactNode } from 'react';
 import { useOverview } from '../lib/queries';
 import { useSetCreditLimit } from '../lib/mutations';
+import { useFilters } from '../lib/FilterContext';
 import type { PieLabelRenderProps, TooltipContentProps } from 'recharts';
-import type { CreditUtilizationItem, MonthOverMonthItem, OwnerBalanceItem } from '../lib/types';
+import type {
+  CreditUtilizationItem,
+  MonthOverMonthItem,
+  OwnerBalanceItem,
+  TopCategoryItem,
+} from '../lib/types';
+import { MetricTile, MetricInfoBadge } from './MetricTile';
+import { strings } from '../lib/strings';
 import {
   LineChart,
   Line,
@@ -70,45 +78,34 @@ function OwnerBalancesTooltip({ active, payload }: Partial<TooltipContentProps<n
   );
 }
 
-function StatTile({
-  label,
-  value,
-  format = 'currency',
-  sublabel,
-}: {
-  label: string;
-  value: number;
-  format?: 'currency' | 'percent' | 'number';
-  /** Small caption under the value — used to state the window a figure covers. */
-  sublabel?: string;
-}) {
-  let formatted: string;
-  if (format === 'currency') {
-    formatted = formatCurrency(value);
-  } else if (format === 'percent') {
-    formatted = formatPercent(value);
-  } else {
-    formatted = value.toLocaleString();
-  }
-
-  return (
-    <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-      <p className="text-xs sm:text-sm font-medium text-ink-secondary">{label}</p>
-      <p className="mt-2 text-xl sm:text-2xl font-bold text-ink">{formatted}</p>
-      {sublabel && <p className="mt-1 text-xs text-ink-muted">{sublabel}</p>}
-    </div>
-  );
-}
-
 /**
  * Card wrapper matching the chart cards below — used for non-chart content
  * (credit utilisation, warnings, the emergency-fund meter) so the page reads
  * as one system.
  */
-function Card({ title, caption, children }: { title: string; caption?: string; children: ReactNode }) {
+function Card({
+  title,
+  caption,
+  metricKey,
+  children,
+}: {
+  title: string;
+  caption?: string;
+  /** Optional metricInfo key -- renders the Fix 13 tooltip badge beside the title. */
+  metricKey?: string;
+  children: ReactNode;
+}) {
   return (
-    <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
-      <h3 className="text-base sm:text-lg font-semibold text-ink">{title}</h3>
+    <div className="relative rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+      {/* Absolutely positioned, not a flex row beside the title -- keeps the
+          title a direct child of this container so `heading.closest('div')`
+          (used throughout this file's tests) still reaches the whole card. */}
+      {metricKey && (
+        <div className="absolute right-3 top-3 sm:right-6 sm:top-6">
+          <MetricInfoBadge metricKey={metricKey} />
+        </div>
+      )}
+      <h3 className="pr-6 text-base sm:text-lg font-semibold text-ink">{title}</h3>
       {caption && <p className="mt-1 text-xs text-ink-muted">{caption}</p>}
       <div className="mt-4">{children}</div>
     </div>
@@ -270,8 +267,19 @@ function buildMonthOverMonthRows(
 
 export function OverviewTab() {
   const { data, isLoading, error } = useOverview();
+  const { filters, patchFilters } = useFilters();
   // Re-render charts (their colours are resolved from CSS vars in JS) when the theme flips.
   useChartTheme();
+
+  // Cross-filtering (Fix 14): clicking a category bar adds it to the active
+  // filters via the shared FilterContext -- no separate filter mechanism.
+  // Idempotent: clicking an already-active category is a no-op, not a toggle
+  // (removal is the FilterBar chip's job).
+  function addCategoryFilter(category: string) {
+    const current = filters.categories ?? [];
+    if (current.includes(category)) return;
+    patchFilters({ categories: [...current, category] });
+  }
 
   if (isLoading) {
     return (
@@ -316,12 +324,19 @@ export function OverviewTab() {
 
   return (
     <div className="space-y-6">
-      {/* KPI Tiles */}
+      {/* KPI Tiles -- MetricTile (Fix 12/13): value + baseline comparison +
+          sparkline where the API provides it, plus a hover/tap tooltip for
+          every metric from `metricInfo.ts`. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Net Worth" value={nw.net_worth} />
-        <StatTile label="Total Assets" value={nw.total_assets} />
-        <StatTile label="Total Liabilities" value={nw.total_liabilities} />
-        <StatTile label="Savings Rate" value={ov.savings_rate} format="percent" />
+        <MetricTile metricKey="net_worth" value={nw.net_worth} />
+        <MetricTile metricKey="total_assets" value={nw.total_assets} />
+        <MetricTile metricKey="total_liabilities" value={nw.total_liabilities} />
+        <MetricTile
+          metricKey="savings_rate"
+          value={ov.savings_rate}
+          format="percent"
+          metric={ov.metrics.savings_rate}
+        />
       </div>
 
       {/* Duplicate-account warning — mirrors app/dashboard.py:537-543 */}
@@ -336,9 +351,24 @@ export function OverviewTab() {
 
       {/* Income and Expenses Row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatTile label="Monthly Income" value={ov.avg_monthly_income} sublabel={monthlyWindow} />
-        <StatTile label="Monthly Expenses" value={ov.avg_monthly_expense} sublabel={monthlyWindow} />
-        <StatTile label="Net Monthly Flow" value={ov.avg_monthly_net} sublabel={monthlyWindow} />
+        <MetricTile
+          metricKey="avg_monthly_income"
+          value={ov.avg_monthly_income}
+          sublabel={monthlyWindow}
+          metric={ov.metrics.avg_monthly_income}
+        />
+        <MetricTile
+          metricKey="avg_monthly_expense"
+          value={ov.avg_monthly_expense}
+          sublabel={monthlyWindow}
+          metric={ov.metrics.avg_monthly_expense}
+        />
+        <MetricTile
+          metricKey="avg_monthly_net"
+          value={ov.avg_monthly_net}
+          sublabel={monthlyWindow}
+          metric={ov.metrics.avg_monthly_net}
+        />
       </div>
 
       {/* Savings Rate Trend Chart */}
@@ -477,7 +507,8 @@ export function OverviewTab() {
       <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
         {ov?.top_categories && ov.top_categories.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
+            <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
+            <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>
             <ResponsiveContainer
               width="100%"
               height={Math.max(250, ov.top_categories.length * 32)}
@@ -494,6 +525,8 @@ export function OverviewTab() {
                   name="Amount"
                   maxBarSize={BAR_MAX_SIZE}
                   radius={BAR_RADIUS_HORIZONTAL}
+                  cursor="pointer"
+                  onClick={(entry) => addCategoryFilter((entry.payload as TopCategoryItem).category)}
                 />
               </BarChart>
             </ResponsiveContainer>
@@ -537,7 +570,11 @@ export function OverviewTab() {
       {/* Emergency fund progress + Income sources — app/dashboard.py:914-959 */}
       <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
         {ov.emergency_fund_months !== null && (
-          <Card title="Emergency Fund" caption="Liquid savings ÷ average monthly expenses.">
+          <Card
+            title="Emergency Fund"
+            caption="Liquid savings ÷ average monthly expenses."
+            metricKey="emergency_fund_months"
+          >
             <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
             <div className="mt-3">
               <Meter pct={ov.emergency_fund_months / 6} tone={emergencyFundTone(ov.emergency_fund_months)} />
@@ -574,9 +611,13 @@ export function OverviewTab() {
 
       {/* Additional Metrics */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <StatTile label="Flagged Transactions" value={ov.flagged_count} format="number" />
-        {ov.avg_weekly_expense > 0 && <StatTile label="Weekly Expenses" value={ov.avg_weekly_expense} />}
-        {ov.avg_weekly_income > 0 && <StatTile label="Weekly Income" value={ov.avg_weekly_income} />}
+        <MetricTile metricKey="flagged_count" value={ov.flagged_count} format="number" />
+        {ov.avg_weekly_expense > 0 && (
+          <MetricTile metricKey="avg_weekly_expense" value={ov.avg_weekly_expense} />
+        )}
+        {ov.avg_weekly_income > 0 && (
+          <MetricTile metricKey="avg_weekly_income" value={ov.avg_weekly_income} />
+        )}
       </div>
 
       {/* Sync Health Warning */}

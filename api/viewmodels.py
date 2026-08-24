@@ -133,6 +133,53 @@ def _monthly_series(real: pd.DataFrame, tx_type: str, months: set[str]) -> pd.Se
     return subset.groupby("month")["adjusted_amount"].sum()
 
 
+SPARKLINE_MONTHS = 12
+
+
+def _build_metric(key: str, value: float, monthly: pd.Series) -> dict[str, Any]:
+    """Pair a headline figure with the baseline that makes it legible.
+
+    `value` is the figure for the selected period; `monthly` is the same quantity per
+    complete month across ALL history. A number on its own ($3,240 of expenses) answers
+    nothing — the question is always "is that normal for me?", so every headline metric
+    ships with the trailing average it should be read against, the gap between them, and
+    a short series for shape.
+
+    `delta_pct` divides by `abs(baseline)` so the sign means "above/below", not
+    "above/below in the direction the baseline happened to point" — net flow is routinely
+    negative and a naive divide would invert the comparison exactly when it matters.
+    Whether up is *good* is not decided here: that is polarity, and it lives in
+    `web/src/lib/polarity.ts` so the UI owns presentation.
+    """
+    ordered = monthly.sort_index()
+    baseline = float(ordered.mean()) if not ordered.empty else None
+    delta_pct = None
+    if baseline is not None and baseline != 0:
+        delta_pct = (value - baseline) / abs(baseline)
+    return {
+        "key": key,
+        "value": float(value),
+        "baseline": baseline,
+        "delta_pct": delta_pct,
+        "baseline_months": int(len(ordered)),
+        "sparkline": [float(v) for v in ordered.tail(SPARKLINE_MONTHS).tolist()],
+    }
+
+
+def _monthly_savings_rates(real: pd.DataFrame, months: set[str]) -> pd.Series:
+    """Savings rate per complete month, skipping months with no meaningful income —
+    same floor the trend chart uses, for the same reason (see Fix 2)."""
+    income = _monthly_series(real, "income", months)
+    expense = _monthly_series(real, "expense", months).abs()
+    rates = {}
+    for month_key in income.index:
+        month_income = float(income.get(month_key, 0.0))
+        if month_income < MIN_MONTHLY_INCOME_FOR_RATE:
+            continue
+        rates[month_key] = (month_income - float(expense.get(month_key, 0.0))) / month_income
+    return pd.Series(rates, dtype=float)
+
+
 def build_net_worth(
     acct_df: pd.DataFrame, tx_df: pd.DataFrame | None = None, lang: str = "en"
 ) -> dict[str, Any]:
@@ -305,6 +352,16 @@ def build_overview(
         "avg_monthly_income": 0.0,
         "avg_monthly_net": 0.0,
         "complete_months": 0,
+        # Same four keys as the populated path, so the UI never branches on presence.
+        "metrics": {
+            key: _build_metric(key, 0.0, pd.Series(dtype=float))
+            for key in (
+                "avg_monthly_income",
+                "avg_monthly_expense",
+                "avg_monthly_net",
+                "savings_rate",
+            )
+        },
         "top_categories": [],
         "month_over_month": [],
         "emergency_fund_months": None,
@@ -336,6 +393,22 @@ def build_overview(
     # The tile beside these two used the ALL-TIME net_flow, so it was larger than its
     # neighbours by however many months of history existed (Fix 3a).
     avg_monthly_net = avg_monthly_income - avg_monthly_expense
+
+    # Baselines come from ALL history, not the selected period — comparing the period
+    # against itself would always report a delta of zero.
+    all_time_months = complete_month_keys(all_time_df)
+    all_time_real = all_time_df[all_time_df["tx_type"] != "transfer"]
+    at_income = _monthly_series(all_time_real, "income", all_time_months)
+    at_expense = _monthly_series(all_time_real, "expense", all_time_months).abs()
+    at_net = at_income.subtract(at_expense, fill_value=0.0)
+    metrics = {
+        "avg_monthly_income": _build_metric("avg_monthly_income", avg_monthly_income, at_income),
+        "avg_monthly_expense": _build_metric("avg_monthly_expense", avg_monthly_expense, at_expense),
+        "avg_monthly_net": _build_metric("avg_monthly_net", avg_monthly_net, at_net),
+        "savings_rate": _build_metric(
+            "savings_rate", savings_rate, _monthly_savings_rates(all_time_real, all_time_months)
+        ),
+    }
 
     max_date = all_time_df["date"].max()
     bounded_all_time = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=12)]
@@ -375,10 +448,8 @@ def build_overview(
     # Coverage is a property of your life, not of the window you happen to be looking at,
     # so this averages over all history rather than the selected period.
     emergency_fund_months = None
-    all_time_real = all_time_df[all_time_df["tx_type"] != "transfer"]
-    all_time_expenses = _monthly_series(all_time_real, "expense", complete_month_keys(all_time_df))
-    if not all_time_expenses.empty:
-        avg_monthly_expenses = float(all_time_expenses.abs().mean())
+    if not at_expense.empty:
+        avg_monthly_expenses = float(at_expense.mean())
         if avg_monthly_expenses > 0:
             emergency_fund_months = float(liquid_assets / avg_monthly_expenses)
 
@@ -430,6 +501,7 @@ def build_overview(
         "avg_monthly_income": avg_monthly_income,
         "avg_monthly_net": avg_monthly_net,
         "complete_months": len(months),
+        "metrics": metrics,
         "top_categories": top_categories,
         "month_over_month": month_over_month,
         "emergency_fund_months": emergency_fund_months,

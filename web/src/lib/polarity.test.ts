@@ -164,3 +164,23 @@ describe('METRIC_POLARITY table', () => {
     }
   });
 });
+
+describe('every metric key the API actually emits has a polarity', () => {
+  // These are the exact field names in `api/routers/data.py`'s view models. A key that
+  // does not match falls back to 'neutral', which renders a grey badge on a metric with
+  // an obvious direction -- a silent presentation bug, not an error.
+  it.each([
+    ['net_worth', 'normal'],
+    ['total_assets', 'normal'],
+    ['total_liabilities', 'inverse'],
+    ['savings_rate', 'normal'],
+    ['avg_monthly_income', 'normal'],
+    ['avg_monthly_expense', 'inverse'],
+    ['avg_monthly_net', 'normal'],
+    ['avg_weekly_income', 'normal'],
+    ['avg_weekly_expense', 'inverse'],
+    ['emergency_fund_months', 'normal'],
+  ])('%s is %s', (key, expected) => {
+    expect(polarityOf(key)).toBe(expected);
+  });
+});

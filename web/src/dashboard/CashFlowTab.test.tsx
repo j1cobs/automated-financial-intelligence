@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { CashFlowTab } from './CashFlowTab';
+import { FilterProvider } from '../lib/FilterContext';
 import * as queries from '../lib/queries';
 import type { CashFlowResponse } from '../lib/types';
 
@@ -34,7 +35,9 @@ function renderCashFlowTab() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <CashFlowTab />
+      <FilterProvider>
+        <CashFlowTab />
+      </FilterProvider>
     </QueryClientProvider>,
   );
 }
@@ -141,6 +144,13 @@ const baseMockData: CashFlowResponse = {
 describe('CashFlowTab', () => {
   beforeEach(() => {
     mockUseCashFlow.mockReset();
+  });
+
+  // FilterProvider syncs filter state to the URL via replaceState; reset it
+  // so one test's click-to-filter doesn't leak into the next test's initial
+  // filter state via a shared jsdom `window`.
+  afterEach(() => {
+    window.history.replaceState(null, '', window.location.pathname);
   });
 
   it('renders loading state when data is loading', () => {
@@ -393,5 +403,29 @@ describe('CashFlowTab', () => {
 
     expect(screen.queryByText('Other')).not.toBeInTheDocument();
     expect(screen.getByText('Shopping')).toBeInTheDocument();
+  });
+
+  it('patches the category filter in the URL when a category bar is clicked (Fix 14)', () => {
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+    const { container } = renderCashFlowTab();
+
+    const heading = screen.getByText('Monthly expense breakdown by category');
+    const card = heading.closest('.rounded-lg') as HTMLElement;
+    const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
+    expect(firstBar).toBeTruthy();
+    fireEvent.click(firstBar!);
+
+    expect(new URLSearchParams(window.location.search).getAll('categories')).toContain('Groceries');
+    // Sanity: the click landed inside this render, not a stray leftover DOM node.
+    expect(container).toContainElement(card);
+  });
+
+  it('renders a discoverability hint above the category chart', () => {
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+    renderCashFlowTab();
+
+    expect(screen.getByText('Click a bar to add that category to your filters.')).toBeInTheDocument();
   });
 });
