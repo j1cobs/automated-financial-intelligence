@@ -63,8 +63,10 @@ describe('FilterBar', () => {
     const user = userEvent.setup();
     renderFilterBar();
 
-    const ownerSelect = screen.getByLabelText('Owner') as HTMLSelectElement;
-    await user.selectOptions(ownerSelect, ['Alice', 'Bob']);
+    await user.click(screen.getByLabelText('Owner'));
+    const ownerDialog = screen.getByRole('dialog', { name: 'Owner' });
+    await user.click(within(ownerDialog).getByRole('checkbox', { name: 'Alice' }));
+    await user.click(within(ownerDialog).getByRole('checkbox', { name: 'Bob' }));
 
     expect(screen.getByRole('button', { name: /remove filter: alice/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /remove filter: bob/i })).toBeInTheDocument();
@@ -82,8 +84,10 @@ describe('FilterBar', () => {
 
     const periodSelect = screen.getByLabelText('Period') as HTMLSelectElement;
     await user.selectOptions(periodSelect, 'last_30_days');
-    const ownerSelect = screen.getByLabelText('Owner') as HTMLSelectElement;
-    await user.selectOptions(ownerSelect, ['Alice']);
+    await user.click(screen.getByLabelText('Owner'));
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Owner' })).getByRole('checkbox', { name: 'Alice' }),
+    );
 
     expect(screen.getByText('Period: Last 30 days')).toBeInTheDocument();
 

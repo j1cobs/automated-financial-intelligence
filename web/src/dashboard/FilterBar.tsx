@@ -16,6 +16,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'r
 import { useFilters } from '../lib/FilterContext';
 import { useFilterOptions } from '../lib/queries';
 import { activeFilterChips, countActiveFilters, PERIOD_LABELS, type PeriodPreset } from '../lib/filters';
+import { MultiSelectPopover } from './MultiSelectPopover';
 import type { FilterOptions } from '../lib/types';
 
 const PERIOD_OPTIONS: PeriodPreset[] = [
@@ -29,10 +30,6 @@ const PERIOD_OPTIONS: PeriodPreset[] = [
 ];
 
 const SEARCH_DEBOUNCE_MS = 300;
-
-function selectedValues(select: HTMLSelectElement): string[] {
-  return Array.from(select.selectedOptions).map((option) => option.value);
-}
 
 const selectClass =
   'min-h-9 rounded-md border border-hairline bg-surface-1 px-2 py-1 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-cat-1';
@@ -123,50 +120,24 @@ export function FilterBar() {
           </select>
         </div>
 
-        <div className={fieldClass}>
-          <label htmlFor={`${idPrefix}-owners`} className={labelClass}>
-            Owner
-          </label>
-          <select
-            id={`${idPrefix}-owners`}
-            multiple
-            value={filters.owners ?? []}
-            onChange={(event) => {
-              const values = selectedValues(event.target);
-              patchFilters({ owners: values.length > 0 ? values : null });
-            }}
-            className={`${selectClass} min-w-32`}
-          >
-            {(options?.owners ?? []).map((owner) => (
-              <option key={owner} value={owner}>
-                {owner}
-              </option>
-            ))}
-          </select>
-        </div>
+        <MultiSelectPopover
+          id={`${idPrefix}-owners`}
+          label="Owner"
+          options={(options?.owners ?? []).map((owner) => ({ value: owner, label: owner }))}
+          selected={filters.owners}
+          onChange={(values) => patchFilters({ owners: values })}
+          className="min-w-32"
+        />
 
         {filters.period === 'custom' && (
-          <div className={fieldClass}>
-            <label htmlFor={`${idPrefix}-months`} className={labelClass}>
-              Months
-            </label>
-            <select
-              id={`${idPrefix}-months`}
-              multiple
-              value={filters.months ?? []}
-              onChange={(event) => {
-                const values = selectedValues(event.target);
-                patchFilters({ months: values.length > 0 ? values : null });
-              }}
-              className={`${selectClass} min-w-40`}
-            >
-              {(options?.months ?? []).map((month) => (
-                <option key={month.key} value={month.key}>
-                  {month.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          <MultiSelectPopover
+            id={`${idPrefix}-months`}
+            label="Months"
+            options={(options?.months ?? []).map((month) => ({ value: month.key, label: month.label }))}
+            selected={filters.months}
+            onChange={(values) => patchFilters({ months: values })}
+            className="min-w-40"
+          />
         )}
       </>
     );
@@ -175,49 +146,21 @@ export function FilterBar() {
   function renderMoreFields(idPrefix: string): ReactNode {
     return (
       <div className="flex flex-col gap-4">
-        <div className={fieldClass}>
-          <label htmlFor={`${idPrefix}-categories`} className={labelClass}>
-            Category
-          </label>
-          <select
-            id={`${idPrefix}-categories`}
-            multiple
-            value={filters.categories ?? []}
-            onChange={(event) => {
-              const values = selectedValues(event.target);
-              patchFilters({ categories: values.length > 0 ? values : null });
-            }}
-            className={`${selectClass} min-h-24`}
-          >
-            {(options?.categories ?? []).map((category) => (
-              <option key={category} value={category}>
-                {category}
-              </option>
-            ))}
-          </select>
-        </div>
+        <MultiSelectPopover
+          id={`${idPrefix}-categories`}
+          label="Category"
+          options={(options?.categories ?? []).map((category) => ({ value: category, label: category }))}
+          selected={filters.categories}
+          onChange={(values) => patchFilters({ categories: values })}
+        />
 
-        <div className={fieldClass}>
-          <label htmlFor={`${idPrefix}-accounts`} className={labelClass}>
-            Account
-          </label>
-          <select
-            id={`${idPrefix}-accounts`}
-            multiple
-            value={filters.accounts ?? []}
-            onChange={(event) => {
-              const values = selectedValues(event.target);
-              patchFilters({ accounts: values.length > 0 ? values : null });
-            }}
-            className={`${selectClass} min-h-24`}
-          >
-            {(options?.accounts ?? []).map((account) => (
-              <option key={account} value={account}>
-                {account}
-              </option>
-            ))}
-          </select>
-        </div>
+        <MultiSelectPopover
+          id={`${idPrefix}-accounts`}
+          label="Account"
+          options={(options?.accounts ?? []).map((account) => ({ value: account, label: account }))}
+          selected={filters.accounts}
+          onChange={(values) => patchFilters({ accounts: values })}
+        />
 
         <div className="grid grid-cols-2 gap-2">
           <div className={fieldClass}>
