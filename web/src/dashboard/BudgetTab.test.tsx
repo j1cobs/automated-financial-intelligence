@@ -1,29 +1,48 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import React from 'react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
 import { BudgetTab } from './BudgetTab';
-import type { BudgetResponse } from '../lib/types';
+import type { BudgetResponse, CategoriesResponse, CashFlowResponse } from '../lib/types';
 
 vi.mock('../lib/queries', () => ({
   useBudget: vi.fn(),
+  useCategories: vi.fn(),
+  useCashFlow: vi.fn(),
 }));
 
 vi.mock('../lib/mutations', () => ({
   useUpsertBudget: vi.fn(),
 }));
 
-const { useBudget } = await import('../lib/queries');
+// Recharts' ResponsiveContainer measures its parent via ResizeObserver, which
+// jsdom doesn't implement, so charts never receive a nonzero size and render
+// no children. Give the wrapped sparkline an explicit fixed size instead so
+// chart internals actually render in tests.
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => React.cloneElement(children, { width: 200, height: 24 }),
+  };
+});
+
+const { useBudget, useCategories, useCashFlow } = await import('../lib/queries');
 const { useUpsertBudget } = await import('../lib/mutations');
 
-type MockUseQueryResult = Partial<UseQueryResult<BudgetResponse, Error>>;
+type MockUseQueryResult<T> = Partial<UseQueryResult<T, Error>>;
 type MockUseMutationResult = Partial<
   UseMutationResult<void, Error, { category: string; monthlyLimit: number }>
 >;
 
-const createMockQueryResult = (overrides: MockUseQueryResult): UseQueryResult<BudgetResponse, Error> =>
-  ({
+function createMockQueryResult<T>(overrides: MockUseQueryResult<T>): UseQueryResult<T, Error> {
+  return {
     data: undefined,
     isPending: false,
     error: null,
@@ -38,7 +57,8 @@ const createMockQueryResult = (overrides: MockUseQueryResult): UseQueryResult<Bu
     dataUpdatedAt: 0,
     errorUpdatedAt: 0,
     ...overrides,
-  }) as unknown as UseQueryResult<BudgetResponse, Error>;
+  } as unknown as UseQueryResult<T, Error>;
+}
 
 const createMockMutationResult = (
   overrides: MockUseMutationResult,
@@ -93,6 +113,12 @@ const mockBudgetData: BudgetResponse = {
   ],
 };
 
+/** Rows render alphabetically (matching Streamlit's `sorted(...)`), not in API
+ * response order, so tests target a category's own row rather than an index. */
+function rowFor(category: string): HTMLElement {
+  return screen.getByText(category).closest('div.border-l-4') as HTMLElement;
+}
+
 function renderWithQueryClient(component: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -100,15 +126,42 @@ function renderWithQueryClient(component: React.ReactElement) {
   return render(<QueryClientProvider client={queryClient}>{component}</QueryClientProvider>);
 }
 
+/** Sets up useBudget/useUpsertBudget for a "happy path" render; categories and
+ * cash-flow default to empty unless the test overrides them separately. */
+function mockHappyPath(budget: BudgetResponse = mockBudgetData) {
+  vi.mocked(useBudget).mockReturnValue(
+    createMockQueryResult<BudgetResponse>({
+      data: budget,
+      isPending: false,
+      status: 'success',
+      isSuccess: true,
+      isFetched: true,
+      dataUpdatedAt: Date.now(),
+    }),
+  );
+  vi.mocked(useUpsertBudget).mockReturnValue(createMockMutationResult({}));
+}
+
 describe('BudgetTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Defaults: no extra canonical categories, no trend history. Individual
+    // tests override these when they need to.
+    vi.mocked(useCategories).mockReturnValue(
+      createMockQueryResult<CategoriesResponse>({
+        data: { categories: [] },
+        isSuccess: true,
+        isFetched: true,
+      }),
+    );
+    vi.mocked(useCashFlow).mockReturnValue(
+      createMockQueryResult<CashFlowResponse>({ data: undefined, isSuccess: false }),
+    );
   });
 
   it('renders loading state', () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
+    vi.mocked(useBudget).mockReturnValue(
+      createMockQueryResult<BudgetResponse>({
         isPending: true,
         status: 'pending',
         fetchStatus: 'fetching',
@@ -123,9 +176,8 @@ describe('BudgetTab', () => {
   });
 
   it('renders error state', () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
+    vi.mocked(useBudget).mockReturnValue(
+      createMockQueryResult<BudgetResponse>({
         isPending: false,
         error: new Error('Failed to fetch'),
         status: 'error',
@@ -142,21 +194,7 @@ describe('BudgetTab', () => {
   });
 
   it('renders budget items with spend and limit information', () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    const mockUpsertBudget = vi.mocked(useUpsertBudget);
-
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
-        data: mockBudgetData,
-        isPending: false,
-        status: 'success',
-        isSuccess: true,
-        isFetched: true,
-        dataUpdatedAt: Date.now(),
-      }),
-    );
-
-    mockUpsertBudget.mockReturnValue(createMockMutationResult({}));
+    mockHappyPath();
 
     renderWithQueryClient(<BudgetTab />);
 
@@ -166,67 +204,105 @@ describe('BudgetTab', () => {
     expect(screen.getByText('Entertainment')).toBeInTheDocument();
 
     // Check that spent and limit are displayed for Groceries
-    const groceriesContainer = screen.getByText('Groceries').closest('div');
+    const groceriesContainer = screen.getByText('Groceries').closest('div.min-w-0');
     expect(groceriesContainer).toHaveTextContent('$250.00');
     expect(groceriesContainer).toHaveTextContent('$400.00');
 
     // Check progress percentage (62.5% rounds to 63%)
-    expect(screen.getByText('63% of limit')).toBeInTheDocument();
+    expect(screen.getByText('— 63% of limit')).toBeInTheDocument();
     // 166.7% rounds to 167%
-    expect(screen.getByText('167% of limit')).toBeInTheDocument();
+    expect(screen.getByText('— 167% of limit')).toBeInTheDocument();
+
+    // Entertainment has spend but no limit -- Streamlit's "no budget set" path.
+    const entertainmentContainer = screen.getByText('Entertainment').closest('div.min-w-0');
+    expect(entertainmentContainer).toHaveTextContent('$50.00');
+    expect(entertainmentContainer).toHaveTextContent('no budget set');
   });
 
-  it('renders items with over-budget styling', () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    const mockUpsertBudget = vi.mocked(useUpsertBudget);
-
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
-        data: mockBudgetData,
-        isPending: false,
-        status: 'success',
-        isSuccess: true,
-        isFetched: true,
-        dataUpdatedAt: Date.now(),
-      }),
-    );
-
-    mockUpsertBudget.mockReturnValue(createMockMutationResult({}));
+  it('shows the projection only for the current-month period', () => {
+    const historical: BudgetResponse = {
+      month: '2026-06',
+      items: [
+        {
+          category: 'Travel',
+          spent: 900,
+          limit: 1000,
+          pct: 0.9,
+          is_over_budget: false,
+          projected_eom: 1200, // API happens to compute this, but it must not render
+          is_current_month: false,
+        },
+      ],
+    };
+    mockHappyPath(historical);
 
     renderWithQueryClient(<BudgetTab />);
 
-    // Find the Dining Out row (which is over budget)
-    const diningOutElement = screen.getByText('Dining Out');
-    // Navigate up to find the budget item container with the red styling
-    let container = diningOutElement.closest('div') as HTMLDivElement | null;
-    while (container && !container.className.includes('border')) {
-      container = container.parentElement as HTMLDivElement | null;
-    }
-    expect(container).toHaveClass('bg-red-50');
-    expect(container).toHaveClass('border-red-200');
+    expect(screen.getByText('Travel')).toBeInTheDocument();
+    expect(screen.queryByText(/Projected EOM/)).not.toBeInTheDocument();
+  });
+
+  it('shows the projection for a current-month category', () => {
+    mockHappyPath();
+
+    renderWithQueryClient(<BudgetTab />);
+
+    const groceriesContainer = screen.getByText('Groceries').closest('div.min-w-0');
+    expect(groceriesContainer).toHaveTextContent('Projected EOM: $350.00');
+
+    // Entertainment is current-month but has no limit and (per build_budget)
+    // no projected_eom is computed unless is_current_month -- it still is
+    // here, so the projection should show once a limit exists; without one
+    // Streamlit shows "Actual" only for historical periods, so nothing extra
+    // is asserted for Entertainment beyond the no-budget-set text above.
+  });
+
+  it('renders over-budget rows distinguished by more than colour alone', () => {
+    mockHappyPath();
+
+    renderWithQueryClient(<BudgetTab />);
+
+    // A glyph + text label must accompany the status, not just a colour class.
+    expect(screen.getByText('Over budget')).toBeInTheDocument();
+    expect(screen.getByText('On track')).toBeInTheDocument();
+    expect(screen.getByText('No budget set')).toBeInTheDocument();
+
+    const diningOutRow = screen.getByText('Dining Out').closest('div.border-l-4');
+    expect(diningOutRow).not.toBeNull();
+    expect(diningOutRow).toHaveTextContent('Over budget');
+  });
+
+  it('offers a category with no spend and no existing limit in the editor', async () => {
+    vi.mocked(useCategories).mockReturnValue(
+      createMockQueryResult<CategoriesResponse>({
+        data: { categories: ['Groceries', 'Dining Out', 'Entertainment', 'Subscriptions'] },
+        isSuccess: true,
+        isFetched: true,
+      }),
+    );
+    mockHappyPath();
+
+    renderWithQueryClient(<BudgetTab />);
+
+    // "Subscriptions" has no spend and no budget row at all in the API
+    // response -- it only exists in the canonical category list -- yet it
+    // must still be listed and editable.
+    expect(screen.getByText('Subscriptions')).toBeInTheDocument();
+
+    const subscriptionsRow = rowFor('Subscriptions');
+    expect(within(subscriptionsRow).getByText('No budget set')).toBeInTheDocument();
+    const editButton = within(subscriptionsRow).getByText('Edit');
+    await userEvent.click(editButton);
+
+    expect(within(subscriptionsRow).getByDisplayValue('0')).toBeInTheDocument();
   });
 
   it('opens edit form when Edit button is clicked', async () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    const mockUpsertBudget = vi.mocked(useUpsertBudget);
-
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
-        data: mockBudgetData,
-        isPending: false,
-        status: 'success',
-        isSuccess: true,
-        isFetched: true,
-        dataUpdatedAt: Date.now(),
-      }),
-    );
-
-    mockUpsertBudget.mockReturnValue(createMockMutationResult({}));
+    mockHappyPath();
 
     renderWithQueryClient(<BudgetTab />);
 
-    const editButtons = screen.getAllByText('Edit');
-    await userEvent.click(editButtons[0]);
+    await userEvent.click(within(rowFor('Groceries')).getByText('Edit'));
 
     // Should show the edit form with the current limit
     expect(screen.getByDisplayValue('400')).toBeInTheDocument();
@@ -234,23 +310,10 @@ describe('BudgetTab', () => {
     expect(screen.getByText('Cancel')).toBeInTheDocument();
   });
 
-  it('calls useUpsertBudget mutation when Save is clicked', async () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    const mockUpsertBudget = vi.mocked(useUpsertBudget);
+  it('calls useUpsertBudget mutation with the right category and value when Save is clicked', async () => {
     const mockMutateAsync = vi.fn().mockResolvedValue(undefined);
-
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
-        data: mockBudgetData,
-        isPending: false,
-        status: 'success',
-        isSuccess: true,
-        isFetched: true,
-        dataUpdatedAt: Date.now(),
-      }),
-    );
-
-    mockUpsertBudget.mockReturnValue(
+    mockHappyPath();
+    vi.mocked(useUpsertBudget).mockReturnValue(
       createMockMutationResult({
         mutateAsync: mockMutateAsync,
       }),
@@ -258,8 +321,7 @@ describe('BudgetTab', () => {
 
     renderWithQueryClient(<BudgetTab />);
 
-    const editButtons = screen.getAllByText('Edit');
-    await userEvent.click(editButtons[0]);
+    await userEvent.click(within(rowFor('Groceries')).getByText('Edit'));
 
     const input = screen.getByDisplayValue('400');
     await userEvent.clear(input);
@@ -277,26 +339,11 @@ describe('BudgetTab', () => {
   });
 
   it('closes edit form when Cancel is clicked', async () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    const mockUpsertBudget = vi.mocked(useUpsertBudget);
-
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
-        data: mockBudgetData,
-        isPending: false,
-        status: 'success',
-        isSuccess: true,
-        isFetched: true,
-        dataUpdatedAt: Date.now(),
-      }),
-    );
-
-    mockUpsertBudget.mockReturnValue(createMockMutationResult({}));
+    mockHappyPath();
 
     renderWithQueryClient(<BudgetTab />);
 
-    const editButtons = screen.getAllByText('Edit');
-    await userEvent.click(editButtons[0]);
+    await userEvent.click(within(rowFor('Groceries')).getByText('Edit'));
 
     expect(screen.getByDisplayValue('400')).toBeInTheDocument();
 
@@ -310,25 +357,43 @@ describe('BudgetTab', () => {
     });
   });
 
-  it('renders empty state when no budget items', () => {
-    const mockUseBudget = vi.mocked(useBudget);
-    const mockUpsertBudget = vi.mocked(useUpsertBudget);
-
-    mockUseBudget.mockReturnValue(
-      createMockQueryResult({
-        data: { month: 'August 2026', items: [] },
-        isPending: false,
-        status: 'success',
-        isSuccess: true,
-        isFetched: true,
-        dataUpdatedAt: Date.now(),
-      }),
-    );
-
-    mockUpsertBudget.mockReturnValue(createMockMutationResult({}));
+  it('renders empty state when no budget items and no canonical categories', () => {
+    mockHappyPath({ month: 'August 2026', items: [] });
 
     renderWithQueryClient(<BudgetTab />);
 
     expect(screen.getByText('No budget data available.')).toBeInTheDocument();
+  });
+
+  it('renders a trend sparkline when category_distribution history exists', () => {
+    mockHappyPath();
+    vi.mocked(useCashFlow).mockReturnValue(
+      createMockQueryResult<CashFlowResponse>({
+        data: {
+          income: 0,
+          expenses: 0,
+          net_flow: 0,
+          transfer_count: 0,
+          flagged_count: 0,
+          savings_rate: 0,
+          month_over_month: [],
+          weekly_trend: [],
+          rolling_30d_spend: [],
+          monthly_net_by_owner: [],
+          category_distribution: [
+            { month: '2026-04', category: 'Groceries', amount: 200 },
+            { month: '2026-05', category: 'Groceries', amount: 220 },
+            { month: '2026-06', category: 'Groceries', amount: 240 },
+          ],
+        },
+        isSuccess: true,
+        isFetched: true,
+      }),
+    );
+
+    const { container } = renderWithQueryClient(<BudgetTab />);
+
+    expect(container.querySelector('.recharts-line')).not.toBeNull();
+    expect(screen.queryAllByText('No trend').length).toBeGreaterThan(0); // other rows still lack history
   });
 });

@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { OverviewTab } from './OverviewTab';
 import type { OverviewResponse } from '../lib/types';
-import type { UseQueryResult } from '@tanstack/react-query';
+import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
 
 // Mock the queries module
 vi.mock('../lib/queries', () => ({
   useOverview: vi.fn(),
+}));
+
+// Mock the mutations module — useSetCreditLimit() is the credit-limit editor's
+// only dependency outside props.
+vi.mock('../lib/mutations', () => ({
+  useSetCreditLimit: vi.fn(),
 }));
 
 // Recharts' ResponsiveContainer measures its parent via ResizeObserver, which
@@ -26,8 +32,10 @@ vi.mock('recharts', async (importOriginal) => {
 });
 
 import { useOverview } from '../lib/queries';
+import { useSetCreditLimit } from '../lib/mutations';
 
 const mockedUseOverview = vi.mocked(useOverview);
+const mockedUseSetCreditLimit = vi.mocked(useSetCreditLimit);
 
 const mockOverviewData: OverviewResponse = {
   net_worth: {
@@ -108,8 +116,10 @@ const mockOverviewData: OverviewResponse = {
       { category: 'Entertainment', amount: 400 },
     ],
     month_over_month: [
-      { category: 'Groceries', period: '2026-01', amount: 1100 },
-      { category: 'Groceries', period: '2026-02', amount: 1200 },
+      { category: 'Groceries', period: 'this_month', amount: 1200 },
+      { category: 'Groceries', period: 'last_month', amount: 1100 },
+      { category: 'Utilities', period: 'this_month', amount: 300 },
+      { category: 'Utilities', period: 'last_month', amount: 280 },
     ],
     emergency_fund_months: 4.5,
     income_breakdown: [
@@ -124,9 +134,16 @@ const mockOverviewData: OverviewResponse = {
   },
 };
 
+const mockMutate = vi.fn();
+
 describe('OverviewTab', () => {
   beforeEach(() => {
     mockedUseOverview.mockReset();
+    mockMutate.mockReset();
+    mockedUseSetCreditLimit.mockReturnValue({
+      mutate: mockMutate,
+      isPending: false,
+    } as unknown as UseMutationResult<void, Error, { accountKey: string; limit: number | null }>);
   });
 
   it('renders loading state while data is being fetched', () => {
@@ -342,10 +359,10 @@ describe('OverviewTab', () => {
 
     render(<OverviewTab />);
 
-    expect(screen.getByText('Emergency Fund Months')).toBeInTheDocument();
-    // Check that the numeric value is present
-    const elements = screen.getAllByText(/^4\.5$/);
-    expect(elements.length).toBeGreaterThan(0);
+    // Fix 10: the bare tile became a card with a progress bar toward the
+    // 6-month goal — see "renders an emergency fund progress bar..." below.
+    expect(screen.getByText('Emergency Fund')).toBeInTheDocument();
+    expect(screen.getByText('4.5 months')).toBeInTheDocument();
   });
 
   it('renders flagged transactions count', () => {
@@ -405,5 +422,204 @@ describe('OverviewTab', () => {
 
     expect(screen.getByText('1 account with no activity in 90+ days')).toBeInTheDocument();
     expect(screen.getByText(/Forgotten Savings.*no activity in 120 days/)).toBeInTheDocument();
+  });
+
+  it('renders credit utilization with a progress bar and manual-limit marker', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    const heading = screen.getByText('Credit Utilization');
+    const card = heading.closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    // "Chase Card — Alice" appears twice — once in the utilization row, once
+    // in the collapsible limit editor below it.
+    expect(withinCard.getAllByText(/Chase Card — Alice/).length).toBe(2);
+    expect(withinCard.getByText(/\$2,500 \/ \$10,000 \(25\.0% used\)/)).toBeInTheDocument();
+    const bar = withinCard.getByRole('progressbar');
+    expect(bar).toHaveAttribute('aria-valuenow', '25');
+    // is_manual is false in the fixture row, so no "manually set" marker.
+    expect(withinCard.queryByText(/manually set/)).not.toBeInTheDocument();
+  });
+
+  it('shows the manual-limit marker when is_manual is true', () => {
+    const withManualLimit: OverviewResponse = {
+      ...mockOverviewData,
+      net_worth: {
+        ...mockOverviewData.net_worth,
+        credit_utilization: [
+          {
+            account_key: 'acct-manual',
+            account_name: 'Amex Card',
+            owner_name: 'Bob',
+            current: 500,
+            limit: 5000,
+            pct: 0.1,
+            is_manual: true,
+          },
+        ],
+      },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: withManualLimit,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    expect(screen.getByText(/manually set limit/)).toBeInTheDocument();
+  });
+
+  it('renders "no credit limit set" with no progress bar when limit is null', () => {
+    const noLimit: OverviewResponse = {
+      ...mockOverviewData,
+      net_worth: {
+        ...mockOverviewData.net_worth,
+        credit_utilization: [
+          {
+            account_key: 'acct-nolimit',
+            account_name: 'Store Card',
+            owner_name: 'Alice',
+            current: 340,
+            limit: null,
+            pct: null,
+            is_manual: false,
+          },
+        ],
+      },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: noLimit,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    const heading = screen.getByText('Credit Utilization');
+    const card = heading.closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    expect(withinCard.getByText(/Store Card — Alice — \$340 owed — no credit limit set/)).toBeInTheDocument();
+    // No progress bar for the row itself. (The credit-limit editor below still
+    // has a text input for this card, which is expected.)
+    expect(withinCard.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('does not render the credit section when there are no credit cards', () => {
+    const noCredit: OverviewResponse = {
+      ...mockOverviewData,
+      net_worth: { ...mockOverviewData.net_worth, credit_utilization: [] },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: noCredit,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    expect(screen.queryByText('Credit Utilization')).not.toBeInTheDocument();
+  });
+
+  it('credit limit editor calls the mutation with the right account_key and value', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    const input = screen.getByLabelText('Credit limit for Chase Card');
+    fireEvent.change(input, { target: { value: '5000' } });
+    const saveButtons = screen.getAllByRole('button', { name: 'Save' });
+    fireEvent.click(saveButtons[0]);
+
+    expect(mockMutate).toHaveBeenCalledWith({ accountKey: 'acct-chase', limit: 5000 });
+  });
+
+  it('renders a duplicate-account warning only when forked_accounts is non-empty', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+    const { rerender } = render(<OverviewTab />);
+
+    expect(screen.queryByText('These accounts appear more than once')).not.toBeInTheDocument();
+
+    const withForkedAccounts: OverviewResponse = {
+      ...mockOverviewData,
+      net_worth: { ...mockOverviewData.net_worth, forked_accounts: ['Joint Checking', 'Old Savings'] },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: withForkedAccounts,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+    rerender(<OverviewTab />);
+
+    expect(screen.getByText('These accounts appear more than once')).toBeInTheDocument();
+    expect(screen.getByText('Joint Checking, Old Savings')).toBeInTheDocument();
+  });
+
+  it('renders income sources as a sorted horizontal bar chart', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    expect(screen.getByText('Income Sources')).toBeInTheDocument();
+  });
+
+  it('renders month-over-month by category as a grouped bar chart', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    expect(screen.getByText('Month-over-Month by Category')).toBeInTheDocument();
+  });
+
+  it('renders an emergency fund progress bar with the explanatory caption', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    expect(screen.getByText('Emergency Fund')).toBeInTheDocument();
+    expect(screen.getByText('Liquid savings ÷ average monthly expenses.')).toBeInTheDocument();
+    expect(screen.getByText('4.5 months')).toBeInTheDocument();
+  });
+
+  it('renders the weekly income tile beside weekly expenses', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    render(<OverviewTab />);
+
+    expect(screen.getByText('Weekly Expenses')).toBeInTheDocument();
+    expect(screen.getByText('$1,846')).toBeInTheDocument();
+    expect(screen.getByText('Weekly Income')).toBeInTheDocument();
+    expect(screen.getByText('$3,462')).toBeInTheDocument();
   });
 });

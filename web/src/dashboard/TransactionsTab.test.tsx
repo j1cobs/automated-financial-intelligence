@@ -7,6 +7,20 @@ import {
   type UseQueryResult,
   type UseMutationResult,
 } from '@tanstack/react-query';
+import React from 'react';
+
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => React.cloneElement(children, { width: 800, height: 400 }),
+  };
+});
+
 import { TransactionsTab } from './TransactionsTab';
 import type { LedgerResponse, AnomaliesResponse, CategoriesResponse } from '../lib/types';
 
@@ -131,6 +145,12 @@ function mockMutation<TVariables>(
   } as unknown as UseMutationResult<void, Error, TVariables>;
 }
 
+function setDefaultMutations() {
+  mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+}
+
 describe('TransactionsTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -214,9 +234,7 @@ describe('TransactionsTab', () => {
       mockedUseCategories.mockReturnValue(
         mockQuerySuccess({ categories: ['Groceries', 'Gas', 'Utilities'] }),
       );
-      mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
-      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
-      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      setDefaultMutations();
 
       renderComponent();
 
@@ -224,6 +242,7 @@ describe('TransactionsTab', () => {
       expect(screen.getByText('Gas Station')).toBeInTheDocument();
       expect(screen.getByText('Groceries')).toBeInTheDocument();
       expect(screen.getByText('John Doe')).toBeInTheDocument();
+      expect(screen.getByText('2 transactions')).toBeInTheDocument();
     });
 
     it('renders empty ledger message when no transactions', () => {
@@ -235,33 +254,151 @@ describe('TransactionsTab', () => {
 
       expect(screen.getByText(/no transactions found/i)).toBeInTheDocument();
     });
-  });
 
-  describe('Anomalies rendering', () => {
-    it('renders anomalies table with outlier transactions', () => {
-      const mockAnomaliesData: AnomaliesResponse = {
-        anomalies: [
-          {
-            date: '2024-01-20',
-            account_name: 'Savings',
-            owner_name: 'Jane Doe',
-            description: 'Large Withdrawal',
-            amount: -5000.0,
-            category: 'Withdrawal',
-            outlier_score: 0.95,
-          },
-        ],
-      };
-
+    it('shows the three explanatory captions', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess(mockAnomaliesData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
 
       renderComponent();
 
-      expect(screen.getByText('Large Withdrawal')).toBeInTheDocument();
-      expect(screen.getByText('Jane Doe')).toBeInTheDocument();
-      expect(screen.getByText('0.950')).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /Tick Duplicate to exclude a double-posted transaction from every total and chart\. Flagged rows stay listed here so you can untick them\./i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Edit categories inline — changes persist across pipeline re-runs\./i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /Positive amounts are income or credits\. Negative amounts are expenses or debits\./i,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it('sorts by amount when the Amount header is clicked', async () => {
+      const user = userEvent.setup();
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-small',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Small charge',
+            amount: -10,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          },
+          {
+            hash: 'tx-big',
+            date: '2024-01-14',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Big charge',
+            amount: -500,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      // Default sort is by date descending: "Small charge" (Jan 15) before "Big charge" (Jan 14).
+      let rows = screen.getAllByRole('row').slice(1); // drop header row
+      expect(rows[0]).toHaveTextContent('Small charge');
+      expect(rows[1]).toHaveTextContent('Big charge');
+
+      await user.click(screen.getByRole('button', { name: /sort by amount/i }));
+
+      // First click on a new sort column sorts descending: -10 (Small charge)
+      // before -500 (Big charge).
+      rows = screen.getAllByRole('row').slice(1);
+      expect(rows[0]).toHaveTextContent('Small charge');
+      expect(rows[1]).toHaveTextContent('Big charge');
+
+      await user.click(screen.getByRole('button', { name: /sort by amount/i }));
+
+      // Second click flips to ascending: -500 (Big charge) before -10 (Small charge).
+      rows = screen.getAllByRole('row').slice(1);
+      expect(rows[0]).toHaveTextContent('Big charge');
+      expect(rows[1]).toHaveTextContent('Small charge');
+    });
+
+    it('visually distinguishes duplicate-flagged rows', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-dup',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Duplicate Charge',
+            amount: -25,
+            category: null,
+            is_recurring: false,
+            is_duplicate: true,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      const row = screen.getByText('Duplicate Charge').closest('tr');
+      expect(row).not.toBeNull();
+      expect(row?.className).toMatch(/bg-surface-2/);
+      expect(screen.getByText('Excluded')).toBeInTheDocument();
+    });
+  });
+
+  describe('Anomalies rendering', () => {
+    const mockAnomaliesData: AnomaliesResponse = {
+      anomalies: [
+        {
+          date: '2024-01-20',
+          account_name: 'Savings',
+          owner_name: 'Jane Doe',
+          description: 'Large Withdrawal',
+          amount: -5000.0,
+          category: 'Withdrawal',
+          outlier_score: 0.95,
+        },
+        {
+          date: '2024-01-18',
+          account_name: 'Checking',
+          owner_name: 'Jane Doe',
+          description: 'Odd Refund',
+          amount: 300.0,
+          category: 'Refund',
+          outlier_score: 0.4,
+        },
+      ],
+    };
+
+    it('renders the anomaly scatter plot with a point per anomaly', () => {
+      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess(mockAnomaliesData));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+
+      const { container } = renderComponent();
+
+      const points = container.querySelectorAll('.recharts-scatter-symbol');
+      expect(points.length).toBe(mockAnomaliesData.anomalies.length);
+      expect(screen.getByText(/higher score = more unusual transaction/i)).toBeInTheDocument();
     });
 
     it('renders empty anomalies message when none detected', () => {
