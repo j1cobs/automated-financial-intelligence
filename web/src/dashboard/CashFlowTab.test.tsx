@@ -153,20 +153,27 @@ describe('CashFlowTab', () => {
     window.history.replaceState(null, '', window.location.pathname);
   });
 
-  it('renders loading state when data is loading', () => {
+  it('renders a skeleton while data is loading', () => {
     mockUseCashFlow.mockReturnValue(mockQueryLoading<CashFlowResponse>());
 
     renderCashFlowTab();
 
-    expect(screen.getByText('Loading cash flow data...')).toBeInTheDocument();
+    // The skeleton replaces the old bare "Loading cash flow data..." string
+    // with layout-shaped placeholder blocks (PLAN.md Phase 15, Fix 14).
+    expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
   });
 
-  it('renders error state when query fails', () => {
-    mockUseCashFlow.mockReturnValue(mockQueryError<CashFlowResponse>());
+  it('renders error state when query fails, with a retry action', () => {
+    const refetch = vi.fn();
+    mockUseCashFlow.mockReturnValue({ ...mockQueryError<CashFlowResponse>(), refetch });
 
     renderCashFlowTab();
 
     expect(screen.getByText(/failed to load cash flow data/i)).toBeInTheDocument();
+
+    const retryButton = screen.getByRole('button', { name: 'Retry' });
+    fireEvent.click(retryButton);
+    expect(refetch).toHaveBeenCalled();
   });
 
   it('renders empty state when no data is available', () => {
@@ -254,6 +261,28 @@ describe('CashFlowTab', () => {
 
     const chart = screen.getByTestId('rolling-spend-chart');
     expect(chart.querySelectorAll('.recharts-line-curve').length).toBeGreaterThan(0);
+  });
+
+  it('renders a brush/zoom control on the rolling spend chart at desktop widths (Fix 14)', () => {
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+    renderCashFlowTab();
+
+    const chart = screen.getByTestId('rolling-spend-chart');
+    expect(chart.querySelector('.recharts-brush')).not.toBeNull();
+  });
+
+  it('omits the brush on narrow viewports', () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 375 });
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+    renderCashFlowTab();
+
+    const chart = screen.getByTestId('rolling-spend-chart');
+    expect(chart.querySelector('.recharts-brush')).toBeNull();
+
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: originalWidth });
   });
 
   it('displays formatted currency values', () => {

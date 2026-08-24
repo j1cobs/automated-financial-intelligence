@@ -3677,7 +3677,33 @@ on both failure paths. Full suite: 179 tests green, `ruff check` clean. Live-run
 
 ---
 
-## Phase 15 — React dashboard: metric correctness, feature parity, and a real UX — PLANNED (2026-08-23)
+## Phase 15 — React dashboard: metric correctness, feature parity, and a real UX — IMPLEMENTED (2026-08-24), live verification outstanding
+
+> **Status (2026-08-24):** Fixes 1-15 are implemented on `dev` across six commits. Automated
+> verification is green — **283 Python tests** (`python -m unittest discover -s tests`, ruff check +
+> format clean) and **216 web tests** (`npm run test`, `tsc -b`, `npm run lint` at 0 errors,
+> `format:check`, `npm run build`). The Streamlit freeze held: `app/dashboard.py`,
+> `tests/test_dashboard_classify.py` and `tests/test_dashboard_helpers.py` are untouched across
+> every Phase 15 commit (`git log 2411582..HEAD -- app/` is empty).
+>
+> **What remains is the end-to-end pass in "Verification" below**, which needs a signed-in session
+> against the live database and cannot be done from tests: the nine on-screen checks, the
+> keyboard-only tooltip pass at a narrow viewport, the dark-mode sweep, and the side-by-side diff
+> against `streamlit run streamlit_app.py` confirming **only** the five tabulated divergences.
+>
+> Two items were deliberately not built, both recorded at their fix below: **ledger virtualization**
+> (needs a new dependency — `@tanstack/react-virtual` is the recommendation) and **metric
+> drill-down** (designed for via `MetricTile`'s unused `onDrillDown` prop, so it is additive).
+>
+> Two plan items changed during implementation and are documented where they landed:
+> **(a)** Fix 7's dual-axis rolling-spend chart was collapsed to a single axis — `daily_avg` is
+> `amount / 30`, so the second series drew the identical curve at 1/30 scale against an invented
+> scale; the per-day figure moved into the tooltip. **(b)** Fix 15's "push the date window into SQL"
+> was not possible without editing the frozen `load_financial_data`, so it shipped as the 60-second
+> TTL cache in `api/dataload.py` only. If read latency ever justifies more, relocate
+> `load_financial_data` into `database/` rather than duplicating the query.
+>
+> Original plan follows unchanged, for the reasoning behind each fix.
 
 > **Status:** planned, not yet implemented. Triggered by a review of the React frontend added in
 > `a7140d8` / `3412535`, which found the Streamlit → React port both incomplete (eight already-computed

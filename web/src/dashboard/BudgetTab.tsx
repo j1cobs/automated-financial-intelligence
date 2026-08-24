@@ -24,6 +24,7 @@ import { useBudget, useCategories, useCashFlow } from '../lib/queries';
 import { useUpsertBudget } from '../lib/mutations';
 import type { BudgetItem } from '../lib/types';
 import { LINE_PROPS, inkMutedColor, negativeColor, useChartTheme } from './chartTheme';
+import { TabSkeleton, ErrorState } from './LoadingState';
 import { DIRECTION_GLYPH, type Tone } from '../lib/polarity';
 
 /** How many trailing months the per-category sparkline shows. */
@@ -52,7 +53,7 @@ function emptyItem(category: string, isCurrentMonth: boolean): BudgetItem {
 }
 
 export function BudgetTab() {
-  const { data, isPending, error } = useBudget();
+  const { data, isPending, error, refetch } = useBudget();
   const { data: categoriesData } = useCategories();
   const { data: cashFlow } = useCashFlow();
   const upsertMutation = useUpsertBudget();
@@ -87,21 +88,14 @@ export function BudgetTab() {
   }, [cashFlow]);
 
   if (isPending) {
-    return (
-      <div className="space-y-4">
-        <h2 className="text-lg font-semibold text-ink">Budget</h2>
-        <div className="text-ink-muted">Loading budget data...</div>
-      </div>
-    );
+    return <TabSkeleton />;
   }
 
   if (error) {
     return (
       <div className="space-y-4">
         <h2 className="text-lg font-semibold text-ink">Budget</h2>
-        <div className="rounded-md border border-neg bg-surface-2 p-4 text-neg-text">
-          Failed to load budget data. Please try again.
-        </div>
+        <ErrorState message="Failed to load budget data. Please try again." onRetry={() => void refetch()} />
       </div>
     );
   }

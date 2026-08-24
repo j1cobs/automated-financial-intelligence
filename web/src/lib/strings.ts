@@ -43,4 +43,14 @@ export const strings = {
     /** Discoverability caption placed under a clickable category chart. */
     categoryHint: 'Click a bar to add that category to your filters.',
   },
+  loading: {
+    /** Accessible name for a `<TabSkeleton>` region (PLAN.md Phase 15, Fix 14) --
+     *  the skeleton itself carries no readable text, so screen readers need this. */
+    tabLabel: 'Loading…',
+    /** Button label on `<ErrorState>`, wired to the failed query's `refetch`. */
+    retryLabel: 'Retry',
+    /** Inline banner shown next to a ledger row whose edit failed and was rolled
+     *  back -- see `mutations.ts`'s `onError`. */
+    editFailed: 'Failed to save your change. It has been reverted — please try again.',
+  },
 } as const;

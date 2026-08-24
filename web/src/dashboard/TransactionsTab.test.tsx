@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   QueryClient,
@@ -125,9 +125,10 @@ function mockQueryError<T>(): UseQueryResult<T, Error> {
   } as unknown as UseQueryResult<T, Error>;
 }
 
-function mockMutation<TVariables>(
+function mockMutation<TVariables, TContext = unknown>(
   mutateAsync: (vars: TVariables) => Promise<void>,
-): UseMutationResult<void, Error, TVariables> {
+  overrides: Partial<UseMutationResult<void, Error, TVariables, TContext>> = {},
+): UseMutationResult<void, Error, TVariables, TContext> {
   return {
     mutate: vi.fn(),
     mutateAsync,
@@ -142,7 +143,8 @@ function mockMutation<TVariables>(
     reset: vi.fn(),
     variables: undefined,
     context: undefined,
-  } as unknown as UseMutationResult<void, Error, TVariables>;
+    ...overrides,
+  } as unknown as UseMutationResult<void, Error, TVariables, TContext>;
 }
 
 function setDefaultMutations() {
@@ -157,46 +159,60 @@ describe('TransactionsTab', () => {
   });
 
   describe('Ledger loading and error states', () => {
-    it('renders loading state for ledger', () => {
+    it('renders a skeleton for ledger while loading', () => {
       mockedUseLedger.mockReturnValue(mockQueryLoading<LedgerResponse>());
       mockedUseAnomalies.mockReturnValue(mockQueryLoading<AnomaliesResponse>());
       mockedUseCategories.mockReturnValue(mockQueryLoading<CategoriesResponse>());
+      setDefaultMutations();
 
       renderComponent();
 
-      expect(screen.getByText(/loading transactions/i)).toBeInTheDocument();
+      // Both sections render a skeleton while loading (PLAN.md Phase 15, Fix 14);
+      // this is at least one of them.
+      expect(screen.getAllByRole('status', { name: 'Loading…' }).length).toBeGreaterThan(0);
     });
 
-    it('renders error state for ledger', () => {
-      mockedUseLedger.mockReturnValue(mockQueryError<LedgerResponse>());
+    it('renders error state for ledger with a retry action wired to refetch', () => {
+      const ledgerResult = mockQueryError<LedgerResponse>();
+      mockedUseLedger.mockReturnValue(ledgerResult);
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
 
       renderComponent();
 
       expect(screen.getByText(/failed to load transactions/i)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      expect(ledgerResult.refetch).toHaveBeenCalled();
     });
   });
 
   describe('Anomalies loading and error states', () => {
-    it('renders loading state for anomalies', () => {
+    it('renders a skeleton for anomalies while loading', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
       mockedUseAnomalies.mockReturnValue(mockQueryLoading<AnomaliesResponse>());
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
 
       renderComponent();
 
-      expect(screen.getByText(/loading anomalies/i)).toBeInTheDocument();
+      expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
     });
 
-    it('renders error state for anomalies', () => {
+    it('renders error state for anomalies with a retry action wired to refetch', () => {
+      const anomaliesResult = mockQueryError<AnomaliesResponse>();
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQueryError<AnomaliesResponse>());
+      mockedUseAnomalies.mockReturnValue(anomaliesResult);
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
 
       renderComponent();
 
       expect(screen.getByText(/failed to load anomalies/i)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      expect(anomaliesResult.refetch).toHaveBeenCalled();
     });
   });
 
@@ -409,6 +425,38 @@ describe('TransactionsTab', () => {
       renderComponent();
 
       expect(screen.getByText(/no anomalies detected/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('Failed ledger edits', () => {
+    it('shows an inline error banner when a category edit fails', () => {
+      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockRejectedValue(new Error('fail')), { isError: true }),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+
+      renderComponent();
+
+      expect(
+        screen.getByText('Failed to save your change. It has been reverted — please try again.'),
+      ).toBeInTheDocument();
+    });
+
+    it('shows no error banner when every mutation is in its default (non-error) state', () => {
+      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      expect(
+        screen.queryByText('Failed to save your change. It has been reverted — please try again.'),
+      ).not.toBeInTheDocument();
     });
   });
 

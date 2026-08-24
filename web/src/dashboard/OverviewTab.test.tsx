@@ -198,7 +198,7 @@ describe('OverviewTab', () => {
     window.history.replaceState(null, '', window.location.pathname);
   });
 
-  it('renders loading state while data is being fetched', () => {
+  it('renders a skeleton while data is being fetched', () => {
     mockedUseOverview.mockReturnValue({
       data: undefined,
       isLoading: true,
@@ -207,21 +207,27 @@ describe('OverviewTab', () => {
 
     renderOverviewTab();
 
-    expect(screen.getByText('Loading overview...')).toBeInTheDocument();
+    // The skeleton replaces the old bare "Loading overview..." string with
+    // layout-shaped placeholder blocks (PLAN.md Phase 15, Fix 14).
+    expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
   });
 
-  it('renders error state when query fails', () => {
+  it('renders error state when query fails, with a retry action wired to refetch', () => {
     const errorMsg = 'Failed to fetch overview';
+    const refetch = vi.fn();
     mockedUseOverview.mockReturnValue({
       data: undefined,
       isLoading: false,
       error: new Error(errorMsg),
+      refetch,
     } as unknown as UseQueryResult<OverviewResponse, Error>);
 
     renderOverviewTab();
 
-    expect(screen.getByText('Error loading overview')).toBeInTheDocument();
     expect(screen.getByText(errorMsg)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(refetch).toHaveBeenCalled();
   });
 
   it('renders no data message when data is null', () => {
@@ -334,6 +340,21 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Savings Rate Trend')).toBeInTheDocument();
     // One month (2026-02) has savings_rate: null in the fixture.
     expect(screen.getByText('1 month hidden — no recorded income.')).toBeInTheDocument();
+  });
+
+  it('renders a brush/zoom control on the savings rate trend chart (Fix 14)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    const { container } = renderOverviewTab();
+
+    const heading = screen.getByText('Savings Rate Trend');
+    const card = heading.closest('.rounded-lg') as HTMLElement;
+    expect(card.querySelector('.recharts-brush')).not.toBeNull();
+    expect(container).toContainElement(card);
   });
 
   it('does not crash and shows no footnote when no months are null', () => {

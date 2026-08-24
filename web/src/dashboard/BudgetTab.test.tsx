@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
@@ -159,7 +159,7 @@ describe('BudgetTab', () => {
     );
   });
 
-  it('renders loading state', () => {
+  it('renders a skeleton while loading', () => {
     vi.mocked(useBudget).mockReturnValue(
       createMockQueryResult<BudgetResponse>({
         isPending: true,
@@ -171,11 +171,13 @@ describe('BudgetTab', () => {
 
     renderWithQueryClient(<BudgetTab />);
 
-    expect(screen.getByText('Budget')).toBeInTheDocument();
-    expect(screen.getByText('Loading budget data...')).toBeInTheDocument();
+    // The skeleton replaces the old bare "Loading budget data..." string with
+    // layout-shaped placeholder blocks (PLAN.md Phase 15, Fix 14).
+    expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
   });
 
-  it('renders error state', () => {
+  it('renders error state with a retry action wired to refetch', () => {
+    const refetch = vi.fn();
     vi.mocked(useBudget).mockReturnValue(
       createMockQueryResult<BudgetResponse>({
         isPending: false,
@@ -184,6 +186,7 @@ describe('BudgetTab', () => {
         isError: true,
         isFetched: true,
         errorUpdatedAt: Date.now(),
+        refetch,
       }),
     );
 
@@ -191,6 +194,9 @@ describe('BudgetTab', () => {
 
     expect(screen.getByText('Budget')).toBeInTheDocument();
     expect(screen.getByText('Failed to load budget data. Please try again.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(refetch).toHaveBeenCalled();
   });
 
   it('renders budget items with spend and limit information', () => {

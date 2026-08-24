@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useOverview } from '../lib/queries';
 import { useSetCreditLimit } from '../lib/mutations';
 import { useFilters } from '../lib/FilterContext';
@@ -10,10 +10,12 @@ import type {
   TopCategoryItem,
 } from '../lib/types';
 import { MetricTile, MetricInfoBadge } from './MetricTile';
+import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import {
   LineChart,
   Line,
+  Brush,
   PieChart,
   Pie,
   BarChart,
@@ -40,10 +42,38 @@ import {
   legendProps,
   referenceLineProps,
   surfaceGapProps,
+  surfaceColor,
+  axisColor,
   CHART_MARGIN,
   BAR_MAX_SIZE,
   BAR_RADIUS_HORIZONTAL,
 } from './chartTheme';
+
+/** See `CashFlowTab.tsx`'s identical helper -- a brush competes for height with
+ *  the chart itself below the `sm` breakpoint, so it's omitted there rather
+ *  than shrunk further (PLAN.md Phase 15, Fix 14). */
+function useShowBrush(): boolean {
+  const [show, setShow] = useState(() => typeof window === 'undefined' || window.innerWidth >= 640);
+  useEffect(() => {
+    function onResize() {
+      setShow(window.innerWidth >= 640);
+    }
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return show;
+}
+
+/** Tokenized styling for a Recharts `<Brush>`. */
+function brushProps() {
+  return {
+    stroke: axisColor(),
+    fill: surfaceColor(),
+    travellerWidth: 8,
+    height: 20,
+    tickFormatter: () => '',
+  } as const;
+}
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -266,10 +296,11 @@ function buildMonthOverMonthRows(
 }
 
 export function OverviewTab() {
-  const { data, isLoading, error } = useOverview();
+  const { data, isLoading, error, refetch } = useOverview();
   const { filters, patchFilters } = useFilters();
   // Re-render charts (their colours are resolved from CSS vars in JS) when the theme flips.
   useChartTheme();
+  const showBrush = useShowBrush();
 
   // Cross-filtering (Fix 14): clicking a category bar adds it to the active
   // filters via the shared FilterContext -- no separate filter mechanism.
@@ -282,22 +313,15 @@ export function OverviewTab() {
   }
 
   if (isLoading) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12">
-        <div className="h-12 w-12 animate-spin rounded-full border-4 border-hairline border-t-cat-1"></div>
-        <p className="mt-4 text-ink-secondary">Loading overview...</p>
-      </div>
-    );
+    return <TabSkeleton />;
   }
 
   if (error) {
     return (
-      <div className="rounded-lg border border-strong bg-surface-2 p-6">
-        <h3 className="text-lg font-semibold text-neg-text">Error loading overview</h3>
-        <p className="mt-2 text-ink-secondary">
-          {error instanceof Error ? error.message : 'An unexpected error occurred'}
-        </p>
-      </div>
+      <ErrorState
+        message={error instanceof Error ? error.message : 'An unexpected error occurred'}
+        onRetry={() => void refetch()}
+      />
     );
   }
 
@@ -396,6 +420,7 @@ export function OverviewTab() {
                 name="Savings Rate"
                 connectNulls={false}
               />
+              {showBrush && <Brush dataKey="month" {...brushProps()} />}
             </LineChart>
           </ResponsiveContainer>
           {hiddenSavingsMonths > 0 && (

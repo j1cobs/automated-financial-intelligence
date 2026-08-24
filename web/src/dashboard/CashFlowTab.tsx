@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react';
 import {
   ComposedChart,
   BarChart,
   Bar,
+  Brush,
   Line,
   LineChart,
   XAxis,
@@ -16,6 +18,7 @@ import type { TooltipContentProps } from 'recharts';
 import { useCashFlow } from '../lib/queries';
 import { useFilters } from '../lib/FilterContext';
 import { MetricInfoBadge } from './MetricTile';
+import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import type {
   RollingSpendItem,
@@ -39,6 +42,8 @@ import {
   legendProps,
   referenceLineProps,
   surfaceGapProps,
+  surfaceColor,
+  axisColor,
   CHART_MARGIN,
   BAR_MAX_SIZE,
   BAR_RADIUS,
@@ -46,6 +51,36 @@ import {
   activeDotProps,
   CATEGORICAL_SLOTS,
 } from './chartTheme';
+
+/**
+ * Whether the viewport is wide enough for a brush/zoom control to earn its space --
+ * below the `sm` breakpoint (640px) it competes with the chart itself for a narrow
+ * strip of height, so it's omitted rather than shrunk further (PLAN.md Phase 15,
+ * Fix 14: "keep it out of the way on small viewports").
+ */
+function useShowBrush(): boolean {
+  const [show, setShow] = useState(() => typeof window === 'undefined' || window.innerWidth >= 640);
+  useEffect(() => {
+    function onResize() {
+      setShow(window.innerWidth >= 640);
+    }
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return show;
+}
+
+/** Tokenized styling for a Recharts `<Brush>` -- the traveller handles and
+ *  selection window read from the same chart chrome tokens as the axes. */
+function brushProps() {
+  return {
+    stroke: axisColor(),
+    fill: surfaceColor(),
+    travellerWidth: 8,
+    height: 20,
+    tickFormatter: () => '',
+  } as const;
+}
 
 /** "Other" bucket for the categorical tail — see `pivotCategoryDistribution`. */
 const OTHER_LABEL = 'Other';
@@ -297,9 +332,10 @@ function FlowBarChart({
  * `CashFlowResponse` from `lib/types.ts`) and Recharts.
  */
 export function CashFlowTab() {
-  const { data, isLoading, error } = useCashFlow();
+  const { data, isLoading, error, refetch } = useCashFlow();
   const { filters, patchFilters } = useFilters();
   const themeEpoch = useChartTheme();
+  const showBrush = useShowBrush();
 
   // Cross-filtering (Fix 14): clicking a category segment adds it to the
   // active filters via the shared FilterContext. `OTHER_LABEL` is a
@@ -313,23 +349,17 @@ export function CashFlowTab() {
   }
 
   if (isLoading) {
-    return (
-      <div className="space-y-4">
-        <h2 className="text-lg font-semibold text-ink">Cash Flow</h2>
-        <div className="flex items-center justify-center rounded-lg bg-surface-2 py-12">
-          <p className="text-sm text-ink-secondary">Loading cash flow data...</p>
-        </div>
-      </div>
-    );
+    return <TabSkeleton />;
   }
 
   if (error) {
     return (
       <div className="space-y-4">
         <h2 className="text-lg font-semibold text-ink">Cash Flow</h2>
-        <div className="rounded-lg border border-hairline bg-surface-2 p-4">
-          <p className="text-sm text-neg-text">Failed to load cash flow data. Please try again later.</p>
-        </div>
+        <ErrorState
+          message="Failed to load cash flow data. Please try again later."
+          onRetry={() => void refetch()}
+        />
       </div>
     );
   }
@@ -433,6 +463,7 @@ export function CashFlowTab() {
                   strokeWidth={2}
                   dot={false}
                 />
+                {showBrush && <Brush dataKey="date" {...brushProps()} />}
               </LineChart>
             </ResponsiveContainer>
           </div>

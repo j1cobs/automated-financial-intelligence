@@ -23,6 +23,8 @@ import {
   legendProps,
   CHART_MARGIN,
 } from './chartTheme';
+import { TabSkeleton, ErrorState } from './LoadingState';
+import { strings } from '../lib/strings';
 import { directionOf, toneFor, toneLabel, DIRECTION_GLYPH, TONE_TOKENS } from '../lib/polarity';
 
 /**
@@ -262,17 +264,36 @@ export function TransactionsTab() {
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
+  // Ledger edits are optimistic (see `lib/mutations.ts`): the row updates before the
+  // request resolves, and a failure rolls it back via the mutation's own onError. The
+  // rollback is silent to the row itself, so this banner is what actually tells the
+  // user the edit didn't take -- swallowing the rejection here would otherwise leave
+  // an unhandled promise rejection with `mutateAsync` and no visible failure at all.
+  const editFailed = updateCategory.isError || updateRecurring.isError || updateDuplicate.isError;
+
   const handleCategoryChange = async (hash: string, newCategory: string) => {
     setEditingHash(null);
-    await updateCategory.mutateAsync({ hash, category: newCategory });
+    try {
+      await updateCategory.mutateAsync({ hash, category: newCategory });
+    } catch {
+      /* surfaced via updateCategory.isError below */
+    }
   };
 
   const handleRecurringToggle = async (hash: string, currentValue: boolean) => {
-    await updateRecurring.mutateAsync({ hash, recurring: !currentValue });
+    try {
+      await updateRecurring.mutateAsync({ hash, recurring: !currentValue });
+    } catch {
+      /* surfaced via updateRecurring.isError below */
+    }
   };
 
   const handleDuplicateToggle = async (hash: string, currentValue: boolean) => {
-    await updateDuplicate.mutateAsync({ hash, duplicate: !currentValue });
+    try {
+      await updateDuplicate.mutateAsync({ hash, duplicate: !currentValue });
+    } catch {
+      /* surfaced via updateDuplicate.isError below */
+    }
   };
 
   const toggleSort = (key: SortKey) => {
@@ -295,14 +316,13 @@ export function TransactionsTab() {
       <div>
         <h2 className="mb-1 text-base font-semibold text-ink sm:text-lg">Anomalies</h2>
 
-        {anomaliesQuery.isLoading && (
-          <div className="py-8 text-center text-sm text-ink-muted">Loading anomalies...</div>
-        )}
+        {anomaliesQuery.isLoading && <TabSkeleton />}
 
         {anomaliesQuery.isError && (
-          <div className="rounded border border-neg bg-surface-2 px-4 py-8 text-sm text-neg-text">
-            Failed to load anomalies. Please try again.
-          </div>
+          <ErrorState
+            message="Failed to load anomalies. Please try again."
+            onRetry={() => void anomaliesQuery.refetch()}
+          />
         )}
 
         {anomaliesQuery.data && (
@@ -333,14 +353,19 @@ export function TransactionsTab() {
           <p>Positive amounts are income or credits. Negative amounts are expenses or debits.</p>
         </div>
 
-        {ledgerQuery.isLoading && (
-          <div className="py-8 text-center text-sm text-ink-muted">Loading transactions...</div>
+        {editFailed && (
+          <div className="mb-2 rounded border border-neg bg-surface-2 px-3 py-2 text-xs text-neg-text sm:text-sm">
+            {strings.loading.editFailed}
+          </div>
         )}
 
+        {ledgerQuery.isLoading && <TabSkeleton />}
+
         {ledgerQuery.isError && (
-          <div className="rounded border border-neg bg-surface-2 px-4 py-8 text-sm text-neg-text">
-            Failed to load transactions. Please try again.
-          </div>
+          <ErrorState
+            message="Failed to load transactions. Please try again."
+            onRetry={() => void ledgerQuery.refetch()}
+          />
         )}
 
         {ledgerQuery.data && (
