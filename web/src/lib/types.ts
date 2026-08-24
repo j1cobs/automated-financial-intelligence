@@ -14,13 +14,24 @@ export interface AssetMixItem {
   balance: number;
 }
 
+export interface OwnerAccountItem {
+  account_name: string;
+  type: string;
+  value: number;
+}
+
 export interface OwnerBalanceItem {
   owner: string;
-  value: number;
-  type: string;
+  depository: number;
+  investment: number;
+  credit: number;
+  other: number;
+  net: number;
+  accounts: OwnerAccountItem[];
 }
 
 export interface CreditUtilizationItem {
+  account_key: string;
   account_name: string;
   owner_name: string | null;
   current: number;
@@ -30,8 +41,17 @@ export interface CreditUtilizationItem {
 }
 
 export interface StaleAccountItem {
+  account_key: string;
   account_name: string;
   days_stale: number;
+}
+
+export interface DormantAccountItem {
+  account_key: string;
+  account_name: string;
+  owner_name: string | null;
+  days_inactive: number;
+  balance: number;
 }
 
 export interface NetWorth {
@@ -42,6 +62,7 @@ export interface NetWorth {
   owner_balances: OwnerBalanceItem[];
   credit_utilization: CreditUtilizationItem[];
   stale_accounts: StaleAccountItem[];
+  dormant_accounts: DormantAccountItem[];
   forked_accounts: string[];
 }
 
@@ -63,7 +84,9 @@ export interface IncomeBreakdownItem {
 
 export interface SavingsRateTrendItem {
   month: string;
-  savings_rate: number;
+  savings_rate: number | null;
+  income: number;
+  expenses: number;
 }
 
 export interface Overview {
@@ -76,6 +99,8 @@ export interface Overview {
   avg_monthly_expense: number;
   avg_weekly_income: number;
   avg_monthly_income: number;
+  avg_monthly_net: number;
+  complete_months: number;
   top_categories: TopCategoryItem[];
   month_over_month: MonthOverMonthItem[];
   emergency_fund_months: number | null;
@@ -94,19 +119,22 @@ export interface OverviewResponse {
 
 export interface CashFlowSeriesItem {
   month: string;
-  tx_type: string;
-  amount: number;
+  income: number;
+  expenses: number;
+  net: number;
 }
 
 export interface WeeklyTrendItem {
   week: string;
-  tx_type: string;
-  amount: number;
+  income: number;
+  expenses: number;
+  net: number;
 }
 
 export interface RollingSpendItem {
   date: string;
   amount: number;
+  daily_avg: number;
 }
 
 export interface MonthlyNetByOwnerItem {

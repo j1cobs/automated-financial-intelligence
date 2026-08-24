@@ -1,8 +1,8 @@
 import {
-  BarChart,
+  ComposedChart,
   Bar,
-  LineChart,
   Line,
+  LineChart,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -11,7 +11,6 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { useCashFlow } from '../lib/queries';
-import type { CashFlowSeriesItem, RollingSpendItem } from '../lib/types';
 
 /**
  * Cash Flow tab — monthly/weekly trends, rolling spend, category distribution.
@@ -53,26 +52,6 @@ export function CashFlowTab() {
       </div>
     );
   }
-
-  // Transform month_over_month data for the chart: group by month and show income vs expenses
-  const monthData = data.month_over_month.reduce(
-    (acc, item: CashFlowSeriesItem) => {
-      const existingMonth = acc.find((m) => m.month === item.month);
-      if (existingMonth) {
-        existingMonth[item.tx_type] = item.amount;
-      } else {
-        acc.push({ month: item.month, [item.tx_type]: item.amount });
-      }
-      return acc;
-    },
-    [] as Record<string, string | number>[],
-  );
-
-  // Format rolling spend data for the chart
-  const rollingSpendData = data.rolling_30d_spend.slice(-30).map((item: RollingSpendItem) => ({
-    date: item.date,
-    amount: item.amount,
-  }));
 
   // Format currency
   const formatCurrency = (value: number) => {
@@ -145,12 +124,12 @@ export function CashFlowTab() {
       </div>
 
       {/* Income vs Expenses Chart */}
-      {monthData.length > 0 && (
+      {data.month_over_month.length > 0 && (
         <div className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
           <h3 className="mb-4 text-sm sm:text-base font-semibold text-slate-800">Income vs Expenses</h3>
           <div className="h-56 sm:h-80 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={monthData}>
+              <ComposedChart data={data.month_over_month}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="month" stroke="#64748b" style={{ fontSize: '12px' }} />
                 <YAxis stroke="#64748b" style={{ fontSize: '12px' }} />
@@ -162,24 +141,27 @@ export function CashFlowTab() {
                   formatter={(value) => formatCurrency(Number(value))}
                 />
                 <Legend />
-                <Bar dataKey="INCOME" fill="#16a34a" radius={[8, 8, 0, 0]} />
-                <Bar dataKey="EXPENSE" fill="#dc2626" radius={[8, 8, 0, 0]} />
-              </BarChart>
+                <Bar dataKey="income" name="Income" fill="#16a34a" radius={[8, 8, 0, 0]} />
+                <Bar dataKey="expenses" name="Expenses" fill="#dc2626" radius={[8, 8, 0, 0]} />
+                <Line type="monotone" dataKey="net" name="Net" stroke="#2563eb" strokeWidth={2} dot={false} />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
         </div>
       )}
 
-      {/* 30-Day Rolling Spend Chart */}
-      {rollingSpendData.length > 0 && (
+      {/* Rolling 30-day spend Chart */}
+      {data.rolling_30d_spend.length > 0 && (
         <div className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
-          <h3 className="mb-4 text-sm sm:text-base font-semibold text-slate-800">30-Day Rolling Spend</h3>
+          <h3 className="mb-1 text-sm sm:text-base font-semibold text-slate-800">Rolling 30-day spend</h3>
+          <p className="mb-4 text-xs text-slate-500">total spent in the 30 days ending on each date</p>
           <div className="h-48 sm:h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={rollingSpendData}>
+              <LineChart data={data.rolling_30d_spend}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="date" stroke="#64748b" style={{ fontSize: '12px' }} />
-                <YAxis stroke="#64748b" style={{ fontSize: '12px' }} />
+                <YAxis yAxisId="left" stroke="#64748b" style={{ fontSize: '12px' }} />
+                <YAxis yAxisId="right" orientation="right" stroke="#64748b" style={{ fontSize: '12px' }} />
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#ffffff',
@@ -187,13 +169,24 @@ export function CashFlowTab() {
                   }}
                   formatter={(value) => formatCurrency(Number(value))}
                 />
+                <Legend />
                 <Line
+                  yAxisId="left"
                   type="monotone"
                   dataKey="amount"
                   stroke="#2563eb"
                   strokeWidth={2}
                   dot={false}
-                  name="Daily Spend"
+                  name="30-day total"
+                />
+                <Line
+                  yAxisId="right"
+                  type="monotone"
+                  dataKey="daily_avg"
+                  stroke="#f59e0b"
+                  strokeWidth={2}
+                  dot={false}
+                  name="Daily average"
                 />
               </LineChart>
             </ResponsiveContainer>

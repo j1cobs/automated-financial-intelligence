@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
 import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UseQueryResult } from '@tanstack/react-query';
@@ -8,6 +9,22 @@ import type { CashFlowResponse } from '../lib/types';
 
 // Mock the queries module
 vi.mock('../lib/queries');
+
+// Recharts' ResponsiveContainer measures its parent via ResizeObserver, which
+// jsdom doesn't implement, so charts never receive a nonzero size and render
+// no children (bars, lines, etc). Give the wrapped chart an explicit fixed
+// size instead so chart internals actually render in tests.
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => React.cloneElement(children, { width: 800, height: 400 }),
+  };
+});
 
 const mockUseCashFlow = vi.mocked(queries.useCashFlow);
 
@@ -88,6 +105,26 @@ function mockQueryError<T>(): UseQueryResult<T, Error> {
   } as unknown as UseQueryResult<T, Error>;
 }
 
+const baseMockData: CashFlowResponse = {
+  income: 5000,
+  expenses: 3000,
+  net_flow: 2000,
+  transfer_count: 5,
+  flagged_count: 2,
+  savings_rate: 0.4,
+  month_over_month: [
+    { month: '2024-01', income: 5000, expenses: 3000, net: 2000 },
+    { month: '2024-02', income: 5200, expenses: 3100, net: 2100 },
+  ],
+  weekly_trend: [],
+  rolling_30d_spend: [
+    { date: '2024-02-01', amount: 100, daily_avg: 100 / 30 },
+    { date: '2024-02-02', amount: 150, daily_avg: 150 / 30 },
+  ],
+  monthly_net_by_owner: [],
+  category_distribution: [],
+};
+
 describe('CashFlowTab', () => {
   beforeEach(() => {
     mockUseCashFlow.mockReset();
@@ -136,28 +173,7 @@ describe('CashFlowTab', () => {
   });
 
   it('renders key metrics when data is available', () => {
-    const mockData: CashFlowResponse = {
-      income: 5000,
-      expenses: 3000,
-      net_flow: 2000,
-      transfer_count: 5,
-      flagged_count: 2,
-      savings_rate: 0.4,
-      month_over_month: [
-        { month: '2024-01', tx_type: 'INCOME', amount: 5000 },
-        { month: '2024-01', tx_type: 'EXPENSE', amount: 3000 },
-        { month: '2024-02', tx_type: 'INCOME', amount: 5200 },
-        { month: '2024-02', tx_type: 'EXPENSE', amount: 3100 },
-      ],
-      weekly_trend: [],
-      rolling_30d_spend: [
-        { date: '2024-02-01', amount: 100 },
-        { date: '2024-02-02', amount: 150 },
-      ],
-      monthly_net_by_owner: [],
-      category_distribution: [],
-    };
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(mockData));
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
@@ -173,69 +189,38 @@ describe('CashFlowTab', () => {
     expect(screen.getByText('Flagged')).toBeInTheDocument();
   });
 
-  it('renders income vs expenses chart when month data is available', () => {
-    const mockData: CashFlowResponse = {
-      income: 5000,
-      expenses: 3000,
-      net_flow: 2000,
-      transfer_count: 5,
-      flagged_count: 2,
-      savings_rate: 0.4,
-      month_over_month: [
-        { month: '2024-01', tx_type: 'INCOME', amount: 5000 },
-        { month: '2024-01', tx_type: 'EXPENSE', amount: 3000 },
-      ],
-      weekly_trend: [],
-      rolling_30d_spend: [],
-      monthly_net_by_owner: [],
-      category_distribution: [],
-    };
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(mockData));
+  it('renders Total Expenses as a positive figure with no stray minus sign', () => {
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
+    expect(screen.getByText('$3,000')).toBeInTheDocument();
+    expect(screen.queryByText('-$3,000')).not.toBeInTheDocument();
+  });
+
+  it('renders income vs expenses chart with actual bar elements (not an empty chart)', () => {
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+    const { container } = renderCashFlowTab();
+
     expect(screen.getByText('Income vs Expenses')).toBeInTheDocument();
+    const bars = container.querySelectorAll('.recharts-bar-rectangle');
+    expect(bars.length).toBeGreaterThan(0);
+    // Two bar series (income, expenses) across two months = 4 rectangles.
+    expect(bars.length).toBe(4);
   });
 
   it('renders rolling spend chart when rolling spend data is available', () => {
-    const mockData: CashFlowResponse = {
-      income: 5000,
-      expenses: 3000,
-      net_flow: 2000,
-      transfer_count: 5,
-      flagged_count: 2,
-      savings_rate: 0.4,
-      month_over_month: [],
-      weekly_trend: [],
-      rolling_30d_spend: [
-        { date: '2024-02-01', amount: 100 },
-        { date: '2024-02-02', amount: 150 },
-      ],
-      monthly_net_by_owner: [],
-      category_distribution: [],
-    };
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(mockData));
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
-    expect(screen.getByText('30-Day Rolling Spend')).toBeInTheDocument();
+    expect(screen.getByText('Rolling 30-day spend')).toBeInTheDocument();
+    expect(screen.getByText('total spent in the 30 days ending on each date')).toBeInTheDocument();
   });
 
   it('displays formatted currency values', () => {
-    const mockData: CashFlowResponse = {
-      income: 5000,
-      expenses: 3000,
-      net_flow: 2000,
-      transfer_count: 5,
-      flagged_count: 2,
-      savings_rate: 0.4,
-      month_over_month: [],
-      weekly_trend: [],
-      rolling_30d_spend: [],
-      monthly_net_by_owner: [],
-      category_distribution: [],
-    };
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(mockData));
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
@@ -244,24 +229,22 @@ describe('CashFlowTab', () => {
     expect(screen.getByText(/\$3,000/)).toBeInTheDocument();
   });
 
-  it('displays percentage for savings rate', () => {
-    const mockData: CashFlowResponse = {
-      income: 5000,
-      expenses: 3000,
-      net_flow: 2000,
-      transfer_count: 5,
-      flagged_count: 2,
-      savings_rate: 0.4,
-      month_over_month: [],
-      weekly_trend: [],
-      rolling_30d_spend: [],
-      monthly_net_by_owner: [],
-      category_distribution: [],
-    };
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(mockData));
+  it('displays savings rate of 0.4 as 40.0% and not 4000.0%', () => {
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
     expect(screen.getByText(/40\.0%/)).toBeInTheDocument();
+    expect(screen.queryByText(/4000\.0%/)).not.toBeInTheDocument();
+  });
+
+  it('displays savings rate of 0.6 as 60.0% and not 6000.0%', () => {
+    const mockData: CashFlowResponse = { ...baseMockData, savings_rate: 0.6 };
+    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(mockData));
+
+    renderCashFlowTab();
+
+    expect(screen.getByText('60.0%')).toBeInTheDocument();
+    expect(screen.queryByText('6000.0%')).not.toBeInTheDocument();
   });
 });

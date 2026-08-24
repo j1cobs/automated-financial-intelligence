@@ -1,5 +1,6 @@
 import { useOverview } from '../lib/queries';
-import type { PieLabelRenderProps } from 'recharts';
+import type { PieLabelRenderProps, TooltipContentProps } from 'recharts';
+import type { OwnerBalanceItem } from '../lib/types';
 import {
   LineChart,
   Line,
@@ -14,6 +15,7 @@ import {
   Legend,
   ResponsiveContainer,
   Cell,
+  ReferenceLine,
 } from 'recharts';
 
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
@@ -31,14 +33,37 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function OwnerBalancesTooltip({ active, payload }: Partial<TooltipContentProps<number, string>>) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  const row = payload[0]?.payload as OwnerBalanceItem | undefined;
+  if (!row) {
+    return null;
+  }
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-2 text-xs shadow-sm sm:text-sm">
+      <p className="mb-1 font-semibold text-slate-900">{row.owner}</p>
+      {row.accounts.map((account) => (
+        <p key={account.account_name} className="text-slate-700">
+          {account.account_name} ({account.type}): {formatCurrency(account.value)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 function StatTile({
   label,
   value,
   format = 'currency',
+  sublabel,
 }: {
   label: string;
   value: number;
   format?: 'currency' | 'percent' | 'number';
+  /** Small caption under the value — used to state the window a figure covers. */
+  sublabel?: string;
 }) {
   let formatted: string;
   if (format === 'currency') {
@@ -53,6 +78,7 @@ function StatTile({
     <div className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
       <p className="text-xs sm:text-sm font-medium text-slate-600">{label}</p>
       <p className="mt-2 text-xl sm:text-2xl font-bold text-slate-900">{formatted}</p>
+      {sublabel && <p className="mt-1 text-xs text-slate-500">{sublabel}</p>}
     </div>
   );
 }
@@ -80,7 +106,7 @@ export function OverviewTab() {
     );
   }
 
-  if (!data?.net_worth || !data?.overview) {
+  if (data?.net_worth == null || data?.overview == null) {
     return (
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-6">
         <p className="text-slate-600">No data available</p>
@@ -90,6 +116,14 @@ export function OverviewTab() {
 
   const nw = data.net_worth;
   const ov = data.overview;
+  const hiddenSavingsMonths = ov.savings_rate_trend.filter((point) => point.savings_rate === null).length;
+  // These three tiles average only whole calendar months, so say which window they cover —
+  // otherwise "Monthly Expenses" is a number with no stated basis.
+  const monthlyWindow =
+    ov.complete_months === 0
+      ? 'not enough complete months'
+      : `avg of ${ov.complete_months} complete ${ov.complete_months === 1 ? 'month' : 'months'}`;
+  const dormantCount = nw.dormant_accounts.length;
 
   return (
     <div className="space-y-6">
@@ -103,9 +137,9 @@ export function OverviewTab() {
 
       {/* Income and Expenses Row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatTile label="Monthly Income" value={ov.avg_monthly_income} />
-        <StatTile label="Monthly Expenses" value={ov.avg_monthly_expense} />
-        <StatTile label="Net Monthly Flow" value={ov.net_flow} />
+        <StatTile label="Monthly Income" value={ov.avg_monthly_income} sublabel={monthlyWindow} />
+        <StatTile label="Monthly Expenses" value={ov.avg_monthly_expense} sublabel={monthlyWindow} />
+        <StatTile label="Net Monthly Flow" value={ov.avg_monthly_net} sublabel={monthlyWindow} />
       </div>
 
       {/* Savings Rate Trend Chart */}
@@ -116,8 +150,13 @@ export function OverviewTab() {
             <LineChart data={ov.savings_rate_trend}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="month" />
-              <YAxis tickFormatter={(value) => formatPercent(value)} domain={[0, 1]} />
+              <YAxis
+                tickFormatter={(value) => formatPercent(value)}
+                domain={[-1, 1]}
+                allowDataOverflow={true}
+              />
               <Tooltip formatter={(value) => formatPercent(value as number)} labelStyle={{ color: '#000' }} />
+              <ReferenceLine y={0.2} stroke="#94a3b8" strokeDasharray="4 4" label="Target 20%" />
               <Line
                 type="monotone"
                 dataKey="savings_rate"
@@ -125,9 +164,16 @@ export function OverviewTab() {
                 strokeWidth={2}
                 dot={{ fill: '#3b82f6' }}
                 name="Savings Rate"
+                connectNulls={false}
               />
             </LineChart>
           </ResponsiveContainer>
+          {hiddenSavingsMonths > 0 && (
+            <p className="mt-2 text-xs text-slate-500">
+              {hiddenSavingsMonths} {hiddenSavingsMonths === 1 ? 'month' : 'months'} hidden — no recorded
+              income.
+            </p>
+          )}
         </div>
       )}
 
@@ -171,9 +217,15 @@ export function OverviewTab() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="owner" />
                 <YAxis tickFormatter={(value) => formatCurrency(value)} />
-                <Tooltip formatter={(value) => formatCurrency(value as number)} />
+                <Tooltip content={<OwnerBalancesTooltip />} />
                 <Legend />
-                <Bar dataKey="value" fill="#10b981" name="Balance" />
+                <ReferenceLine y={0} stroke="#94a3b8" />
+                <Bar dataKey="depository" stackId="a" fill="#10b981" name="Depository" />
+                <Bar dataKey="investment" stackId="a" fill="#3b82f6" name="Investment" />
+                <Bar dataKey="credit" stackId="a" fill="#ef4444" name="Credit" />
+                {nw.owner_balances.some((row) => row.other !== 0) && (
+                  <Bar dataKey="other" stackId="a" fill="#8b5cf6" name="Other" />
+                )}
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -205,18 +257,38 @@ export function OverviewTab() {
         {ov.avg_weekly_expense > 0 && <StatTile label="Weekly Expenses" value={ov.avg_weekly_expense} />}
       </div>
 
-      {/* Stale Accounts Warning */}
+      {/* Sync Health Warning */}
       {nw?.stale_accounts && nw.stale_accounts.length > 0 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 sm:p-6">
-          <h3 className="font-semibold text-sm sm:text-base text-amber-900">Stale Accounts</h3>
+          <h3 className="font-semibold text-sm sm:text-base text-amber-900">Balances may be out of date</h3>
           <div className="mt-2 space-y-1">
             {nw.stale_accounts.map((account) => (
-              <p key={account.account_name} className="text-sm text-amber-800">
-                {account.account_name} — {account.days_stale} days without activity
+              <p key={account.account_key} className="text-sm text-amber-800">
+                {account.account_name} — balance last refreshed {account.days_stale} days ago
               </p>
             ))}
           </div>
+          <p className="mt-2 text-xs text-amber-700">
+            This usually means the Plaid connection for these accounts needs to be repaired.
+          </p>
         </div>
+      )}
+
+      {/* Dormant Accounts */}
+      {nw?.dormant_accounts && nw.dormant_accounts.length > 0 && (
+        <details className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-6">
+          <summary className="cursor-pointer font-semibold text-sm sm:text-base text-slate-700">
+            {dormantCount} {dormantCount === 1 ? 'account' : 'accounts'} with no activity in 90+ days
+          </summary>
+          <div className="mt-2 space-y-1">
+            {nw.dormant_accounts.map((account) => (
+              <p key={account.account_key} className="text-sm text-slate-600">
+                {account.account_name} — no activity in {account.days_inactive} days ·{' '}
+                {formatCurrency(account.balance)}
+              </p>
+            ))}
+          </div>
+        </details>
       )}
     </div>
   );
