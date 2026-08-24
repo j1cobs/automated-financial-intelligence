@@ -279,9 +279,20 @@ def build_net_worth(
     }
 
 
-def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
+def build_overview(
+    df: pd.DataFrame, acct_df: pd.DataFrame, all_time_df: pd.DataFrame | None = None
+) -> dict[str, Any]:
     """Port of `_section_overview`'s data. `df` must already be enriched
-    (`prepare_transactions`) and duplicate-excluded."""
+    (`prepare_transactions`) and duplicate-excluded.
+
+    `all_time_df` is the same frame with every filter EXCEPT the period applied — see
+    `api/filters.py`, invariant 1. Headline figures and the monthly/weekly averages read
+    the period-filtered `df`; trends, the 12-month category breakdowns, and the emergency
+    fund read `all_time_df`, so picking a 30-day window doesn't collapse a year-long trend
+    line to a single point. Defaults to `df` for callers with no period filter.
+    """
+    if all_time_df is None:
+        all_time_df = df
     empty_result = {
         "income": 0.0,
         "expenses": 0.0,
@@ -326,8 +337,8 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
     # neighbours by however many months of history existed (Fix 3a).
     avg_monthly_net = avg_monthly_income - avg_monthly_expense
 
-    max_date = df["date"].max()
-    bounded_all_time = df[df["date"] >= max_date - pd.DateOffset(months=12)]
+    max_date = all_time_df["date"].max()
+    bounded_all_time = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=12)]
 
     top_cats_df = (
         bounded_all_time[bounded_all_time["tx_type"] == "expense"]
@@ -361,9 +372,13 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
     liquid_assets = 0.0
     if not acct_df.empty and "account_type" in acct_df.columns:
         liquid_assets = float(acct_df[acct_df["account_type"].isin(["depository"])]["balance_current"].sum())
+    # Coverage is a property of your life, not of the window you happen to be looking at,
+    # so this averages over all history rather than the selected period.
     emergency_fund_months = None
-    if not monthly_expense_series.empty:
-        avg_monthly_expenses = float(monthly_expense_series.abs().mean())
+    all_time_real = all_time_df[all_time_df["tx_type"] != "transfer"]
+    all_time_expenses = _monthly_series(all_time_real, "expense", complete_month_keys(all_time_df))
+    if not all_time_expenses.empty:
+        avg_monthly_expenses = float(all_time_expenses.abs().mean())
         if avg_monthly_expenses > 0:
             emergency_fund_months = float(liquid_assets / avg_monthly_expenses)
 
@@ -383,7 +398,7 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
     # month reports millions of percent. A month with no meaningful income has no
     # meaningful savings rate; say so with None and let the chart draw a gap.
     savings_rate_trend = []
-    non_transfer = df[df["tx_type"] != "transfer"]
+    non_transfer = all_time_df[all_time_df["tx_type"] != "transfer"]
     if not non_transfer.empty:
         by_month = non_transfer.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0.0)
         for month_key in sorted(by_month.index):

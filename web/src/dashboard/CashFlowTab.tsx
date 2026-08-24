@@ -10,7 +10,40 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
+import type { TooltipContentProps } from 'recharts';
 import { useCashFlow } from '../lib/queries';
+import type { RollingSpendItem } from '../lib/types';
+
+function money(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+/**
+ * Shows the 30-day total and the per-day figure it implies. The per-day number is why
+ * this tooltip exists: the series used to be labelled "Daily Spend" while plotting a
+ * 30-day total, so a ~$7,500 month read as a $7,500 day.
+ */
+function RollingSpendTooltip({ active, payload, label }: Partial<TooltipContentProps<number, string>>) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  const row = payload[0]?.payload as RollingSpendItem | undefined;
+  if (!row) {
+    return null;
+  }
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-2 text-xs shadow-sm sm:text-sm">
+      <p className="mb-1 font-semibold text-slate-900">{String(label)}</p>
+      <p className="text-slate-700">{money(row.amount)} over the previous 30 days</p>
+      <p className="text-slate-500">{money(row.daily_avg)} per day on average</p>
+    </div>
+  );
+}
 
 /**
  * Cash Flow tab — monthly/weekly trends, rolling spend, category distribution.
@@ -154,40 +187,21 @@ export function CashFlowTab() {
       {data.rolling_30d_spend.length > 0 && (
         <div className="rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
           <h3 className="mb-1 text-sm sm:text-base font-semibold text-slate-800">Rolling 30-day spend</h3>
-          <p className="mb-4 text-xs text-slate-500">total spent in the 30 days ending on each date</p>
+          <p className="mb-4 text-xs text-slate-500">
+            total spent in the 30 days ending on each date — hover for the daily average
+          </p>
           <div className="h-48 sm:h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={data.rolling_30d_spend}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="date" stroke="#64748b" style={{ fontSize: '12px' }} />
-                <YAxis yAxisId="left" stroke="#64748b" style={{ fontSize: '12px' }} />
-                <YAxis yAxisId="right" orientation="right" stroke="#64748b" style={{ fontSize: '12px' }} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#ffffff',
-                    border: '1px solid #e2e8f0',
-                  }}
-                  formatter={(value) => formatCurrency(Number(value))}
-                />
-                <Legend />
-                <Line
-                  yAxisId="left"
-                  type="monotone"
-                  dataKey="amount"
-                  stroke="#2563eb"
-                  strokeWidth={2}
-                  dot={false}
-                  name="30-day total"
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="daily_avg"
-                  stroke="#f59e0b"
-                  strokeWidth={2}
-                  dot={false}
-                  name="Daily average"
-                />
+                {/* Deliberately ONE y-axis. `daily_avg` is `amount / 30`, so plotting it
+                    as a second series draws the identical curve at 1/30 scale against a
+                    second scale — no added information, and a dual axis implies a
+                    relationship between two quantities that are the same quantity. The
+                    per-day figure lives in the tooltip instead. */}
+                <YAxis stroke="#64748b" style={{ fontSize: '12px' }} />
+                <Tooltip content={<RollingSpendTooltip />} />
               </LineChart>
             </ResponsiveContainer>
           </div>

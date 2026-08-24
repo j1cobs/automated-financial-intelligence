@@ -147,7 +147,15 @@ class ApiDataTestCase(unittest.TestCase):
         )
 
 
-READ_ENDPOINTS = ["/overview", "/cash-flow", "/budget", "/ledger", "/anomalies", "/categories"]
+READ_ENDPOINTS = [
+    "/overview",
+    "/cash-flow",
+    "/budget",
+    "/ledger",
+    "/anomalies",
+    "/categories",
+    "/filter-options",
+]
 
 WRITE_ENDPOINTS = [
     ("patch", "/accounts/plaid:acc1/credit-limit", {"limit": 500.0}),
@@ -307,6 +315,39 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         response = self.client.get("/categories")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["categories"], ["Groceries", "Income", "Shopping"])
+
+    def test_filter_options_lists_the_unfiltered_choices(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            response = self.client.get("/filter-options")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["owners"], ["Alex"])
+        self.assertIn("Checking", body["accounts"])
+        self.assertEqual([m["key"] for m in body["months"]], ["2026-08"])
+
+    def test_read_endpoints_accept_filter_query_params(self) -> None:
+        self._authed_client()
+        params = {"period": "all_time", "owners": ["Alex"], "search": "Payroll"}
+        with self._load_financial_data_patch():
+            for path in ["/overview", "/cash-flow", "/budget", "/ledger", "/anomalies"]:
+                with self.subTest(path=path):
+                    self.assertEqual(self.client.get(path, params=params).status_code, 200)
+
+    def test_owner_filter_narrows_the_ledger(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            everyone = self.client.get("/ledger", params={"period": "all_time"})
+            nobody = self.client.get("/ledger", params={"period": "all_time", "owners": ["Nobody"]})
+        self.assertEqual(len(everyone.json()["transactions"]), 2)
+        self.assertEqual(nobody.json()["transactions"], [])
+
+    def test_search_narrows_the_ledger(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            response = self.client.get("/ledger", params={"period": "all_time", "search": "Weird"})
+        rows = response.json()["transactions"]
+        self.assertEqual([r["hash"] for r in rows], ["hash-2"])
 
     def test_empty_transactions_returns_empty_view_models(self) -> None:
         self._authed_client()

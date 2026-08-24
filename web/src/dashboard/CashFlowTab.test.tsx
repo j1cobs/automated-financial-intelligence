@@ -216,7 +216,7 @@ describe('CashFlowTab', () => {
     renderCashFlowTab();
 
     expect(screen.getByText('Rolling 30-day spend')).toBeInTheDocument();
-    expect(screen.getByText('total spent in the 30 days ending on each date')).toBeInTheDocument();
+    expect(screen.getByText(/total spent in the 30 days ending on each date/)).toBeInTheDocument();
   });
 
   it('displays formatted currency values', () => {

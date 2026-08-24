@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from app.dashboard import load_financial_data
 
 from ..deps import CurrentUserDep, DbDep, RequireCsrfDep
+from ..filters import FiltersDep, apply_filters, build_filter_options
 from ..viewmodels import (
     build_anomalies,
     build_budget,
@@ -36,6 +37,18 @@ router = APIRouter(tags=["data"])
 def _load(db: DbDep):
     tx_df, acct_df = load_financial_data(db.database_url)
     return prepare_transactions(tx_df), acct_df
+
+
+def _load_filtered(db: DbDep, filters: FiltersDep):
+    """`(unfiltered, filtered, all_time, accounts)`.
+
+    Enrichment happens once on the complete frame before any filtering — see
+    `api/filters.py`, invariant 2 — so transfer pair matching sees both legs even when
+    one leg's account is excluded. Callers pick the frame their section needs.
+    """
+    tx, acct_df = _load(db)
+    filtered, all_time = apply_filters(tx, filters)
+    return tx, filtered, all_time, acct_df
 
 
 # ---------------------------------------------------------------------------
@@ -263,49 +276,77 @@ class CategoriesResponse(BaseModel):
     categories: list[str]
 
 
+class MonthOption(BaseModel):
+    key: str
+    """`YYYY-MM`, the value the `months` query param expects."""
+    label: str
+    """Human-readable, e.g. "July 2026"."""
+
+
+class FilterOptionsResponse(BaseModel):
+    owners: list[str]
+    categories: list[str]
+    accounts: list[str]
+    months: list[MonthOption]
+    amount_min: float
+    amount_max: float
+
+
 # ---------------------------------------------------------------------------
 # Read endpoints
 # ---------------------------------------------------------------------------
 
 
 @router.get("/overview", response_model=OverviewResponse)
-def get_overview(current_user: CurrentUserDep, db: DbDep) -> OverviewResponse:
-    tx, acct_df = _load(db)
-    real = exclude_duplicate_rows(tx)
+def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> OverviewResponse:
+    tx, filtered, all_time, acct_df = _load_filtered(db, filters)
     return OverviewResponse(
-        # `tx` (unfiltered) not `real`: dormancy is about real history, and the
-        # duplicate-flag filter is irrelevant to when an account last saw activity.
+        # `tx` (unfiltered) not `filtered`: dormancy is about real history, and neither
+        # the duplicate flag nor the period filter bears on when an account last saw use.
         net_worth=NetWorth(**build_net_worth(acct_df, tx)),
-        overview=Overview(**build_overview(real, acct_df)),
+        overview=Overview(
+            **build_overview(
+                exclude_duplicate_rows(filtered),
+                acct_df,
+                exclude_duplicate_rows(all_time),
+            )
+        ),
     )
 
 
 @router.get("/cash-flow", response_model=CashFlowResponse)
-def get_cash_flow(current_user: CurrentUserDep, db: DbDep) -> CashFlowResponse:
-    tx, _acct_df = _load(db)
-    real = exclude_duplicate_rows(tx)
-    return CashFlowResponse(**build_cash_flow(real))
+def get_cash_flow(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> CashFlowResponse:
+    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
+    return CashFlowResponse(**build_cash_flow(exclude_duplicate_rows(filtered)))
 
 
 @router.get("/budget", response_model=BudgetResponse)
-def get_budget(current_user: CurrentUserDep, db: DbDep) -> BudgetResponse:
-    tx, _acct_df = _load(db)
-    real = exclude_duplicate_rows(tx)
-    budget_rows = db.get_budgets()
-    return BudgetResponse(**build_budget(real, budget_rows))
+def get_budget(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> BudgetResponse:
+    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
+    return BudgetResponse(**build_budget(exclude_duplicate_rows(filtered), db.get_budgets()))
 
 
 @router.get("/ledger", response_model=LedgerResponse)
-def get_ledger(current_user: CurrentUserDep, db: DbDep) -> LedgerResponse:
-    tx, _acct_df = _load(db)
-    return LedgerResponse(transactions=[LedgerItem(**item) for item in build_ledger(tx)])
+def get_ledger(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> LedgerResponse:
+    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
+    # Duplicate-flagged rows stay: the ledger checkbox is the only way to un-flag one.
+    return LedgerResponse(transactions=[LedgerItem(**item) for item in build_ledger(filtered)])
 
 
 @router.get("/anomalies", response_model=AnomaliesResponse)
-def get_anomalies(current_user: CurrentUserDep, db: DbDep) -> AnomaliesResponse:
+def get_anomalies(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> AnomaliesResponse:
+    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
+    return AnomaliesResponse(
+        anomalies=[AnomalyItem(**item) for item in build_anomalies(exclude_duplicate_rows(filtered))]
+    )
+
+
+@router.get("/filter-options", response_model=FilterOptionsResponse)
+def get_filter_options(current_user: CurrentUserDep, db: DbDep) -> FilterOptionsResponse:
+    """Options for the filter UI, derived from the UNFILTERED frame so the lists don't
+    shrink out from under the user as they narrow the view."""
     tx, _acct_df = _load(db)
-    real = exclude_duplicate_rows(tx)
-    return AnomaliesResponse(anomalies=[AnomalyItem(**item) for item in build_anomalies(real)])
+    return FilterOptionsResponse(**build_filter_options(tx))
 
 
 @router.get("/categories", response_model=CategoriesResponse)

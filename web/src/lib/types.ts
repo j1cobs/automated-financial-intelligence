@@ -227,3 +227,22 @@ export interface AnomaliesResponse {
 export interface CategoriesResponse {
   categories: string[];
 }
+
+// ---------------------------------------------------------------------------
+// GET /filter-options
+// ---------------------------------------------------------------------------
+
+export interface MonthOption {
+  key: string;
+  /** Human-readable, e.g. "July 2026". */
+  label: string;
+}
+
+export interface FilterOptions {
+  owners: string[];
+  categories: string[];
+  accounts: string[];
+  months: MonthOption[];
+  amount_min: number;
+  amount_max: number;
+}
