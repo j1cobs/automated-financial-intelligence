@@ -48,24 +48,53 @@ class AssetMixItem(BaseModel):
     balance: float
 
 
-class OwnerBalanceItem(BaseModel):
-    owner: str
-    value: float
+class OwnerAccountItem(BaseModel):
+    account_name: str
     type: str
+    value: float
+
+
+class OwnerBalanceItem(BaseModel):
+    """One row per account HOLDER, not per account. Per-account detail lives in
+    `accounts` for the chart tooltip — see PLAN.md Phase 15, Fix 4."""
+
+    owner: str
+    depository: float
+    investment: float
+    credit: float
+    other: float
+    net: float
+    accounts: list[OwnerAccountItem]
 
 
 class CreditUtilizationItem(BaseModel):
+    account_key: str
     account_name: str
     owner_name: str | None
     current: float
     limit: float | None
     pct: float | None
+    """Fraction of the limit used (0.42 = 42%), not percentage points."""
     is_manual: bool
 
 
 class StaleAccountItem(BaseModel):
+    """Sync health: `accounts.updated_at` is the last BALANCE REFRESH, not the last
+    transaction. A gap here suggests a broken Plaid Item, not an unused account."""
+
+    account_key: str
     account_name: str
     days_stale: int
+
+
+class DormantAccountItem(BaseModel):
+    """No transactions in `DORMANT_DAYS`, with a non-zero balance. Informational."""
+
+    account_key: str
+    account_name: str
+    owner_name: str | None
+    days_inactive: int
+    balance: float
 
 
 class NetWorth(BaseModel):
@@ -76,6 +105,7 @@ class NetWorth(BaseModel):
     owner_balances: list[OwnerBalanceItem]
     credit_utilization: list[CreditUtilizationItem]
     stale_accounts: list[StaleAccountItem]
+    dormant_accounts: list[DormantAccountItem]
     forked_accounts: list[str]
 
 
@@ -97,7 +127,12 @@ class IncomeBreakdownItem(BaseModel):
 
 class SavingsRateTrendItem(BaseModel):
     month: str
-    savings_rate: float
+    savings_rate: float | None
+    """Fraction (0.2 = 20%). None when the month's income is below
+    `MIN_MONTHLY_INCOME_FOR_RATE` — a month with no income has no meaningful rate,
+    so the chart draws a gap rather than a spike. See PLAN.md Phase 15, Fix 2."""
+    income: float
+    expenses: float
 
 
 class Overview(BaseModel):
@@ -105,11 +140,15 @@ class Overview(BaseModel):
     expenses: float
     net_flow: float
     savings_rate: float
+    """Fraction (0.6 = 60%), not percentage points. See api/viewmodels.py."""
     flagged_count: int
     avg_weekly_expense: float
     avg_monthly_expense: float
     avg_weekly_income: float
     avg_monthly_income: float
+    avg_monthly_net: float
+    complete_months: int
+    """How many whole calendar months the monthly averages above are computed over."""
     top_categories: list[TopCategoryItem]
     month_over_month: list[MonthOverMonthItem]
     emergency_fund_months: float | None
@@ -123,20 +162,29 @@ class OverviewResponse(BaseModel):
 
 
 class CashFlowSeriesItem(BaseModel):
+    """Wide row: one object per month carrying both series. The long
+    `{month, tx_type, amount}` shape forced the frontend to pivot on the `tx_type`
+    string, which it did case-incorrectly — see PLAN.md Phase 15, Fix 6."""
+
     month: str
-    tx_type: str
-    amount: float
+    income: float
+    expenses: float
+    net: float
 
 
 class WeeklyTrendItem(BaseModel):
     week: str
-    tx_type: str
-    amount: float
+    income: float
+    expenses: float
+    net: float
 
 
 class RollingSpendItem(BaseModel):
     date: str
     amount: float
+    """Total spent in the 30 CALENDAR DAYS ending on `date`."""
+    daily_avg: float
+    """`amount / 30` — the per-day figure the old "Daily Spend" label implied."""
 
 
 class MonthlyNetByOwnerItem(BaseModel):
@@ -158,6 +206,7 @@ class CashFlowResponse(BaseModel):
     transfer_count: int
     flagged_count: int
     savings_rate: float
+    """Fraction (0.6 = 60%), not percentage points."""
     month_over_month: list[CashFlowSeriesItem]
     weekly_trend: list[WeeklyTrendItem]
     rolling_30d_spend: list[RollingSpendItem]
@@ -224,7 +273,9 @@ def get_overview(current_user: CurrentUserDep, db: DbDep) -> OverviewResponse:
     tx, acct_df = _load(db)
     real = exclude_duplicate_rows(tx)
     return OverviewResponse(
-        net_worth=NetWorth(**build_net_worth(acct_df)),
+        # `tx` (unfiltered) not `real`: dormancy is about real history, and the
+        # duplicate-flag filter is irrelevant to when an account last saw activity.
+        net_worth=NetWorth(**build_net_worth(acct_df, tx)),
         overview=Overview(**build_overview(real, acct_df)),
     )
 

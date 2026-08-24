@@ -33,7 +33,11 @@ When extending, prefer wiring the existing real modules onto the live path over 
 
 - Install deps: `pip install -r requirements.txt` (requirements.txt is authoritative; pyproject.toml is minimal/incomplete)
 - Run pipeline: `python main.py`
-- Run dashboard: `streamlit run streamlit_app.py`
+- Run the Streamlit dashboard (frozen reference implementation): `streamlit run streamlit_app.py`
+- Run the API for the React dashboard: `uvicorn api.main:app --reload` (defaults to port 8000)
+- Run the React dashboard: `cd web && npm run dev`. It needs the API running; point it at a
+  non-default API with `VITE_API_URL`.
+- Web checks (all four must pass): `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`
 - Run all tests: `python -m unittest discover -s tests -v`
 - Run a single test: `python -m unittest tests.test_db_hash -v` (or `tests.test_db_hash.TestClass.test_method`)
 - Mint/repair a Plaid access token: `python scripts/plaid_link.py create --append` (sandbox is headless; production
@@ -99,6 +103,28 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
   sign-out) and `dashboard.py` (DB reads + Plotly rendering). The transactions table is where the user sets
   `is_duplicate`; a "Possible duplicates only" sidebar filter surfaces the candidates.
+  **Frozen as of PLAN.md Phase 15** — it stays as a reference implementation and fallback, but new
+  dashboard work goes into `web/`. Do not add features here; do not refactor it. Its *pure* helpers
+  (`_enrich_transactions`, `_classify_tx_type`, `_effective_credit_limit`, `_label_subtype`) are
+  deliberately still imported by `api/viewmodels.py` — the freeze forbids editing this module, not
+  reusing it.
+- `api/` — FastAPI backend for the React dashboard. `routers/auth.py` (Google OAuth + JWT session
+  cookie + CSRF) and `routers/data.py` (read endpoints returning pre-shaped view models, plus the 5
+  write paths). `viewmodels.py` builds those view models by reusing `app/dashboard.py`'s pure
+  functions rather than reimplementing them, so the business logic stays covered by the existing
+  dashboard tests. Two conventions matter here:
+  - **Every ratio the API returns is a fraction**, not percentage points — a 60% savings rate is
+    `0.6`. `pct` fields were already fractions while `savings_rate` was percentage points, and the
+    frontend applied one formatter to both, so one was always wrong. Never reintroduce a `* 100`;
+    formatting belongs to the UI.
+  - **Series are returned wide, not long.** `{month, income, expenses, net}`, not
+    `{month, tx_type, amount}`. The long shape forced the frontend to pivot on a `tx_type` string and
+    it matched the wrong case, so a chart rendered axes and no bars. Keep the pivot server-side.
+- `web/` — React + TypeScript dashboard (Vite, Tailwind v4, TanStack Query, Recharts). `lib/api.ts`
+  owns the cross-origin cookie + CSRF concerns; `lib/types.ts` mirrors the Pydantic response models
+  field-for-field and must be updated in the same change as `api/routers/data.py`, or `tsc -b` is the
+  only thing standing between you and a runtime shape mismatch. There is deliberately **no sign-out
+  button** (stateless JWTs, no server-side revocation — see the comment in `src/App.tsx`).
 - `scripts/` — `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
   underlying `PlaidLinkClient`), `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
   no ingestion, no credentials), and `purge_sample_data.py` (deletes it again). Seeding is intentionally
