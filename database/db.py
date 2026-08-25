@@ -276,6 +276,37 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
+    def get_net_worth_history(self) -> list[dict[str, Any]]:
+        """Daily net worth from `account_balance_snapshots`, joined against the accounts
+        table's CURRENT type (an account's type is treated as effectively static --
+        Plaid doesn't change it after linking, so joining on today's `accounts` row is
+        fine even for a historical snapshot). Signed the same way
+        `api/viewmodels.py::build_net_worth` signs the live figure: depository and
+        investment balances are assets, credit balances are a liability subtracted off.
+        """
+        sql = """
+        SELECT
+            s.snapshot_date,
+            SUM(CASE WHEN a.account_type IN ('depository', 'investment') THEN s.balance_current ELSE 0 END)
+                AS assets,
+            SUM(CASE WHEN a.account_type = 'credit' THEN s.balance_current ELSE 0 END) AS liabilities
+        FROM account_balance_snapshots s
+        JOIN accounts a ON a.account_key = s.account_key
+        GROUP BY s.snapshot_date
+        ORDER BY s.snapshot_date
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [
+            {
+                "date": snapshot_date.isoformat(),
+                "net_worth": float((assets or 0) - (liabilities or 0)),
+            }
+            for snapshot_date, assets, liabilities in rows
+        ]
+
     def count_by_source(self) -> dict[str, dict[str, int]]:
         """{source: {"accounts": n, "transactions": m}} for every source present in `accounts`."""
         sql = """

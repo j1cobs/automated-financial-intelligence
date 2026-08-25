@@ -685,6 +685,155 @@ def build_budget(df: pd.DataFrame, budget_rows: list[dict[str, Any]]) -> dict[st
     return {"month": current_month_str, "items": items}
 
 
+def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]]) -> dict[str, Any]:
+    """Insights for the Home tab: a daily-check-in status surface, versus the four
+    existing tabs which stay the "go deeper" analysis layer (PLAN.md's insight-first
+    dashboard work).
+
+    `all_time_df` must be enriched, duplicate-excluded, and UNFILTERED -- every insight
+    here compares against the user's own full history, the same reasoning `_build_metric`
+    baselines use. `net_worth_history` is `DatabaseClient.get_net_worth_history()`'s
+    return value; it is DB-sourced (from `account_balance_snapshots`), not derivable from
+    `all_time_df`.
+    """
+    net_worth_trend = [{"date": row["date"], "net_worth": row["net_worth"]} for row in net_worth_history]
+
+    if all_time_df.empty:
+        return {
+            "net_worth_trend": net_worth_trend,
+            "recurring_monthly_spend": 0.0,
+            "recurring_items": [],
+            "top_merchants": [],
+            "cash_flow_projection": None,
+            "category_drift": [],
+            "subscriptions": [],
+        }
+
+    real = all_time_df[all_time_df["tx_type"] != "transfer"]
+    months = complete_month_keys(all_time_df)
+    today = date.today()
+    current_month_str = today.strftime("%Y-%m")
+
+    # --- Recurring / committed monthly spend (Q4) -----------------------------------
+    # `is_recurring` is user-set and stored (see the transactions-tab checkbox) but was
+    # not surfaced anywhere before this. The monthly figure averages only complete
+    # months (Fix 3c's rule), same as every other "typical month" number in this module.
+    recurring = real[(real["tx_type"] == "expense") & real["is_recurring"].fillna(False)]
+    recurring_by_desc = (
+        recurring.groupby("description")["adjusted_amount"].sum().abs().sort_values(ascending=False)
+    )
+    recurring_items = [
+        {"description": desc, "amount": float(amount)} for desc, amount in recurring_by_desc.items()
+    ]
+    recurring_monthly_series = _monthly_series(recurring, "expense", months).abs()
+    recurring_monthly_spend = (
+        float(recurring_monthly_series.mean()) if not recurring_monthly_series.empty else 0.0
+    )
+
+    # --- Merchant-level breakdown (Q4) -----------------------------------------------
+    # `description` is unaggregated everywhere else in the app; this is the first place
+    # it's rolled up per merchant. Bounded to the trailing 12 months, same window
+    # `build_overview`'s top_categories uses, so a one-off purchase from years ago
+    # doesn't crowd out what's actually current.
+    max_date = all_time_df["date"].max()
+    trailing_12mo = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=12)]
+    merchant_df = (
+        trailing_12mo[trailing_12mo["tx_type"] == "expense"]
+        .groupby("description", as_index=False)["adjusted_amount"]
+        .sum()
+        .assign(abs_amount=lambda x: x["adjusted_amount"].abs())
+        .nlargest(10, "abs_amount")
+        .sort_values("abs_amount", ascending=False)
+    )
+    top_merchants = [
+        {"description": row["description"], "amount": float(row["abs_amount"])}
+        for _, row in merchant_df.iterrows()
+    ]
+
+    # --- Month-end cash-flow projection (Q4) ------------------------------------------
+    # Same day-elapsed/days-in-month projection formula `build_budget` uses for
+    # per-category projections, applied to the whole month's income/expenses instead.
+    cash_flow_projection: dict[str, Any] | None = None
+    if current_month_str in all_time_df["month"].values:
+        month_df = real[real["month"] == current_month_str]
+        spent_so_far = float(month_df[month_df["tx_type"] == "expense"]["adjusted_amount"].abs().sum())
+        income_so_far = float(month_df[month_df["tx_type"] == "income"]["adjusted_amount"].sum())
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        days_elapsed = max(today.day, 1)
+        projection_factor = days_in_month / days_elapsed
+        cash_flow_projection = {
+            "month": current_month_str,
+            "spent_so_far": spent_so_far,
+            "income_so_far": income_so_far,
+            "projected_expenses": spent_so_far * projection_factor,
+            "projected_income": income_so_far * projection_factor,
+            "days_elapsed": days_elapsed,
+            "days_in_month": days_in_month,
+        }
+
+    # --- Category drift vs. the user's own baseline (Q4) ------------------------------
+    # Baseline is the category's average spend across the user's own complete months,
+    # not a fixed budget -- "40% over your usual grocery spend," not "40% over budget."
+    category_drift: list[dict[str, Any]] = []
+    if current_month_str in all_time_df["month"].values:
+        this_month_expense = real[(real["month"] == current_month_str) & (real["tx_type"] == "expense")]
+        this_month_by_cat = this_month_expense.groupby("category")["adjusted_amount"].sum().abs()
+        history_expense = real[(real["tx_type"] == "expense") & real["month"].isin(months)]
+        monthly_by_cat = history_expense.groupby(["month", "category"])["adjusted_amount"].sum().abs()
+        baseline_by_cat = monthly_by_cat.groupby("category").mean()
+        for category in sorted(set(this_month_by_cat.index) | set(baseline_by_cat.index)):
+            baseline_amount = baseline_by_cat.get(category)
+            if baseline_amount is None or baseline_amount == 0:
+                # No baseline to compare against yet -- a brand-new category this
+                # month has no "usual" to drift from.
+                continue
+            current_amount = float(this_month_by_cat.get(category, 0.0))
+            category_drift.append(
+                {
+                    "category": category,
+                    "current": current_amount,
+                    "baseline": float(baseline_amount),
+                    "drift_pct": (current_amount - baseline_amount) / baseline_amount,
+                }
+            )
+        category_drift.sort(key=lambda row: abs(row["drift_pct"]), reverse=True)
+        category_drift = category_drift[:8]
+
+    # --- Subscription detection (Q4) --------------------------------------------------
+    # Independent of the user-set `is_recurring` flag above: a description that recurs
+    # in at least 3 of the trailing 6 months at a near-constant amount (within 15% of
+    # its own mean) is flagged automatically, catching subscriptions the user never
+    # went and hand-marked.
+    trailing_6mo = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=6)]
+    expense_6mo = trailing_6mo[trailing_6mo["tx_type"] == "expense"]
+    subscriptions: list[dict[str, Any]] = []
+    for description, group in expense_6mo.groupby("description"):
+        months_seen = group["month"].nunique()
+        if months_seen < 3:
+            continue
+        amounts = group["adjusted_amount"].abs()
+        mean_amount = float(amounts.mean())
+        if mean_amount <= 0:
+            continue
+        spread = float(amounts.max() - amounts.min()) / mean_amount
+        if spread > 0.15:
+            continue
+        subscriptions.append(
+            {"description": description, "average_amount": mean_amount, "months_seen": int(months_seen)}
+        )
+    subscriptions.sort(key=lambda row: row["average_amount"], reverse=True)
+
+    return {
+        "net_worth_trend": net_worth_trend,
+        "recurring_monthly_spend": recurring_monthly_spend,
+        "recurring_items": recurring_items,
+        "top_merchants": top_merchants,
+        "cash_flow_projection": cash_flow_projection,
+        "category_drift": category_drift,
+        "subscriptions": subscriptions[:10],
+    }
+
+
 def build_anomalies(df: pd.DataFrame) -> list[dict[str, Any]]:
     """Port of `_section_anomalies`'s data. `df` must already be enriched and
     duplicate-excluded."""

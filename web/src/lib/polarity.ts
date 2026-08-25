@@ -74,6 +74,8 @@ export const METRIC_POLARITY: Readonly<Record<string, Polarity>> = Object.freeze
   credit_utilization: 'inverse',
   liabilities: 'inverse',
   outlier_count: 'inverse',
+  recurring_monthly_spend: 'inverse',
+  projected_month_end_expenses: 'inverse',
 
   // movement is just movement
   transaction_count: 'neutral',

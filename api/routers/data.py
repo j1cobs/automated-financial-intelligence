@@ -24,6 +24,7 @@ from ..viewmodels import (
     build_anomalies,
     build_budget,
     build_cash_flow,
+    build_home,
     build_ledger,
     build_net_worth,
     build_overview,
@@ -265,6 +266,58 @@ class BudgetResponse(BaseModel):
     items: list[BudgetItem]
 
 
+class NetWorthTrendItem(BaseModel):
+    date: str
+    """ISO date, one snapshot per calendar day (`account_balance_snapshots`)."""
+    net_worth: float
+
+
+class RecurringItem(BaseModel):
+    description: str
+    amount: float
+
+
+class MerchantItem(BaseModel):
+    description: str
+    amount: float
+
+
+class CashFlowProjection(BaseModel):
+    month: str
+    spent_so_far: float
+    income_so_far: float
+    projected_expenses: float
+    projected_income: float
+    days_elapsed: int
+    days_in_month: int
+
+
+class CategoryDriftItem(BaseModel):
+    category: str
+    current: float
+    baseline: float
+    """The category's own historical average over complete months, not a budget."""
+    drift_pct: float
+    """Fraction: `(current - baseline) / baseline`. Positive = spending more than usual."""
+
+
+class SubscriptionItem(BaseModel):
+    description: str
+    average_amount: float
+    months_seen: int
+    """Out of the trailing 6 months."""
+
+
+class HomeResponse(BaseModel):
+    net_worth_trend: list[NetWorthTrendItem]
+    recurring_monthly_spend: float
+    recurring_items: list[RecurringItem]
+    top_merchants: list[MerchantItem]
+    cash_flow_projection: CashFlowProjection | None
+    category_drift: list[CategoryDriftItem]
+    subscriptions: list[SubscriptionItem]
+
+
 class LedgerItem(BaseModel):
     hash: str
     date: str
@@ -335,6 +388,15 @@ def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -
             )
         ),
     )
+
+
+@router.get("/home", response_model=HomeResponse)
+def get_home(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> HomeResponse:
+    # `all_time` (not `filtered`): every Home insight compares against the user's own
+    # full history, same reasoning `build_overview`'s baselines use -- a status page
+    # that changes shape under an active period filter would defeat its own purpose.
+    _tx, _filtered, all_time, _acct_df = _load_filtered(db, filters)
+    return HomeResponse(**build_home(exclude_duplicate_rows(all_time), db.get_net_worth_history()))
 
 
 @router.get("/cash-flow", response_model=CashFlowResponse)

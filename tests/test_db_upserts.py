@@ -229,6 +229,46 @@ class RecordBalanceSnapshotsTests(unittest.TestCase):
         execute_many.assert_not_called()
 
 
+class GetNetWorthHistoryTests(unittest.TestCase):
+    def test_signs_assets_and_liabilities_like_build_net_worth(self) -> None:
+        import datetime as dt
+
+        connect, cursor = _mock_connect(
+            [
+                (dt.date(2026, 8, 23), 5000.0, 1000.0),
+                (dt.date(2026, 8, 24), 5200.0, 900.0),
+            ]
+        )
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_net_worth_history()
+
+        self.assertEqual(
+            result,
+            [
+                {"date": "2026-08-23", "net_worth": 4000.0},
+                {"date": "2026-08-24", "net_worth": 4300.0},
+            ],
+        )
+        sql = cursor.execute.call_args[0][0]
+        self.assertIn("account_balance_snapshots", sql)
+        self.assertIn("JOIN accounts", sql)
+
+    def test_null_sums_do_not_raise(self) -> None:
+        import datetime as dt
+
+        connect, cursor = _mock_connect([(dt.date(2026, 8, 24), None, None)])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_net_worth_history()
+
+        self.assertEqual(result, [{"date": "2026-08-24", "net_worth": 0.0}])
+
+    def test_empty_history(self) -> None:
+        connect, cursor = _mock_connect([])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_net_worth_history()
+        self.assertEqual(result, [])
+
+
 class CountBySourceTests(unittest.TestCase):
     def test_returns_mapping(self) -> None:
         connect, cursor = _mock_connect([("sample", 1, 10), ("plaid", 3, 500)])

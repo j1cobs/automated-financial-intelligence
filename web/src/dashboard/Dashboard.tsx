@@ -3,14 +3,16 @@ import { useAuth } from '../auth/AuthContext';
 import { useTheme, type ThemePreference } from '../lib/useTheme';
 import { FilterProvider } from '../lib/FilterContext';
 import { FilterBar } from './FilterBar';
+import { HomeTab } from './HomeTab';
 import { OverviewTab } from './OverviewTab';
 import { CashFlowTab } from './CashFlowTab';
 import { BudgetTab } from './BudgetTab';
 import { TransactionsTab } from './TransactionsTab';
 
-type TabId = 'overview' | 'cashflow' | 'budget' | 'transactions';
+type TabId = 'home' | 'overview' | 'cashflow' | 'budget' | 'transactions';
 
 const TABS: { id: TabId; label: string }[] = [
+  { id: 'home', label: 'Home' },
   { id: 'overview', label: 'Overview' },
   { id: 'cashflow', label: 'Cash Flow' },
   { id: 'budget', label: 'Budget' },
@@ -58,15 +60,18 @@ function ThemeToggle() {
 }
 
 /**
- * Authenticated dashboard shell: header + 4-tab layout (Overview, Cash Flow,
- * Budget, Transactions). Tab switching is local `useState` — no router, same
- * decision R3 made for the auth flow. Each tab is a self-contained component
- * in this directory; adding a 5th tab means adding it to `TABS` and the
- * switch below, nothing else in this file needs to change per-tab.
+ * Authenticated dashboard shell: header + 5-tab layout (Home, Overview, Cash
+ * Flow, Budget, Transactions). Home is the default landing tab -- a
+ * daily-check-in status surface (PLAN.md §4 Q1/Q2); the other four are
+ * untouched and serve as its "go deeper" drill-down layer. Tab switching is
+ * local `useState` — no router, same decision R3 made for the auth flow.
+ * Each tab is a self-contained component in this directory; adding another
+ * tab means adding it to `TABS` and the switch below, nothing else in this
+ * file needs to change per-tab.
  */
 export function Dashboard() {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [activeTab, setActiveTab] = useState<TabId>('home');
 
   return (
     <FilterProvider>
@@ -96,6 +101,7 @@ export function Dashboard() {
         </nav>
         <FilterBar />
         <main className="p-6">
+          {activeTab === 'home' && <HomeTab />}
           {activeTab === 'overview' && <OverviewTab />}
           {activeTab === 'cashflow' && <CashFlowTab />}
           {activeTab === 'budget' && <BudgetTab />}

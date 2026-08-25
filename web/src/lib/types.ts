@@ -199,6 +199,61 @@ export interface BudgetResponse {
 }
 
 // ---------------------------------------------------------------------------
+// GET /home
+// ---------------------------------------------------------------------------
+
+export interface NetWorthTrendItem {
+  date: string;
+  net_worth: number;
+}
+
+export interface RecurringItem {
+  description: string;
+  amount: number;
+}
+
+export interface MerchantItem {
+  description: string;
+  amount: number;
+}
+
+export interface CashFlowProjection {
+  month: string;
+  spent_so_far: number;
+  income_so_far: number;
+  projected_expenses: number;
+  projected_income: number;
+  days_elapsed: number;
+  days_in_month: number;
+}
+
+export interface CategoryDriftItem {
+  category: string;
+  current: number;
+  /** The category's own historical average over complete months, not a budget. */
+  baseline: number;
+  /** Fraction: `(current - baseline) / baseline`. Positive = spending more than usual. */
+  drift_pct: number;
+}
+
+export interface SubscriptionItem {
+  description: string;
+  average_amount: number;
+  /** Out of the trailing 6 months. */
+  months_seen: number;
+}
+
+export interface HomeResponse {
+  net_worth_trend: NetWorthTrendItem[];
+  recurring_monthly_spend: number;
+  recurring_items: RecurringItem[];
+  top_merchants: MerchantItem[];
+  cash_flow_projection: CashFlowProjection | null;
+  category_drift: CategoryDriftItem[];
+  subscriptions: SubscriptionItem[];
+}
+
+// ---------------------------------------------------------------------------
 // GET /ledger
 // ---------------------------------------------------------------------------
 

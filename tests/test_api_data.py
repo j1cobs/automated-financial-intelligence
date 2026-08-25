@@ -117,6 +117,7 @@ class ApiDataTestCase(unittest.TestCase):
         self.mock_db.database_url = self.settings.database_url
         self.mock_db.get_categories.return_value = ["Groceries", "Income", "Shopping"]
         self.mock_db.get_budgets.return_value = [{"category": "Shopping", "monthly_limit": 200.0}]
+        self.mock_db.get_net_worth_history.return_value = []
         app.dependency_overrides[get_settings] = lambda: self.settings
         app.dependency_overrides[get_db] = lambda: self.mock_db
         self.client = TestClient(app)
@@ -156,6 +157,7 @@ class ApiDataTestCase(unittest.TestCase):
 
 READ_ENDPOINTS = [
     "/overview",
+    "/home",
     "/cash-flow",
     "/budget",
     "/ledger",
@@ -278,6 +280,29 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         # expense) is excluded from income; net income should reflect the payroll deposit.
         self.assertEqual(body["overview"]["income"], 1000.0)
         self.assertEqual(body["overview"]["flagged_count"], 1)
+
+    def test_home_shape_and_net_worth_history_passthrough(self) -> None:
+        self._authed_client()
+        self.mock_db.get_net_worth_history.return_value = [
+            {"date": "2026-08-23", "net_worth": 900.0},
+            {"date": "2026-08-24", "net_worth": 1000.0},
+        ]
+        with self._load_financial_data_patch():
+            response = self.client.get("/home")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            body["net_worth_trend"],
+            [
+                {"date": "2026-08-23", "net_worth": 900.0},
+                {"date": "2026-08-24", "net_worth": 1000.0},
+            ],
+        )
+        # hash-1 is flagged is_recurring=True in _tx_df but is an income row, so it
+        # must not show up as a recurring EXPENSE.
+        self.assertEqual(body["recurring_items"], [])
+        for key in ("top_merchants", "category_drift", "subscriptions"):
+            self.assertIn(key, body)
 
     def test_cash_flow_shape(self) -> None:
         self._authed_client()

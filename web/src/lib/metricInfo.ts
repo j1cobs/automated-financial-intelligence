@@ -115,6 +115,20 @@ export const METRIC_INFO: Readonly<Record<string, MetricInfo>> = Object.freeze({
     window: 'Selected period',
     excludes: [],
   },
+  recurring_monthly_spend: {
+    label: 'Committed Monthly Spend',
+    definition: 'What you’ve marked recurring, averaged over complete months.',
+    formula: 'average of monthly expenses flagged is_recurring',
+    window: 'Complete months, all history',
+    excludes: ['Transactions you have not flagged as recurring'],
+  },
+  projected_month_end_expenses: {
+    label: 'Projected Month-End Spend',
+    definition: 'Your spend so far this month, extrapolated to month end.',
+    formula: 'spent so far × (days in month ÷ days elapsed)',
+    window: 'Current month',
+    excludes: ['Internal transfers between your own accounts', 'Transactions you flagged as duplicates'],
+  },
 });
 
 /** Lookup helper -- `undefined` for a key not (yet) in the registry, rather

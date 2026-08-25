@@ -25,6 +25,7 @@ from api.viewmodels import (  # noqa: E402
     SYNC_STALE_DAYS,
     _build_metric,
     build_cash_flow,
+    build_home,
     build_net_worth,
     build_overview,
     complete_month_keys,
@@ -433,6 +434,155 @@ class EmptyFrameTests(unittest.TestCase):
         self.assertEqual(build_overview(empty, pd.DataFrame([]))["savings_rate"], 0.0)
         self.assertEqual(build_cash_flow(empty)["rolling_30d_spend"], [])
         self.assertEqual(build_net_worth(pd.DataFrame([]))["owner_balances"], [])
+
+
+def _month_start(months_ago: int):
+    """The 1st of a calendar month `months_ago` months before today, as a date."""
+    period = pd.Period(date.today(), freq="M") - months_ago
+    return period.start_time.date()
+
+
+class HomeInsightsTests(unittest.TestCase):
+    """Fix/feature: the Home tab's insights (PLAN.md §4 Q4) -- recurring spend,
+    merchant breakdown, cash-flow projection, category drift, subscription detection.
+    """
+
+    def test_empty_frame_still_passes_through_net_worth_history(self) -> None:
+        empty = pd.DataFrame(
+            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
+        )
+        history = [{"date": "2026-08-20", "net_worth": 1000.0}]
+        result = build_home(empty, history)
+        self.assertEqual(result["net_worth_trend"], [{"date": "2026-08-20", "net_worth": 1000.0}])
+        self.assertEqual(result["recurring_items"], [])
+        self.assertEqual(result["top_merchants"], [])
+        self.assertIsNone(result["cash_flow_projection"])
+        self.assertEqual(result["category_drift"], [])
+        self.assertEqual(result["subscriptions"], [])
+
+    def test_recurring_monthly_spend_averages_only_complete_months_and_flag_matters(self) -> None:
+        baseline = _month_start(2)
+        # Spread across the month (day 1 and day 28) so its observed span covers the
+        # whole month and `complete_month_keys` counts it -- a single-day span
+        # wouldn't, since coverage is measured against the dataset's own date range.
+        df = _frame(
+            [
+                _tx(
+                    baseline.isoformat(),
+                    50.0,
+                    _EXPENSE,
+                    description="Gym Membership",
+                    is_recurring=True,
+                ),
+                # Not flagged recurring -- must not count toward the recurring total.
+                _tx(
+                    baseline.replace(day=28).isoformat(),
+                    900.0,
+                    _EXPENSE,
+                    description="New Laptop",
+                    is_recurring=False,
+                ),
+            ]
+        )
+        result = build_home(df, [])
+        self.assertAlmostEqual(result["recurring_monthly_spend"], 50.0)
+        self.assertEqual(result["recurring_items"], [{"description": "Gym Membership", "amount": 50.0}])
+
+    def test_top_merchants_aggregates_by_description_within_trailing_12_months(self) -> None:
+        baseline = _month_start(2)
+        df = _frame(
+            [
+                _tx(baseline.isoformat(), 40.0, _EXPENSE, description="Amazon"),
+                _tx(baseline.isoformat(), 60.0, _EXPENSE, description="Amazon"),
+                _tx(baseline.isoformat(), 10.0, _EXPENSE, description="Coffee Shop"),
+            ]
+        )
+        result = build_home(df, [])
+        self.assertEqual(
+            result["top_merchants"][0],
+            {"description": "Amazon", "amount": 100.0},
+        )
+
+    def test_cash_flow_projection_present_only_for_the_current_month(self) -> None:
+        today = date.today()
+        df = _frame(
+            [
+                _tx(today.isoformat(), 1000.0, _INCOME),
+                _tx(today.isoformat(), 100.0, _EXPENSE),
+            ]
+        )
+        result = build_home(df, [])
+        projection = result["cash_flow_projection"]
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection["month"], today.strftime("%Y-%m"))
+        self.assertAlmostEqual(projection["spent_so_far"], 100.0)
+        self.assertAlmostEqual(projection["income_so_far"], 1000.0)
+        self.assertEqual(projection["days_elapsed"], today.day)
+        # Projected figures scale up by (days_in_month / days_elapsed) >= 1.
+        self.assertGreaterEqual(projection["projected_expenses"], projection["spent_so_far"])
+
+    def test_cash_flow_projection_is_none_without_current_month_data(self) -> None:
+        baseline = _month_start(3)
+        df = _frame([_tx(baseline.isoformat(), 100.0, _EXPENSE)])
+        result = build_home(df, [])
+        self.assertIsNone(result["cash_flow_projection"])
+
+    def test_category_drift_compares_current_month_to_the_users_own_baseline(self) -> None:
+        baseline = _month_start(2)
+        today = date.today()
+        df = _frame(
+            [
+                _tx(baseline.isoformat(), 100.0, _EXPENSE, category="Groceries"),
+                _tx(today.isoformat(), 140.0, _EXPENSE, category="Groceries"),
+            ]
+        )
+        result = build_home(df, [])
+        drift = {row["category"]: row for row in result["category_drift"]}
+        self.assertAlmostEqual(drift["Groceries"]["baseline"], 100.0)
+        self.assertAlmostEqual(drift["Groceries"]["current"], 140.0)
+        self.assertAlmostEqual(drift["Groceries"]["drift_pct"], 0.4)
+
+    def test_category_with_no_baseline_is_skipped(self) -> None:
+        today = date.today()
+        df = _frame([_tx(today.isoformat(), 50.0, _EXPENSE, category="Brand New Category")])
+        result = build_home(df, [])
+        categories = [row["category"] for row in result["category_drift"]]
+        self.assertNotIn("Brand New Category", categories)
+
+    def test_subscription_detected_when_amount_is_stable_across_3_plus_months(self) -> None:
+        rows = [
+            _tx(_month_start(m).isoformat(), 9.99, _EXPENSE, description="Streaming Service")
+            for m in (1, 2, 3)
+        ]
+        df = _frame(rows)
+        result = build_home(df, [])
+        subs = {row["description"]: row for row in result["subscriptions"]}
+        self.assertIn("Streaming Service", subs)
+        self.assertAlmostEqual(subs["Streaming Service"]["average_amount"], 9.99)
+        self.assertEqual(subs["Streaming Service"]["months_seen"], 3)
+
+    def test_no_subscription_when_amount_varies_too_much(self) -> None:
+        df = _frame(
+            [
+                _tx(_month_start(1).isoformat(), 20.0, _EXPENSE, description="Variable Bill"),
+                _tx(_month_start(2).isoformat(), 60.0, _EXPENSE, description="Variable Bill"),
+                _tx(_month_start(3).isoformat(), 100.0, _EXPENSE, description="Variable Bill"),
+            ]
+        )
+        result = build_home(df, [])
+        descriptions = [row["description"] for row in result["subscriptions"]]
+        self.assertNotIn("Variable Bill", descriptions)
+
+    def test_no_subscription_when_seen_fewer_than_3_months(self) -> None:
+        df = _frame(
+            [
+                _tx(_month_start(1).isoformat(), 9.99, _EXPENSE, description="Too New"),
+                _tx(_month_start(2).isoformat(), 9.99, _EXPENSE, description="Too New"),
+            ]
+        )
+        result = build_home(df, [])
+        descriptions = [row["description"] for row in result["subscriptions"]]
+        self.assertNotIn("Too New", descriptions)
 
 
 if __name__ == "__main__":
