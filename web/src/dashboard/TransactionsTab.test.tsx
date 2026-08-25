@@ -261,6 +261,79 @@ describe('TransactionsTab', () => {
       expect(screen.getByText('2 transactions')).toBeInTheDocument();
     });
 
+    it('stays on the plain (unvirtualized) table at 50 transactions', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: Array.from({ length: 50 }, (_, i) => ({
+          hash: `tx-${i}`,
+          date: '2024-01-15',
+          account_name: 'Checking',
+          owner_name: null,
+          description: `Transaction ${i}`,
+          amount: -10,
+          category: null,
+          is_recurring: false,
+          is_duplicate: false,
+        })),
+      };
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      const { container } = renderComponent();
+
+      // Every row mounted -- the plain path, not the fixed-height scroll container.
+      expect(screen.getAllByText(/^Transaction \d+$/)).toHaveLength(50);
+      expect(container.querySelector('.max-h-\\[70vh\\]')).not.toBeInTheDocument();
+    });
+
+    it('switches to the virtualized table above the threshold and does not mount every row', () => {
+      // jsdom never lays elements out, so `offsetHeight`/`offsetWidth` --
+      // what @tanstack/react-virtual actually measures the scroll container
+      // with -- are always 0, which would compute an empty visible window.
+      // Stub a viewport-sized box so it windows for real.
+      const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+      const originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, value: 500 });
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 800 });
+
+      try {
+        const mockLedgerData: LedgerResponse = {
+          transactions: Array.from({ length: 200 }, (_, i) => ({
+            hash: `tx-${i}`,
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: `Transaction ${i}`,
+            amount: -10,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          })),
+        };
+        mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+        mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+        mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+        setDefaultMutations();
+
+        const { container } = renderComponent();
+
+        expect(screen.getByText('200 transactions')).toBeInTheDocument();
+        expect(container.querySelector('.max-h-\\[70vh\\]')).toBeInTheDocument();
+        // The whole point: far fewer than 200 rows actually mounted in the DOM.
+        const renderedRows = screen.getAllByText(/^Transaction \d+$/);
+        expect(renderedRows.length).toBeGreaterThan(0);
+        expect(renderedRows.length).toBeLessThan(200);
+      } finally {
+        if (originalOffsetHeight) {
+          Object.defineProperty(HTMLElement.prototype, 'offsetHeight', originalOffsetHeight);
+        }
+        if (originalOffsetWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalOffsetWidth);
+        }
+      }
+    });
+
     it('renders empty ledger message when no transactions', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));

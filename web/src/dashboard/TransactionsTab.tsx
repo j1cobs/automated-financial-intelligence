@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ScatterChart,
   Scatter,
@@ -30,9 +31,14 @@ import { directionOf, toneFor, toneLabel, DIRECTION_GLYPH, TONE_TOKENS } from '.
 /**
  * Transactions tab -- ledger + anomaly scatter (PLAN.md Phase 15, Fix 10).
  *
- * Deliberately unvirtualized: the ledger can grow large, but pulling in a
- * virtualization library is a dependency decision the plan defers on purpose.
- * See the report for the recommendation.
+ * The ledger row-rendering below `VIRTUALIZE_THRESHOLD` transactions is a
+ * plain `<tbody>` map, identical to Phase 15's original markup -- every
+ * existing ledger test exercises small fixtures and stays on this path
+ * untouched. Above the threshold (a real account's history, e.g. 592 rows)
+ * it switches to `@tanstack/react-virtual`, which only mounts the rows in the
+ * scrolled viewport. `table-layout: fixed` + an explicit `<colgroup>` keeps
+ * column widths stable as rows scroll in and out, since natural auto-layout
+ * can't see the width of a row that isn't mounted.
  */
 
 const UNCATEGORIZED_LABEL = 'Uncategorized';
@@ -250,6 +256,242 @@ function SortButton({
   );
 }
 
+// Above this many rows, mounting every `<tr>` at once is real DOM weight for
+// no benefit -- switch to a virtualized window. Below it, every existing
+// ledger test's small fixture stays on the plain, unvirtualized path.
+const VIRTUALIZE_THRESHOLD = 50;
+// A ledger row is single-line except when it carries an owner-name subtext
+// or the "Excluded" duplicate badge, both of which wrap onto a second line
+// only rarely -- this is a deliberate estimate, not a hard height; the
+// virtualizer's own `measureElement` corrects it per-row after mount.
+const ROW_HEIGHT_ESTIMATE = 45;
+
+/** The header `<tr>`, shared by the plain and virtualized paths so the two
+ *  can never drift out of sync with each other. */
+function LedgerTheadRow({
+  sortKey,
+  sortDir,
+  toggleSort,
+}: {
+  sortKey: SortKey;
+  sortDir: SortDir;
+  toggleSort: (key: SortKey) => void;
+}) {
+  return (
+    <tr className="border-b border-hairline bg-surface-2">
+      <th className="px-2 py-2 text-left sm:px-4 sm:py-3">
+        <SortButton
+          label="Date"
+          active={sortKey === 'date'}
+          dir={sortDir}
+          onClick={() => toggleSort('date')}
+        />
+      </th>
+      <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Account</th>
+      <th className="px-2 py-2 text-left sm:px-4 sm:py-3">
+        <SortButton
+          label="Description"
+          active={sortKey === 'description'}
+          dir={sortDir}
+          onClick={() => toggleSort('description')}
+        />
+      </th>
+      <th className="px-2 py-2 text-right sm:px-4 sm:py-3">
+        <SortButton
+          label="Amount"
+          active={sortKey === 'amount'}
+          dir={sortDir}
+          onClick={() => toggleSort('amount')}
+          align="right"
+        />
+      </th>
+      <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Category</th>
+      <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Recurring</th>
+      <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Duplicate</th>
+    </tr>
+  );
+}
+
+interface LedgerRowProps {
+  tx: LedgerItem;
+  editingHash: string | null;
+  editingCategory: string;
+  categories: string[] | undefined;
+  isRecurringPending: boolean;
+  isDuplicatePending: boolean;
+  onStartEdit: (hash: string, category: string) => void;
+  onCategoryChange: (hash: string, category: string) => void;
+  onStopEdit: () => void;
+  onToggleRecurring: (hash: string, current: boolean) => void;
+  onToggleDuplicate: (hash: string, current: boolean) => void;
+}
+
+function LedgerRow({
+  tx,
+  editingHash,
+  editingCategory,
+  categories,
+  isRecurringPending,
+  isDuplicatePending,
+  onStartEdit,
+  onCategoryChange,
+  onStopEdit,
+  onToggleRecurring,
+  onToggleDuplicate,
+}: LedgerRowProps) {
+  return (
+    <tr
+      className={`border-b border-hairline ${
+        tx.is_duplicate ? 'bg-surface-2 text-ink-muted' : 'hover:bg-surface-2'
+      }`}
+    >
+      <td className="px-2 py-2 sm:px-4 sm:py-3">{formatDate(tx.date)}</td>
+      <td className="whitespace-nowrap px-2 py-2 sm:px-4 sm:py-3">
+        {tx.account_name}
+        {tx.owner_name && <div className="text-xs text-ink-muted">{tx.owner_name}</div>}
+      </td>
+      <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.is_duplicate ? 'line-through' : ''}`}>
+        {tx.description}
+        {tx.is_duplicate && (
+          <span className="ml-2 rounded-full border border-hairline px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-muted">
+            Excluded
+          </span>
+        )}
+      </td>
+      <td className="px-2 py-2 text-right sm:px-4 sm:py-3">
+        <AmountCell amount={tx.amount} />
+      </td>
+      <td className="px-2 py-2 sm:px-4 sm:py-3">
+        {editingHash === tx.hash ? (
+          <select
+            autoFocus
+            value={editingCategory}
+            onChange={(e) => onCategoryChange(tx.hash, e.target.value)}
+            onBlur={onStopEdit}
+            className="min-h-9 w-full rounded border border-hairline bg-surface-1 px-2 py-1 text-xs text-ink sm:text-sm"
+          >
+            <option value="">{UNCATEGORIZED_LABEL}</option>
+            {categories?.map((cat) => (
+              <option key={cat} value={cat}>
+                {cat}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <button
+            onClick={() => onStartEdit(tx.hash, tx.category || '')}
+            className="flex min-h-9 w-full items-center rounded px-2 py-1 text-left text-ink hover:bg-surface-3"
+          >
+            {tx.category || <span className="text-ink-muted">—</span>}
+          </button>
+        )}
+      </td>
+      <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
+        <input
+          type="checkbox"
+          checked={tx.is_recurring}
+          onChange={() => onToggleRecurring(tx.hash, tx.is_recurring)}
+          disabled={isRecurringPending}
+          className="h-5 w-5 cursor-pointer"
+          aria-label={`Mark ${tx.description} as ${tx.is_recurring ? 'non-recurring' : 'recurring'}`}
+        />
+      </td>
+      <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
+        <input
+          type="checkbox"
+          checked={tx.is_duplicate}
+          onChange={() => onToggleDuplicate(tx.hash, tx.is_duplicate)}
+          disabled={isDuplicatePending}
+          className="h-5 w-5 cursor-pointer"
+          aria-label={`Mark ${tx.description} as ${tx.is_duplicate ? 'not a duplicate' : 'duplicate'}`}
+        />
+      </td>
+    </tr>
+  );
+}
+
+/** Fixed column widths so a row scrolled out of the virtualized viewport
+ *  doesn't shift the ones still mounted -- natural auto-layout sizes columns
+ *  from whatever rows happen to be in the DOM, which changes every scroll
+ *  frame once rows unmount. Only used on the virtualized (large-ledger)
+ *  path; the plain path keeps natural auto-layout. */
+function LedgerColgroup() {
+  return (
+    <colgroup>
+      <col className="w-[10%]" />
+      <col className="w-[16%]" />
+      <col className="w-[27%]" />
+      <col className="w-[12%]" />
+      <col className="w-[14%]" />
+      <col className="w-[10%]" />
+      <col className="w-[11%]" />
+    </colgroup>
+  );
+}
+
+interface VirtualizedLedgerTableProps extends Omit<LedgerRowProps, 'tx'> {
+  transactions: LedgerItem[];
+  sortKey: SortKey;
+  sortDir: SortDir;
+  toggleSort: (key: SortKey) => void;
+}
+
+/** The large-ledger path: a fixed-height scroll container with a sticky
+ *  header and only the on-screen rows mounted. Uses the padding-row
+ *  technique (a leading and trailing spacer `<tr>`, sized to the scrolled-
+ *  past total) rather than absolutely-positioning each row -- every mounted
+ *  row is a genuine `<tr>` in normal table flow, so `<colgroup>` widths and
+ *  native table layout behave exactly like the plain path. */
+function VirtualizedLedgerTable({
+  transactions,
+  sortKey,
+  sortDir,
+  toggleSort,
+  ...rowProps
+}: VirtualizedLedgerTableProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: transactions.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT_ESTIMATE,
+    overscan: 10,
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0].start : 0;
+  const paddingBottom =
+    virtualRows.length > 0 ? rowVirtualizer.getTotalSize() - virtualRows[virtualRows.length - 1].end : 0;
+
+  return (
+    <div ref={scrollRef} className="max-h-[70vh] overflow-auto rounded-lg border border-hairline">
+      <table className="w-full text-xs sm:text-sm" style={{ tableLayout: 'fixed' }}>
+        <LedgerColgroup />
+        <thead className="sticky top-0 z-10">
+          <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} />
+        </thead>
+        <tbody>
+          {paddingTop > 0 && (
+            <tr aria-hidden="true" style={{ height: `${paddingTop}px` }}>
+              <td colSpan={7} />
+            </tr>
+          )}
+          {virtualRows.map((virtualRow) => (
+            <LedgerRow
+              key={transactions[virtualRow.index].hash}
+              tx={transactions[virtualRow.index]}
+              {...rowProps}
+            />
+          ))}
+          {paddingBottom > 0 && (
+            <tr aria-hidden="true" style={{ height: `${paddingBottom}px` }}>
+              <td colSpan={7} />
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function TransactionsTab() {
   const ledgerQuery = useLedger();
   const anomaliesQuery = useAnomalies();
@@ -373,137 +615,67 @@ export function TransactionsTab() {
             <p className="mb-2 text-xs font-medium text-ink-secondary">
               {sortedTransactions.length} {sortedTransactions.length === 1 ? 'transaction' : 'transactions'}
             </p>
-            <div className="overflow-x-auto rounded-lg border border-hairline">
-              <table className="min-w-full text-xs sm:text-sm">
-                <thead>
-                  <tr className="border-b border-hairline bg-surface-2">
-                    <th className="px-2 py-2 text-left sm:px-4 sm:py-3">
-                      <SortButton
-                        label="Date"
-                        active={sortKey === 'date'}
-                        dir={sortDir}
-                        onClick={() => toggleSort('date')}
-                      />
-                    </th>
-                    <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">
-                      Account
-                    </th>
-                    <th className="px-2 py-2 text-left sm:px-4 sm:py-3">
-                      <SortButton
-                        label="Description"
-                        active={sortKey === 'description'}
-                        dir={sortDir}
-                        onClick={() => toggleSort('description')}
-                      />
-                    </th>
-                    <th className="px-2 py-2 text-right sm:px-4 sm:py-3">
-                      <SortButton
-                        label="Amount"
-                        active={sortKey === 'amount'}
-                        dir={sortDir}
-                        onClick={() => toggleSort('amount')}
-                        align="right"
-                      />
-                    </th>
-                    <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">
-                      Category
-                    </th>
-                    <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">
-                      Recurring
-                    </th>
-                    <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">
-                      Duplicate
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedTransactions.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={7}
-                        className="px-2 py-6 text-center text-xs text-ink-muted sm:px-4 sm:py-8 sm:text-sm"
-                      >
-                        No transactions found
-                      </td>
-                    </tr>
-                  ) : (
-                    sortedTransactions.map((tx: LedgerItem) => (
-                      <tr
-                        key={tx.hash}
-                        className={`border-b border-hairline ${
-                          tx.is_duplicate ? 'bg-surface-2 text-ink-muted' : 'hover:bg-surface-2'
-                        }`}
-                      >
-                        <td className="px-2 py-2 sm:px-4 sm:py-3">{formatDate(tx.date)}</td>
-                        <td className="whitespace-nowrap px-2 py-2 sm:px-4 sm:py-3">
-                          {tx.account_name}
-                          {tx.owner_name && <div className="text-xs text-ink-muted">{tx.owner_name}</div>}
-                        </td>
-                        <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.is_duplicate ? 'line-through' : ''}`}>
-                          {tx.description}
-                          {tx.is_duplicate && (
-                            <span className="ml-2 rounded-full border border-hairline px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-muted">
-                              Excluded
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-2 py-2 text-right sm:px-4 sm:py-3">
-                          <AmountCell amount={tx.amount} />
-                        </td>
-                        <td className="px-2 py-2 sm:px-4 sm:py-3">
-                          {editingHash === tx.hash ? (
-                            <select
-                              autoFocus
-                              value={editingCategory}
-                              onChange={(e) => handleCategoryChange(tx.hash, e.target.value)}
-                              onBlur={() => setEditingHash(null)}
-                              className="min-h-9 w-full rounded border border-hairline bg-surface-1 px-2 py-1 text-xs text-ink sm:text-sm"
-                            >
-                              <option value="">{UNCATEGORIZED_LABEL}</option>
-                              {categoriesQuery.data?.categories.map((cat) => (
-                                <option key={cat} value={cat}>
-                                  {cat}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <button
-                              onClick={() => {
-                                setEditingHash(tx.hash);
-                                setEditingCategory(tx.category || '');
-                              }}
-                              className="flex min-h-9 w-full items-center rounded px-2 py-1 text-left text-ink hover:bg-surface-3"
-                            >
-                              {tx.category || <span className="text-ink-muted">—</span>}
-                            </button>
-                          )}
-                        </td>
-                        <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
-                          <input
-                            type="checkbox"
-                            checked={tx.is_recurring}
-                            onChange={() => handleRecurringToggle(tx.hash, tx.is_recurring)}
-                            disabled={updateRecurring.isPending}
-                            className="h-5 w-5 cursor-pointer"
-                            aria-label={`Mark ${tx.description} as ${tx.is_recurring ? 'non-recurring' : 'recurring'}`}
-                          />
-                        </td>
-                        <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
-                          <input
-                            type="checkbox"
-                            checked={tx.is_duplicate}
-                            onChange={() => handleDuplicateToggle(tx.hash, tx.is_duplicate)}
-                            disabled={updateDuplicate.isPending}
-                            className="h-5 w-5 cursor-pointer"
-                            aria-label={`Mark ${tx.description} as ${tx.is_duplicate ? 'not a duplicate' : 'duplicate'}`}
-                          />
+            {sortedTransactions.length > VIRTUALIZE_THRESHOLD ? (
+              <VirtualizedLedgerTable
+                transactions={sortedTransactions}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                toggleSort={toggleSort}
+                editingHash={editingHash}
+                editingCategory={editingCategory}
+                categories={categoriesQuery.data?.categories}
+                isRecurringPending={updateRecurring.isPending}
+                isDuplicatePending={updateDuplicate.isPending}
+                onStartEdit={(hash, category) => {
+                  setEditingHash(hash);
+                  setEditingCategory(category);
+                }}
+                onCategoryChange={handleCategoryChange}
+                onStopEdit={() => setEditingHash(null)}
+                onToggleRecurring={handleRecurringToggle}
+                onToggleDuplicate={handleDuplicateToggle}
+              />
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-hairline">
+                <table className="min-w-full text-xs sm:text-sm">
+                  <thead>
+                    <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} />
+                  </thead>
+                  <tbody>
+                    {sortedTransactions.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          className="px-2 py-6 text-center text-xs text-ink-muted sm:px-4 sm:py-8 sm:text-sm"
+                        >
+                          No transactions found
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    ) : (
+                      sortedTransactions.map((tx: LedgerItem) => (
+                        <LedgerRow
+                          key={tx.hash}
+                          tx={tx}
+                          editingHash={editingHash}
+                          editingCategory={editingCategory}
+                          categories={categoriesQuery.data?.categories}
+                          isRecurringPending={updateRecurring.isPending}
+                          isDuplicatePending={updateDuplicate.isPending}
+                          onStartEdit={(hash, category) => {
+                            setEditingHash(hash);
+                            setEditingCategory(category);
+                          }}
+                          onCategoryChange={handleCategoryChange}
+                          onStopEdit={() => setEditingHash(null)}
+                          onToggleRecurring={handleRecurringToggle}
+                          onToggleDuplicate={handleDuplicateToggle}
+                        />
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>
