@@ -3693,7 +3693,8 @@ on both failure paths. Full suite: 179 tests green, `ruff check` clean. Live-run
 >
 > Two items were deliberately not built, both recorded at their fix below: **ledger virtualization**
 > (needs a new dependency — `@tanstack/react-virtual` is the recommendation) and **metric
-> drill-down** (designed for via `MetricTile`'s unused `onDrillDown` prop, so it is additive).
+> drill-down** (designed for via `MetricTile`'s unused `onDrillDown` prop, so it is additive). Both
+> were subsequently implemented in Phase 16 (items 8 and 9) — see that phase for what shipped.
 >
 > Two plan items changed during implementation and are documented where they landed:
 > **(a)** Fix 7's dual-axis rolling-spend chart was collapsed to a single axis — `daily_avg` is
@@ -4173,6 +4174,164 @@ The following **must** differ, and each difference is a fix working as intended:
 | Stale accounts | 3-day balance threshold | 7-day sync + 90-day dormant |
 
 Any divergence **not** on this list is a React bug.
+
+---
+
+## Phase 16 — Dashboard UX pass: dark mode, filters, Home tab, ledger virtualization, drill-down — DONE (2026-08-24)
+
+> **Status (2026-08-24):** All 10 items below are implemented on `dev`, uncommitted at the time of
+> writing (the repo owner commits everything themselves). **302 Python tests** green
+> (`python -m unittest discover -s tests`) and **242 web tests** green (`npm run test -- --run`).
+> `npx tsc -b` produces no output, `npm run lint` is 0 errors / 3 pre-existing warnings (an
+> `AuthContext.tsx` fast-refresh warning pair and a `TransactionsTab.tsx` React Compiler
+> incompatible-library warning on `useVirtualizer`, both unrelated to this phase's changes), and
+> `npm run format:check` is clean. `git diff --stat bf1a53f` (last commit before this session) shows
+> 36 files touched, none of them under `app/` — the Streamlit freeze held.
+
+This phase originated from a `/grilling` interview session after direct user feedback on the live
+Phase 15 dashboard: dark mode was "horrendous," the filters were "ugly," and — pointing at the wider
+goal, not any single screen — the dashboard "needs a lot of love" and should give the user "an idea
+about all my money" at a glance rather than requiring a tour through four tabs to answer that.
+
+### Decisions locked (2026-08-24 grilling session)
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | Theme toggle **stays in the header**, three-state (Auto/Light/Dark) | Deviates from an initial recommendation to relocate it; kept per explicit user preference during the interview. |
+| 2 | Replace native `<select multiple>` with a **checkbox popover**, not a third-party combobox library | `lib/filters.ts` / `lib/FilterContext.tsx` already hold correct state logic; a popover is a pure presentation swap that reuses it unchanged, versus a library rewrite that would touch state too. |
+| 3 | New **Home tab**, set as the default landing tab | The user's complaint was about a first impression, not any one existing tab; a fifth, denser "check-in" surface addresses that without diluting the other four. |
+| 4 | Home tab ships **all five** proposed insights, not the recommended two or three | User explicitly asked for "as much data as possible" over a pared-down surface — a deliberate density choice consistent with Phase 15's "don't reduce density" precedent. |
+| 5 | Ledger virtualization via **padding-row technique**, not `transform: translateY()` absolute positioning | The translateY approach creates an anonymous table box disconnected from the outer `<table>`'s `<colgroup>`, breaking column-width alignment under `table-layout: fixed`. |
+| 6 | Metric drill-down region is `role="button"`, **not a real `<button>`** | `MetricTile` already nests an interactive info-popover `<button>`; a `<button>` cannot validly nest another `<button>`. |
+| 7 | Fork-under-merge hardening (item 10) **deferred, not implemented** | Never implicated in any actual reported bug — the TFSA report that raised it turned out to be an unrelated Plaid Link scope issue (item 3). Documented as a known limitation instead of built. |
+
+### Item 1 — Dark mode fix
+
+`Dashboard.tsx`, `SignIn.tsx`, `LoadingScreen.tsx`, and `FilterBar.tsx` were the only files under
+`web/src` still using raw Tailwind color utilities (10, 8, 3, and 2 occurrences respectively) against
+an otherwise-complete design token system introduced in Phase 15's Fix 11. Every raw color class in
+those four files was replaced with the corresponding token, and a ~150ms color-transition was added
+so the Auto/Light/Dark toggle doesn't snap. `web/src/test/noRawColors.test.ts` is new: it scans
+`web/src` for raw color utility classes and fails the build if one reappears anywhere, closing the
+gap that let these four files drift from the token system unnoticed in Phase 15. The header-based
+three-state toggle itself is unchanged (see decision 1).
+
+### Item 2 — Filter rebuild
+
+The native `<select multiple>` controls in `FilterBar.tsx` (owners, months, category, account) are
+replaced by `web/src/dashboard/MultiSelectPopover.tsx` — a checkbox popover with search and
+select-all/clear. The existing `lib/filters.ts` / `lib/FilterContext.tsx` state layer is reused
+completely unchanged (decision 2); this was a presentation-only swap.
+
+### Item 3 — TFSA/BNC balance investigation (no code change)
+
+A user report that a TFSA balance was wrong ("$5 vs $5000+ in reality") was investigated by querying
+both the `accounts` table and Plaid's `/accounts/get` directly for the affected Item. The originally
+suspected cause — a bug in `canonicalize_account_keys` (`database/db.py`) incorrectly
+merging/overwriting balances — was **ruled out**: live data showed no such collision. The actual
+cause was operational: the user has an investment account at National Bank of Canada (BNC) that was
+added to their BNC banking relationship *after* the corresponding Plaid Item was originally linked,
+and Plaid only syncs accounts selected at link time (or the most recent Link update-mode session), so
+the new account was invisible to that Item — expected Plaid behavior, not data corruption. Fixed
+operationally: the user ran `python scripts/plaid_link.py repair --token-suffix fa17bf` (Link update
+mode, re-selecting accounts) and confirmed the new account then appeared with the correct balance.
+
+### Item 4 — Savings-rate-trend bug fix
+
+`api/viewmodels.py`'s `savings_rate_trend` computation (originally around lines 471-490) was the only
+savings-rate computation in that file that did not apply the `complete_month_keys` filter used
+everywhere else (e.g. ~lines 169-180, ~388) to exclude the current, still-in-progress calendar month.
+The trend chart's newest point was therefore always a partial month whose ratio swung with every new
+transaction — it looked "random" to the user, but was fully deterministic. Fixed by applying the same
+filter; a regression test was added asserting the trend excludes the current month, and mutation-
+tested (fix removed, test confirmed failing, fix restored, test confirmed passing).
+
+### Item 5 — Balance snapshots
+
+New migration `database/migrations/017_account_balance_snapshots.sql` adds an
+`account_balance_snapshots` table. There was previously no balance history at all —
+`accounts.balance_current` is overwritten on every pipeline run, so net worth over time was
+structurally impossible to compute from stored data before this. `record_balance_snapshots()` and
+`get_net_worth_history()` are new in `database/db.py`; `pipeline/runner.py` now calls
+`record_balance_snapshots(accounts)` on every run. History starts accumulating the day this shipped —
+no backfill was possible.
+
+### Item 6 — Home tab
+
+A new fifth dashboard tab, `web/src/dashboard/HomeTab.tsx`, is now the default landing tab in
+`Dashboard.tsx` (decision 3) — a daily check-in surface, with the existing four tabs (Overview, Cash
+Flow, Budget, Transactions) unchanged and serving as its "go deeper" drill-down layer. It ships all
+five insights the user asked for (decision 4): recurring/committed monthly spend (surfacing the
+already-stored but previously-unsurfaced `is_recurring` flag), merchant-level spend breakdown,
+month-end cash-flow projection, category drift against the user's own historical baseline, and
+subscription detection — plus a net-worth trend line chart once snapshot history (item 5) has
+accumulated enough points. Backend: a new `/home` endpoint in `api/routers/data.py` and
+`build_home()` in `api/viewmodels.py`. Frontend: `useHome()` in `web/src/lib/queries.ts`, and
+`HomeResponse` plus related types in `web/src/lib/types.ts`.
+
+### Item 7 — Visual sharpening pass
+
+Type scale, spacing rhythm, and card/chart treatment were sharpened across `OverviewTab.tsx`,
+`CashFlowTab.tsx`, and `BudgetTab.tsx`, driven by concrete, audited class-string mismatches found
+across the tabs (card padding, heading scale, a per-state heading bug in `BudgetTab`). Density was
+deliberately preserved, not reduced — the user wants the bold, data-dense direction Phase 15 shipped
+kept; "sharpened" meant visual craft, not less information.
+
+### Item 8 — Ledger virtualization
+
+`web/src/dashboard/TransactionsTab.tsx` gains `@tanstack/react-virtual` as a new dependency
+(`web/package.json`). Ledgers with 50 or fewer transactions still render the original, unchanged
+plain `<table>`. Above that threshold, a dual-path render switches to a fixed-height
+(`max-h-[70vh]`) scroll container with a sticky header, using a leading/trailing padding-row (spacer
+`<tr>`) virtualization technique — chosen over the more common `transform: translateY()` absolute-
+positioning approach specifically because of decision 5. `LedgerRow` / `LedgerTheadRow` were
+extracted so both the plain and virtualized paths render from identical markup and can't drift apart.
+Verified live against the real 592-transaction ledger: only 36 `<tr>` elements were actually mounted
+in the DOM at once (`document.querySelectorAll('tbody tr').length` via Chrome DevTools), with smooth
+scrolling and a stable sticky header/columns in both light and dark mode.
+
+### Item 9 — Metric drill-down
+
+`MetricTile.tsx` (`web/src/dashboard/`) had an `onDrillDown` prop scaffolded but rendering no UI —
+flagged in Phase 15 as "designed for, deliberately deferred." It's now wired: when `onDrillDown` is
+passed, the whole tile becomes a `role="button"` region (decision 6), activating on click/Enter/Space,
+with `stopPropagation` isolating the nested info-popover button so opening the tooltip never also
+triggers the drill-down. New `web/src/dashboard/tabs.ts` holds a shared `TabId` type, avoiding an
+import cycle between `Dashboard.tsx` and `HomeTab.tsx`. `Dashboard.tsx` now passes
+`onNavigate={setActiveTab}` into `HomeTab`, which wires it to its three status-row tiles: **Net
+Worth → Overview tab**, **Committed Monthly Spend → Transactions tab**, **Projected Month-End
+Spend → Budget tab** — each landing on the existing tab with the fuller picture for that metric.
+Live-verified in Chrome: all three tiles correctly switch tabs on click; clicking a tile's "?" info
+badge opens its tooltip and does not trigger navigation.
+
+### Item 10 — Deferred by explicit decision: fork-banner under-merge hardening
+
+The existing account-fork warning banner (`_section_net_worth` in `app/dashboard.py:538-543`,
+mirrored via the `_IDENTITY_COLS` fork-size check in `api/viewmodels.py:255-260`) groups `accounts`
+rows by identity `(official_name, account_subtype, account_type, mask)` and flags any group where
+**more than one** `account_key` row shares that identity — an over-fork, the same real Account
+represented twice. It is structurally unable to detect the opposite failure: two genuinely different
+Accounts collapsing onto **one** `account_key` row (an under-merge), because an under-merge, by
+definition, destroys the very multi-row signal the check looks for — there is nothing left to count.
+
+Hardening this was discussed during the grilling session and explicitly **not implemented**
+(decision 7): it was never implicated in any actual reported bug (the TFSA report that prompted the
+discussion turned out to be the BNC Plaid-Link scope issue in item 3, unrelated to account-identity
+merging at all), so per the user's decision it is left as a documented, known limitation rather than
+built speculatively. See `docs/adr/0001-heuristic-account-identity.md`, whose Consequences section
+now cross-references this phase.
+
+### Verification
+
+- Python: `python -m unittest discover -s tests` — 302 tests, all passing.
+- Web: `npm run test -- --run` — 242 tests across 18 files, all passing.
+- `npx tsc -b` — clean, no output.
+- `npm run lint` — 0 errors, 3 pre-existing warnings (unrelated to this phase; see status block above).
+- `npm run format:check` — clean.
+- `git diff --stat bf1a53f` — 36 files changed, all under `web/`, `api/`, `database/`, `pipeline/`,
+  and `tests/`; `app/` untouched, confirming the Streamlit freeze held.
+- Manual, live-browser verification (Chrome DevTools, signed-in session): ledger virtualization DOM
+  node count (item 8) and drill-down navigation + tooltip isolation (item 9), both described above.
 
 ---
 

@@ -59,3 +59,9 @@ that judgement isn't silently re-litigated if the heuristic fails again.
 - If this heuristic fails a second time, or if the institution mix grows to include one that
   supplies `persistent_account_id` unreliably, revisit the "pin a durable local identity" option
   above rather than patching the heuristic further.
+- The fork warning only detects **over-forking** — multiple `accounts` rows sharing one identity
+  key. It cannot detect the opposite failure, **under-merging**: two genuinely different Accounts
+  whose identity keys happen to coincide, collapsing onto one `accounts` row. An under-merge
+  destroys the very multi-row signal the check counts, so there is nothing for it to flag. Hardening
+  this was considered and deliberately deferred (2026-08-24, see `PLAN.md` Phase 16, item 10) — it
+  is a real-in-principle risk that has never been confirmed in practice, not a blocker.
