@@ -8,8 +8,7 @@ import { OverviewTab } from './OverviewTab';
 import { CashFlowTab } from './CashFlowTab';
 import { BudgetTab } from './BudgetTab';
 import { TransactionsTab } from './TransactionsTab';
-
-type TabId = 'home' | 'overview' | 'cashflow' | 'budget' | 'transactions';
+import type { TabId } from './tabs';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'home', label: 'Home' },
@@ -101,7 +100,7 @@ export function Dashboard() {
         </nav>
         <FilterBar />
         <main className="p-6">
-          {activeTab === 'home' && <HomeTab />}
+          {activeTab === 'home' && <HomeTab onNavigate={setActiveTab} />}
           {activeTab === 'overview' && <OverviewTab />}
           {activeTab === 'cashflow' && <CashFlowTab />}
           {activeTab === 'budget' && <BudgetTab />}

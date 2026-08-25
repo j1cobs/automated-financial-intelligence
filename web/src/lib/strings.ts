@@ -17,6 +17,8 @@ export const strings = {
   metricTile: {
     /** Accessible name for the info-popover trigger button. */
     infoButtonLabel: (metricLabel: string) => `More about ${metricLabel}`,
+    /** Accessible name for a tile made clickable via `onDrillDown`. */
+    drillDownLabel: (metricLabel: string) => `View details for ${metricLabel}`,
     formulaLabel: 'Formula',
     windowLabel: 'Window',
     excludesLabel: 'Excludes',

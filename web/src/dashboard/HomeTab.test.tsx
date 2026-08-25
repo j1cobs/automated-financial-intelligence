@@ -124,20 +124,23 @@ const fullData: HomeResponse = {
 };
 
 describe('HomeTab', () => {
+  const onNavigate = vi.fn();
+
   beforeEach(() => {
     mockUseHome.mockReset();
+    onNavigate.mockReset();
   });
 
   it('renders a skeleton while data is loading', () => {
     mockUseHome.mockReturnValue(mockQueryLoading<HomeResponse>());
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
     expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
   });
 
   it('renders error state when the query fails, with a retry action wired to refetch', () => {
     const refetch = vi.fn();
     mockUseHome.mockReturnValue({ ...mockQueryError<HomeResponse>(), refetch });
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
 
     expect(screen.getByText('Query failed')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
@@ -150,13 +153,13 @@ describe('HomeTab', () => {
     // auth-shaped object): `data` itself is truthy, but none of the fields
     // this tab reads exist on it.
     mockUseHome.mockReturnValue(mockQuerySuccess({ unrelated: true } as unknown as HomeResponse));
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
     expect(screen.getByText('No data available')).toBeInTheDocument();
   });
 
   it('renders empty-state notes for every insight when there is no data yet', () => {
     mockUseHome.mockReturnValue(mockQuerySuccess(emptyData));
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
 
     expect(screen.getByText(/history starts the day balance tracking shipped/i)).toBeInTheDocument();
     expect(screen.getByText(/not enough expense history yet/i)).toBeInTheDocument();
@@ -169,13 +172,13 @@ describe('HomeTab', () => {
 
   it('renders the net worth trend chart once there are at least 2 snapshots', () => {
     mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
-    const { container } = render(<HomeTab />);
+    const { container } = render(<HomeTab onNavigate={onNavigate} />);
     expect(container.querySelector('.recharts-line')).toBeInTheDocument();
   });
 
   it('renders the latest net worth as the headline tile', () => {
     mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
     expect(screen.getByText('Net Worth')).toBeInTheDocument();
     // "$1,000" can also appear as a chart axis tick, so assert presence rather
     // than uniqueness.
@@ -184,7 +187,7 @@ describe('HomeTab', () => {
 
   it('renders recurring spend, merchants, and subscriptions', () => {
     mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
     expect(screen.getByText('Gym Membership')).toBeInTheDocument();
     expect(screen.getByText('Amazon')).toBeInTheDocument();
     expect(screen.getByText('Streaming Service')).toBeInTheDocument();
@@ -193,15 +196,31 @@ describe('HomeTab', () => {
 
   it('colors category drift by tone: overspending renders in the "bad" token', () => {
     mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
     const driftValue = screen.getByText(/40\.0%/);
     expect(driftValue).toHaveStyle({ color: 'var(--neg-text)' });
   });
 
   it('shows the month-end projection tile with progress context', () => {
     mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
-    render(<HomeTab />);
+    render(<HomeTab onNavigate={onNavigate} />);
     expect(screen.getByText('Projected Month-End Spend')).toBeInTheDocument();
     expect(screen.getByText('day 12 of 31')).toBeInTheDocument();
+  });
+
+  it('drills down from the status-row tiles to the tab with the fuller picture', () => {
+    mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
+    render(<HomeTab onNavigate={onNavigate} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'View details for Net Worth' }));
+    expect(onNavigate).toHaveBeenLastCalledWith('overview');
+
+    fireEvent.click(screen.getByRole('button', { name: 'View details for Committed Monthly Spend' }));
+    expect(onNavigate).toHaveBeenLastCalledWith('transactions');
+
+    fireEvent.click(screen.getByRole('button', { name: 'View details for Projected Month-End Spend' }));
+    expect(onNavigate).toHaveBeenLastCalledWith('budget');
+
+    expect(onNavigate).toHaveBeenCalledTimes(3);
   });
 });

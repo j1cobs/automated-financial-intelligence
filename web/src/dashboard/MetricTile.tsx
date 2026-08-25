@@ -18,7 +18,7 @@
  * missing comparison is not the same defect as a fake one.
  */
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
 import type { MetricSummary } from '../lib/types';
 import { metricInfoFor, type MetricInfo } from '../lib/metricInfo';
@@ -171,27 +171,58 @@ export interface MetricTileProps {
   /** Extra caption under the value, e.g. "avg of 3 complete months". */
   sublabel?: string;
   /**
-   * Reserved for the deferred drill-down side-sheet (PLAN.md Phase 15,
-   * Fix 13: "designed for, deliberately deferred"). `MetricTile` renders NO
-   * drill-down UI for this today -- passing it is a no-op. It exists so
-   * wiring the real drill-down later needs no change to this component's
-   * public shape.
+   * When provided, the whole tile becomes a clickable/focusable drill-down
+   * target (PLAN.md Phase 15, Fix 13) -- e.g. HomeTab wires this to switch
+   * the dashboard to the tab that has the fuller picture for this metric.
+   * Rendered as `role="button"` on the tile's own container rather than a
+   * real `<button>`, because the tile already nests the info-popover
+   * `<button>` and interactive controls cannot nest in valid HTML.
    */
   onDrillDown?: () => void;
 }
 
-export function MetricTile({ metricKey, value, format = 'currency', metric, sublabel }: MetricTileProps) {
+export function MetricTile({
+  metricKey,
+  value,
+  format = 'currency',
+  metric,
+  sublabel,
+  onDrillDown,
+}: MetricTileProps) {
   const info = metricInfoFor(metricKey);
   const label = info?.label ?? metricKey;
   const showComparison = metric != null && metric.baseline != null && metric.delta_pct != null;
 
+  const drillDownProps = onDrillDown
+    ? {
+        role: 'button' as const,
+        tabIndex: 0,
+        'aria-label': strings.metricTile.drillDownLabel(label),
+        onClick: onDrillDown,
+        onKeyDown: (event: ReactKeyboardEvent) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onDrillDown();
+          }
+        },
+      }
+    : {};
+
   return (
-    <div className="relative rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
+    <div
+      className={`relative rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4 ${
+        onDrillDown ? 'cursor-pointer transition-colors hover:border-strong' : ''
+      }`}
+      {...drillDownProps}
+    >
       {/* Absolutely positioned (not a flex row alongside the label) so the
           label stays a direct child of this container -- callers elsewhere in
           the codebase walk up from the label text via `.closest('div')` to
           reach the whole tile, a pattern an extra wrapping div would break. */}
-      <div className="absolute right-3 top-3">
+      {/* Swallows clicks/keydowns before they reach the tile's own drill-down
+          handler above -- otherwise activating the nested info button would
+          also fire onDrillDown. */}
+      <div className="absolute right-3 top-3" onClick={(event) => event.stopPropagation()}>
         <MetricInfoBadge metricKey={metricKey} />
       </div>
       <p className="pr-6 text-xs sm:text-sm font-medium text-ink-secondary">{label}</p>

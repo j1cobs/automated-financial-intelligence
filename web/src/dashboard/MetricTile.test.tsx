@@ -138,16 +138,36 @@ describe('MetricTile', () => {
     expect(within(tooltip).getByText('Transactions you flagged as duplicates')).toBeInTheDocument();
   });
 
-  it('accepts an onDrillDown prop without rendering any drill-down UI', () => {
-    const onDrillDown = () => {};
-    const { container } = render(
-      <MetricTile metricKey="net_worth" value={125000} onDrillDown={onDrillDown} />,
-    );
+  it('renders no drill-down affordance when onDrillDown is absent', () => {
+    render(<MetricTile metricKey="net_worth" value={125000} />);
+    expect(screen.queryByRole('button', { name: 'View details for Net Worth' })).not.toBeInTheDocument();
+  });
 
-    // No button/link beyond the info-tooltip trigger exists on the tile.
-    const buttons = container.querySelectorAll('button');
-    expect(buttons.length).toBe(1);
-    expect(buttons[0]).toHaveAttribute('aria-label', 'More about Net Worth');
+  it('makes the tile a clickable, keyboard-reachable drill-down target when onDrillDown is provided', async () => {
+    const user = userEvent.setup();
+    const onDrillDown = vi.fn();
+    render(<MetricTile metricKey="net_worth" value={125000} onDrillDown={onDrillDown} />);
+
+    const tile = screen.getByRole('button', { name: 'View details for Net Worth' });
+    fireEvent.click(tile);
+    expect(onDrillDown).toHaveBeenCalledTimes(1);
+
+    tile.focus();
+    await user.keyboard('{Enter}');
+    expect(onDrillDown).toHaveBeenCalledTimes(2);
+
+    await user.keyboard(' ');
+    expect(onDrillDown).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not trigger onDrillDown when the nested info-tooltip button is clicked', () => {
+    const onDrillDown = vi.fn();
+    render(<MetricTile metricKey="net_worth" value={125000} onDrillDown={onDrillDown} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'More about Net Worth' }));
+
+    expect(onDrillDown).not.toHaveBeenCalled();
+    expect(screen.getByRole('tooltip')).toBeInTheDocument();
   });
 
   it('renders a sublabel caption when provided', () => {

@@ -12,6 +12,7 @@ import { TabSkeleton, ErrorState } from './LoadingState';
 import { toneFor, polarityOf, directionOf, TONE_TOKENS, DIRECTION_GLYPH } from '../lib/polarity';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { gridProps, xAxisProps, yAxisProps, tooltipProps, CHART_MARGIN, positiveColor } from './chartTheme';
+import type { TabId } from './tabs';
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -39,7 +40,15 @@ function EmptyNote({ children }: { children: ReactNode }) {
   return <p className="mt-2 text-sm text-ink-muted">{children}</p>;
 }
 
-export function HomeTab() {
+interface HomeTabProps {
+  /** Switches the dashboard's active tab -- wired to `MetricTile`'s
+   *  `onDrillDown` below so a status-row tile jumps to whichever existing
+   *  tab has the fuller picture for that metric (PLAN.md Phase 15, Fix 13;
+   *  §4 Q1/Q2's "go deeper" framing). */
+  onNavigate: (tab: Exclude<TabId, 'home'>) => void;
+}
+
+export function HomeTab({ onNavigate }: HomeTabProps) {
   const { data, isLoading, error, refetch } = useHome();
 
   if (isLoading) {
@@ -71,13 +80,24 @@ export function HomeTab() {
     <div className="space-y-6">
       {/* Status row -- the "am I OK" answer at a glance. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {latestNetWorth != null && <MetricTile metricKey="net_worth" value={latestNetWorth} />}
-        <MetricTile metricKey="recurring_monthly_spend" value={data.recurring_monthly_spend} />
+        {latestNetWorth != null && (
+          <MetricTile
+            metricKey="net_worth"
+            value={latestNetWorth}
+            onDrillDown={() => onNavigate('overview')}
+          />
+        )}
+        <MetricTile
+          metricKey="recurring_monthly_spend"
+          value={data.recurring_monthly_spend}
+          onDrillDown={() => onNavigate('transactions')}
+        />
         {projection && (
           <MetricTile
             metricKey="projected_month_end_expenses"
             value={projection.projected_expenses}
             sublabel={`day ${projection.days_elapsed} of ${projection.days_in_month}`}
+            onDrillDown={() => onNavigate('budget')}
           />
         )}
       </div>
