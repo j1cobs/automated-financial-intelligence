@@ -94,7 +94,7 @@ export function BudgetTab() {
   if (error) {
     return (
       <div className="space-y-4">
-        <h2 className="text-lg font-semibold text-ink">Budget</h2>
+        <h2 className="text-base sm:text-lg font-semibold text-ink">Budget</h2>
         <ErrorState message="Failed to load budget data. Please try again." onRetry={() => void refetch()} />
       </div>
     );

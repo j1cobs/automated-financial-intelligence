@@ -29,7 +29,7 @@ function formatPercent(value: number): string {
 function InsightCard({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-      <h3 className="text-sm font-semibold text-ink">{title}</h3>
+      <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">{title}</h3>
       {children}
     </div>
   );

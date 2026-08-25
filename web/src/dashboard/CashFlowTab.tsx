@@ -287,7 +287,7 @@ function FlowBarChart({
   const expense = expenseColor();
   return (
     <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-      <h3 className="mb-4 text-sm sm:text-base font-semibold text-ink">{title}</h3>
+      <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">{title}</h3>
       <div className="h-56 sm:h-80 w-full">
         <ResponsiveContainer key={themeEpoch} width="100%" height="100%">
           <ComposedChart data={data} margin={{ ...CHART_MARGIN.default }}>
@@ -355,7 +355,7 @@ export function CashFlowTab() {
   if (error) {
     return (
       <div className="space-y-4">
-        <h2 className="text-lg font-semibold text-ink">Cash Flow</h2>
+        <h2 className="text-base sm:text-lg font-semibold text-ink">Cash Flow</h2>
         <ErrorState
           message="Failed to load cash flow data. Please try again later."
           onRetry={() => void refetch()}
@@ -367,7 +367,7 @@ export function CashFlowTab() {
   if (!data) {
     return (
       <div className="space-y-4">
-        <h2 className="text-lg font-semibold text-ink">Cash Flow</h2>
+        <h2 className="text-base sm:text-lg font-semibold text-ink">Cash Flow</h2>
         <div className="rounded-lg border border-hairline bg-surface-2 p-4">
           <p className="text-sm text-ink-secondary">No cash flow data available.</p>
         </div>
@@ -381,7 +381,7 @@ export function CashFlowTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold text-ink">Cash Flow</h2>
+        <h2 className="text-base sm:text-lg font-semibold text-ink">Cash Flow</h2>
       </div>
 
       {/* Key metrics stat tiles */}
@@ -439,7 +439,7 @@ export function CashFlowTab() {
       {/* Rolling 30-day spend Chart -- deliberately single-axis; see RollingSpendTooltip. */}
       {data.rolling_30d_spend.length > 0 && (
         <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-          <h3 className="mb-1 text-sm sm:text-base font-semibold text-ink">Rolling 30-day spend</h3>
+          <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Rolling 30-day spend</h3>
           <p className="mb-4 text-xs text-ink-muted">
             total spent in the 30 days ending on each date — hover for the daily average
           </p>
@@ -473,7 +473,7 @@ export function CashFlowTab() {
       {/* Monthly net cash flow by holder */}
       {ownerRows.length > 0 && (
         <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-          <h3 className="mb-4 text-sm sm:text-base font-semibold text-ink">
+          <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">
             Monthly net cash flow by holder
           </h3>
           <div className="h-56 sm:h-80 w-full">
@@ -509,7 +509,7 @@ export function CashFlowTab() {
       {/* Monthly expense breakdown by category */}
       {categoryRows.length > 0 && (
         <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-          <h3 className="mb-1 text-sm sm:text-base font-semibold text-ink">
+          <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">
             Monthly expense breakdown by category
           </h3>
           <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>

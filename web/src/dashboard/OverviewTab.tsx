@@ -126,7 +126,7 @@ function Card({
   children: ReactNode;
 }) {
   return (
-    <div className="relative rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+    <div className="relative rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
       {/* Absolutely positioned, not a flex row beside the title -- keeps the
           title a direct child of this container so `heading.closest('div')`
           (used throughout this file's tests) still reaches the whole card. */}
@@ -397,7 +397,7 @@ export function OverviewTab() {
 
       {/* Savings Rate Trend Chart */}
       {ov?.savings_rate_trend && ov.savings_rate_trend.length > 0 && (
-        <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+        <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
           <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Savings Rate Trend</h3>
           <ResponsiveContainer width="100%" height={250} minWidth="100%">
             <LineChart data={ov.savings_rate_trend} margin={CHART_MARGIN.default}>
@@ -436,7 +436,7 @@ export function OverviewTab() {
       <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
         {/* Asset Mix Pie Chart */}
         {nw?.asset_mix && nw.asset_mix.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Asset Mix</h3>
             <ResponsiveContainer width="100%" height={250} minWidth="100%">
               <PieChart>
@@ -469,7 +469,7 @@ export function OverviewTab() {
 
         {/* Owner Balances Bar Chart */}
         {nw?.owner_balances && nw.owner_balances.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
             <ResponsiveContainer width="100%" height={250} minWidth="100%">
               <BarChart data={nw.owner_balances} margin={CHART_MARGIN.default}>
@@ -531,7 +531,7 @@ export function OverviewTab() {
           Month-over-month by category (app/dashboard.py:891-912) */}
       <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
         {ov?.top_categories && ov.top_categories.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
             <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>
             <ResponsiveContainer
@@ -559,7 +559,7 @@ export function OverviewTab() {
         )}
 
         {monthOverMonthRows.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Month-over-Month by Category</h3>
             <ResponsiveContainer
               width="100%"
@@ -609,7 +609,7 @@ export function OverviewTab() {
         )}
 
         {sortedIncomeBreakdown.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-6">
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Income Sources</h3>
             <ResponsiveContainer
               width="100%"
