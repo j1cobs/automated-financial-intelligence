@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { CashFlowTab } from './CashFlowTab';
@@ -577,6 +577,47 @@ describe('CashFlowTab', () => {
       fireEvent.keyDown(document, { key: 'Escape' });
 
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('renders every merchant group, however many there are, with none folded away', async () => {
+      mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+      // 11 distinct expense descriptions, one transaction each -- big enough
+      // to have exceeded the old 8-group cap, now removed: the dialog scrolls
+      // instead of hiding anything behind a "+N more" summary.
+      const manyDescriptions = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5];
+      mockedApiFetch.mockResolvedValue({
+        transactions: manyDescriptions.map((amount, index) => ({
+          hash: `h${index}`,
+          date: '2024-01-15',
+          owner_name: null,
+          account_name: 'Checking',
+          description: `Merchant ${index}`,
+          amount: -amount,
+          category: null,
+          is_recurring: false,
+          is_duplicate: false,
+        })),
+      });
+
+      const { container } = renderCashFlowTab();
+
+      const heading = screen.getByText('Income vs Expenses');
+      const card = heading.closest('.rounded-lg') as HTMLElement;
+      const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
+      fireEvent.click(firstBar!);
+
+      const dialog = await screen.findByRole('dialog');
+      await within(dialog).findByText('Merchant 0');
+
+      // Every group renders as its own row -- no cap, nothing folded away.
+      for (let index = 0; index <= 10; index += 1) {
+        expect(within(dialog).getByText(`Merchant ${index}`)).toBeInTheDocument();
+      }
+      expect(within(dialog).queryByText(/more ·/)).not.toBeInTheDocument();
+
+      // Sanity: the click landed inside this render.
+      expect(container).toContainElement(card);
     });
   });
 });

@@ -50,6 +50,10 @@ function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
 }
 
+function formatPercent(fraction: number): string {
+  return `${Math.round(fraction * 100)}%`;
+}
+
 interface PeriodTransactionsPreviewProps {
   /** Human-readable heading, e.g. "Week of 2024-01-08 – 2024-01-14" or
    *  "August 2026". Caller-supplied so this component never has to guess
@@ -62,24 +66,39 @@ interface PeriodTransactionsPreviewProps {
 
 function TransactionColumn({
   title,
-  titleClassName,
+  accentClassName,
+  barClassName,
+  dividerClassName,
   transactions,
 }: {
   title: string;
-  titleClassName: string;
+  /** Border/text/background-tint accent tying the header to this column's
+   *  income/expense meaning -- always the same token used for the bars. */
+  accentClassName: string;
+  /** Fill color for each row's proportional bar. */
+  barClassName: string;
+  /** Extra classes for the outer wrapper -- carries the vertical divider
+   *  between the two columns on the Expenses side. */
+  dividerClassName?: string;
   transactions: LedgerItem[];
 }) {
   const groups = useMemo(() => groupByDescription(transactions), [transactions]);
   const net = useMemo(() => transactions.reduce((total, tx) => total + tx.amount, 0), [transactions]);
+  const columnTotal = useMemo(
+    () => transactions.reduce((total, tx) => total + Math.abs(tx.amount), 0),
+    [transactions],
+  );
+
+  const maxGroupMagnitude = groups.reduce((max, group) => Math.max(max, Math.abs(group.amount)), 0) || 1;
 
   return (
-    <div className="min-w-0">
-      <h4 className={`mb-1 text-sm font-semibold ${titleClassName}`}>{title}</h4>
-      {transactions.length === 0 ? (
-        <p className="text-xs text-ink-muted">None</p>
-      ) : (
-        <>
-          <p className="mb-2 flex flex-wrap items-baseline gap-x-1.5 text-xs font-medium text-ink-secondary">
+    <div className={`min-w-0 ${dividerClassName ?? ''}`}>
+      <div className={`rounded-t-md border-t-2 px-2 pb-2 pt-2 ${accentClassName}`}>
+        <h4 className="mb-1 text-sm font-semibold">{title}</h4>
+        {transactions.length === 0 ? (
+          <p className="text-xs text-ink-muted">None</p>
+        ) : (
+          <p className="flex flex-wrap items-baseline gap-x-1.5 text-xs font-medium text-ink-secondary">
             <span>
               {transactions.length} {transactions.length === 1 ? 'transaction' : 'transactions'}
             </span>
@@ -88,16 +107,35 @@ function TransactionColumn({
               Net <AmountCell amount={net} />
             </span>
           </p>
-          <ul className="space-y-1.5">
-            {groups.map((group) => (
-              <li key={group.description} className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="min-w-0 truncate text-ink-secondary">
-                  {group.description}
-                  {group.count > 1 && <span className="text-ink-muted"> ×{group.count}</span>}
-                </span>
-                <span className="shrink-0 tabular-nums text-ink">{formatCurrency(group.amount)}</span>
-              </li>
-            ))}
+        )}
+      </div>
+      {transactions.length > 0 && (
+        <>
+          <div className="border-t border-hairline" />
+          <ul className="divide-y divide-hairline">
+            {groups.map((group) => {
+              const pctOfColumn = columnTotal > 0 ? Math.abs(group.amount) / columnTotal : 0;
+              const barWidth = (Math.abs(group.amount) / maxGroupMagnitude) * 100;
+              return (
+                <li key={group.description} className="px-2 py-1.5 text-xs">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="min-w-0 truncate text-ink-secondary">
+                      {group.description}
+                      {group.count > 1 && <span className="text-ink-muted"> ×{group.count}</span>}
+                    </span>
+                    <span className="flex shrink-0 items-baseline gap-1">
+                      <span className="tabular-nums text-ink">{formatCurrency(group.amount)}</span>
+                      <span className="text-[10px] tabular-nums text-ink-muted">
+                        {formatPercent(pctOfColumn)}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1 rounded-full bg-surface-2">
+                    <div className={`h-1 rounded-full ${barClassName}`} style={{ width: `${barWidth}%` }} />
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </>
       )}
@@ -159,12 +197,12 @@ export function PeriodTransactionsPreview({
   const expenses = transactions.filter((tx) => tx.amount < 0);
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div
         ref={containerRef}
         role="dialog"
         aria-label={`Transactions for ${label}`}
-        className="max-h-[80vh] w-full max-w-2xl overflow-auto rounded-lg border border-hairline bg-surface-1 p-4 shadow-lg sm:p-6"
+        className="max-h-[85vh] w-full max-w-4xl overflow-auto rounded-lg border border-hairline bg-surface-1 p-4 shadow-lg sm:p-6"
       >
         <div className="mb-3 flex items-start justify-between gap-4">
           <h3 className="text-base font-semibold text-ink sm:text-lg">{label}</h3>
@@ -184,8 +222,19 @@ export function PeriodTransactionsPreview({
 
         {data && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <TransactionColumn title="Income" titleClassName="text-flow-income" transactions={income} />
-            <TransactionColumn title="Expenses" titleClassName="text-flow-expense" transactions={expenses} />
+            <TransactionColumn
+              title="Income"
+              accentClassName="border-flow-income bg-flow-income/5 text-flow-income"
+              barClassName="bg-flow-income"
+              transactions={income}
+            />
+            <TransactionColumn
+              title="Expenses"
+              accentClassName="border-flow-expense bg-flow-expense/5 text-flow-expense"
+              barClassName="bg-flow-expense"
+              dividerClassName="sm:border-l sm:border-hairline sm:pl-4"
+              transactions={expenses}
+            />
           </div>
         )}
       </div>

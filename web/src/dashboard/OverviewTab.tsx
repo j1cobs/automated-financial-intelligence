@@ -23,7 +23,6 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  Cell,
   LabelList,
   ReferenceLine,
 } from 'recharts';
@@ -136,39 +135,89 @@ function accountTypeColor(type: string): string {
   return index != null ? categoricalColor(index) : categoricalColor(6);
 }
 
-/** One horizontal mini bar chart per owner (Item F small multiples) --
- *  account name on the category axis, one bar per account, a direct value
- *  label on every bar so every balance is visible without hovering. Color
- *  encodes account type only (via `accountTypeColor`); owner is disambiguated
- *  by which mini chart a bar sits in, not by a second hue. */
-function OwnerBalanceMiniChart({ owner }: { owner: OwnerBalanceItem }) {
-  const height = Math.max(80, owner.accounts.length * 32 + 24);
+/** Shared label-column width for `LabeledBarRow` -- fixed, not content-sized,
+ *  so every row's bar starts at the same x position regardless of label
+ *  length. Also what makes Owner Balances and Income Sources read as the
+ *  same size: both are built from this one row shape. */
+const LIST_LABEL_WIDTH_CLASS = 'w-36 sm:w-44';
+
+/**
+ * Item 4 (plus a later alignment fix): the shared "name + proportional bar +
+ * value" row backing both Owner Balances and Income Sources. Originally each
+ * had its own markup with a content-sized label (`shrink-0 whitespace-nowrap`),
+ * which let a long label push that row's bar further right than its
+ * neighbours' -- bars never lined up. `LIST_LABEL_WIDTH_CLASS` fixes the
+ * label column's width instead, so every bar in a list starts at the same
+ * point; `truncate` is a safety net for anything still too long for that
+ * width (short_name/description are usually short enough not to need it).
+ * `title={fullLabel}` is a plain HTML tooltip revealing the full,
+ * untruncated name on hover -- Owner Balances had this already, Income
+ * Sources now gets the identical behavior via this shared component.
+ */
+function LabeledBarRow({
+  label,
+  fullLabel,
+  value,
+  pct,
+  color,
+}: {
+  label: string;
+  fullLabel: string;
+  value: number;
+  pct: number;
+  color: string;
+}) {
+  return (
+    <div title={fullLabel} className="flex items-center gap-3 text-sm">
+      <span className={`shrink-0 truncate text-ink-secondary ${LIST_LABEL_WIDTH_CLASS}`}>{label}</span>
+      <span className="flex flex-1 items-center gap-2">
+        <span className="h-2.5 flex-1 overflow-hidden rounded-full bg-surface-3">
+          <span
+            className="block h-full rounded-full"
+            style={{ width: `${pct * 100}%`, backgroundColor: color }}
+          />
+        </span>
+        <span className="shrink-0 tabular-nums text-ink">{formatCurrency(value)}</span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Item 4: plain-HTML per-owner account list, replacing the Recharts small-
+ * multiples bar chart entirely for this one component. A Recharts SVG
+ * category-axis tick has a hard pixel budget that tuning width/truncation
+ * further can't fix for real account names (confirmed insufficient by the
+ * user in a prior round) -- `short_name` (server-computed in
+ * `api/viewmodels.py::build_net_worth`, already short and mask-disambiguated
+ * only when an owner actually has a collision) sits as plain text instead, so
+ * there is no clipping to fight. Color still comes from the same
+ * `accountTypeColor()` the swatch legend above this section uses, so that
+ * legend stays accurate. `maxBalance` is the largest single account balance
+ * across ALL owners in the response (not just this owner) -- passed in from
+ * the parent -- so bar lengths stay comparable across the whole Owner
+ * Balances section, not just within one owner's list.
+ */
+function OwnerBalanceMiniList({ owner, maxBalance }: { owner: OwnerBalanceItem; maxBalance: number }) {
   return (
     <div>
       <p className="mb-1 text-sm font-medium text-ink">{owner.owner}</p>
-      <ResponsiveContainer width="100%" height={height} minWidth="100%">
-        <BarChart data={owner.accounts} layout="vertical" margin={CHART_MARGIN.default}>
-          <CartesianGrid {...gridProps()} />
-          <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-          <YAxis
-            dataKey="account_name"
-            type="category"
-            {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-            tickFormatter={(value: string) => truncateTickLabel(value)}
-          />
-          <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
-          <Bar dataKey="value" name="Balance" maxBarSize={BAR_MAX_SIZE} radius={BAR_RADIUS_HORIZONTAL}>
-            {owner.accounts.map((account, index) => (
-              <Cell key={`cell-${index}`} fill={accountTypeColor(account.type)} />
-            ))}
-            <LabelList
-              dataKey="value"
-              position="right"
-              formatter={(value: unknown) => formatCurrency(Number(value))}
+      <div className="space-y-1.5">
+        {owner.accounts.map((account, index) => {
+          const magnitude = Math.abs(account.value);
+          const pct = maxBalance > 0 ? Math.min(1, magnitude / maxBalance) : 0;
+          return (
+            <LabeledBarRow
+              key={`${account.account_name}-${index}`}
+              label={account.short_name}
+              fullLabel={account.account_name}
+              value={account.value}
+              pct={pct}
+              color={accountTypeColor(account.type)}
             />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -182,16 +231,25 @@ function Card({
   title,
   caption,
   metricKey,
+  className,
+  contentClassName,
   children,
 }: {
   title: string;
   caption?: string;
   /** Optional metricInfo key -- renders the Fix 13 tooltip badge beside the title. */
   metricKey?: string;
+  /** Extra classes on the card's own wrapper, e.g. a shared `min-h-*` (Item 2). */
+  className?: string;
+  /** Extra classes on the content wrapper below the title/caption, e.g. to
+   *  vertically center short content within a taller card (Item 2). */
+  contentClassName?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="relative rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
+    <div
+      className={`relative flex h-full flex-col rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4 ${className ?? ''}`}
+    >
       {/* Absolutely positioned, not a flex row beside the title -- keeps the
           title a direct child of this container so `heading.closest('div')`
           (used throughout this file's tests) still reaches the whole card. */}
@@ -202,7 +260,7 @@ function Card({
       )}
       <h3 className="pr-6 text-base sm:text-lg font-semibold text-ink">{title}</h3>
       {caption && <p className="mt-1 text-xs text-ink-muted">{caption}</p>}
-      <div className="mt-4">{children}</div>
+      <div className={`mt-4 ${contentClassName ?? ''}`}>{children}</div>
     </div>
   );
 }
@@ -418,6 +476,17 @@ export function OverviewTab() {
   const ownerBalanceAccountTypes = Object.keys(ACCOUNT_TYPE_COLOR_INDEX).filter((type) =>
     nw.owner_balances.some((owner) => owner.accounts.some((account) => account.type === type)),
   );
+  // Item 4: bar-length scale shared across every owner's mini list, not just within
+  // one owner -- otherwise a small owner's largest account would read as "full".
+  const maxOwnerAccountBalance = Math.max(
+    0,
+    ...nw.owner_balances.flatMap((owner) => owner.accounts.map((account) => Math.abs(account.value))),
+  );
+  // Income Sources (below) is built from the same `LabeledBarRow` as Owner
+  // Balances, sized against its own max so its bars fill the row width
+  // proportionally the same way -- `sortedIncomeBreakdown` is already sorted
+  // descending, so the first row is the max.
+  const maxIncomeAmount = sortedIncomeBreakdown[0]?.amount ?? 0;
 
   return (
     <div className="space-y-6">
@@ -513,16 +582,29 @@ export function OverviewTab() {
 
       {/* Emergency Fund and Asset Mix -- paired because both are short, fixed
           -height cards (a few text lines + meter; a single 120px stacked bar).
-          Owner Balances and Income Sources (below, after Credit Utilization
-          and the Top Categories/Month-over-Month row) are the tall/variable
-          pair instead -- regrouped by actual content height, not by adding
-          more `items-start` CSS to a mismatched pairing. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+          Item 2: both card wrappers share an explicit `min-h-56` (224px) so
+          neither reads as top-aligned-with-blank-space -- Asset Mix's realistic
+          rendered height is ASSET_MIX_HEIGHT (120px chart) + ~28px title line +
+          ~24px vertical padding (p-3/p-4) + ~24px legend row underneath the
+          chart (`Legend` renders below via `verticalAlign="bottom"`, inside the
+          same ResponsiveContainer height, so no extra allowance needed there)
+          -- comfortably under 224px with margin for the mb-4 gap. Emergency
+          Fund's own content (number + meter + caption) is shorter, so it is
+          vertically centered within the same reserved height via `flex
+          flex-col justify-center` on its content wrapper, rather than reading
+          as merely top-aligned. Owner Balances and Income Sources (below,
+          after Credit Utilization and the Top Categories/Month-over-Month
+          row) are the tall/variable pair instead -- regrouped by actual
+          content height, not by adding more `items-start` CSS to a mismatched
+          pairing. */}
+      <div className="grid grid-cols-1 items-stretch gap-4 sm:gap-6 lg:grid-cols-2">
         {ov.emergency_fund_months !== null && (
           <Card
             title="Emergency Fund"
             caption="Liquid savings ÷ average monthly expenses."
             metricKey="emergency_fund_months"
+            className="min-h-56"
+            contentClassName="flex flex-1 flex-col justify-center"
           >
             <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
             <div className="mt-3">
@@ -537,7 +619,7 @@ export function OverviewTab() {
             part-to-whole data. Same color assignment as before
             (`categoricalScale(n)[index]`), just a different mark. */}
         {nw?.asset_mix && nw.asset_mix.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
+          <div className="min-h-56 rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Asset Mix</h3>
             <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
               <BarChart
@@ -669,22 +751,25 @@ export function OverviewTab() {
       </div>
 
       {/* Owner Balances and Income Sources -- paired because both are
-          tall/variable-height (small multiples that grow with owner/account
-          count; a chart with a 250px floor that grows with data). See the
-          Emergency Fund/Asset Mix grid above for the short/fixed-height
-          pair this was split from. */}
+          genuinely data-driven with no fixed ceiling (small multiples that
+          grow with owner/account count; a list that grows with income-source
+          count), so no pairing strategy makes them match at every data
+          volume. Item 3: both cards instead share a fixed `max-h-[420px]
+          overflow-y-auto` on their CONTENT area only -- the outer card box
+          stays a constant height regardless of data volume, and whichever
+          side has more content than fits gets its own internal scrollbar.
+          420px comfortably shows several owners/accounts or income rows
+          before scrolling is needed. See the Emergency Fund/Asset Mix grid
+          above for the short/fixed-height pair this was split from. */}
       <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
-        {/* Owner Balances -- small multiples: one horizontal mini bar chart per
-            owner (Recharts has no clean two-tier categorical axis, so faking
-            "owner" as a second axis dimension would be awkward), account name
-            on the category axis, one bar per account with a direct value
-            label so every balance is visible without hovering. Color stays a
-            single dimension (account type via `categoricalScale`) per the
-            `dataviz` skill's categorical-hue rule -- owner is disambiguated by
-            spatial separation, not a second hue. One shared legend covers
-            account type for the whole group instead of repeating per chart.
-            One mini-chart per row (not two-per-row) so the account-name axis
-            gets the full card width -- see `yAxisProps` call below. */}
+        {/* Owner Balances -- small multiples: one plain-HTML mini list per
+            owner (Item 4 -- see `OwnerBalanceMiniList`), account short name on
+            the left, one row per account with a direct value label so every
+            balance is visible without hovering. Color stays a single
+            dimension (account type via `categoricalScale`) per the `dataviz`
+            skill's categorical-hue rule -- owner is disambiguated by spatial
+            separation, not a second hue. One shared legend covers account
+            type for the whole group instead of repeating per list. */}
         {nw?.owner_balances && nw.owner_balances.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
@@ -699,41 +784,34 @@ export function OverviewTab() {
                 </span>
               ))}
             </div>
-            <div className="grid grid-cols-1 gap-4">
+            <div className="grid max-h-[420px] grid-cols-1 gap-4 overflow-y-auto">
               {nw.owner_balances.map((owner) => (
-                <OwnerBalanceMiniChart key={owner.owner} owner={owner} />
+                <OwnerBalanceMiniList key={owner.owner} owner={owner} maxBalance={maxOwnerAccountBalance} />
               ))}
             </div>
           </div>
         )}
 
+        {/* Income Sources -- built from the same `LabeledBarRow` as Owner
+            Balances (aligned label column, same row height, same `title`
+            hover-for-full-name behavior, same `max-h-[420px]` scroll cap) so
+            the two paired cards read as the same size instead of a plain-HTML
+            list next to a Recharts chart with its own independent sizing. */}
         {sortedIncomeBreakdown.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Income Sources</h3>
-            <ResponsiveContainer
-              width="100%"
-              height={Math.max(250, sortedIncomeBreakdown.length * 32)}
-              minWidth="100%"
-            >
-              <BarChart data={sortedIncomeBreakdown} layout="vertical" margin={CHART_MARGIN.default}>
-                <CartesianGrid {...gridProps()} />
-                <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis
-                  dataKey="description"
-                  type="category"
-                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(value)}
+            <div className="max-h-[420px] space-y-1.5 overflow-y-auto">
+              {sortedIncomeBreakdown.map((source, index) => (
+                <LabeledBarRow
+                  key={`${source.description}-${index}`}
+                  label={source.description}
+                  fullLabel={source.description}
+                  value={source.amount}
+                  pct={maxIncomeAmount > 0 ? Math.min(1, source.amount / maxIncomeAmount) : 0}
+                  color={incomeColor()}
                 />
-                <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
-                <Bar
-                  dataKey="amount"
-                  fill={incomeColor()}
-                  name="Income"
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                />
-              </BarChart>
-            </ResponsiveContainer>
+              ))}
+            </div>
           </div>
         )}
       </div>

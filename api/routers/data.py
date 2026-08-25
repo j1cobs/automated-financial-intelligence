@@ -64,6 +64,7 @@ class OwnerAccountItem(BaseModel):
     account_name: str
     type: str
     value: float
+    short_name: str
 
 
 class OwnerBalanceItem(BaseModel):

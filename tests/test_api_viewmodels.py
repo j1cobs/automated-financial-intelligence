@@ -224,6 +224,49 @@ class OwnerBalanceTests(unittest.TestCase):
         self.assertEqual(len(rows["Alexie"]["accounts"]), 1)
 
 
+class OwnerBalanceShortNameTests(unittest.TestCase):
+    """Item 4 — short server-computed account names, mask-disambiguated only when an
+    owner has more than one account of the same subtype."""
+
+    def _accounts(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                # Jacob has two credit cards -- same subtype label, must collide and
+                # get mask-disambiguated.
+                _account(
+                    "a1",
+                    "Jacob",
+                    "credit",
+                    200.0,
+                    account_subtype="credit card",
+                    mask="3265",
+                ),
+                _account(
+                    "a2",
+                    "Jacob",
+                    "credit",
+                    50.0,
+                    account_subtype="credit card",
+                    mask="8496",
+                ),
+                # Alexie has a single TFSA -- no collision, stays plain.
+                _account("a3", "Alexie", "investment", 500.0, account_subtype="tfsa"),
+            ]
+        )
+
+    def test_colliding_accounts_get_mask_disambiguated_names(self) -> None:
+        rows = {r["owner"]: r for r in build_net_worth(self._accounts())["owner_balances"]}
+        short_names = {a["short_name"] for a in rows["Jacob"]["accounts"]}
+        self.assertEqual(short_names, {"Credit card Jacob ••••3265", "Credit card Jacob ••••8496"})
+        # The two names must actually differ from each other.
+        self.assertEqual(len(short_names), 2)
+
+    def test_single_account_of_a_subtype_stays_plain(self) -> None:
+        rows = {r["owner"]: r for r in build_net_worth(self._accounts())["owner_balances"]}
+        alexie_names = [a["short_name"] for a in rows["Alexie"]["accounts"]]
+        self.assertEqual(alexie_names, ["TFSA Alexie"])
+
+
 class StaleAndDormantTests(unittest.TestCase):
     """Fix 5 — sync health and dormancy are different questions."""
 

@@ -67,9 +67,24 @@ const mockOverviewData: OverviewResponse = {
         other: 0,
         net: 295000,
         accounts: [
-          { account_name: 'Alice Checking', type: 'depository', value: 100000 },
-          { account_name: 'Alice Brokerage', type: 'investment', value: 200000 },
-          { account_name: 'Alice Card', type: 'credit', value: -5000 },
+          {
+            account_name: 'Alice Checking (••••1111)',
+            type: 'depository',
+            value: 100000,
+            short_name: 'Chequing Alice',
+          },
+          {
+            account_name: 'Alice Brokerage (••••2222)',
+            type: 'investment',
+            value: 200000,
+            short_name: 'Investment Alice',
+          },
+          {
+            account_name: 'Alice Card (••••3333)',
+            type: 'credit',
+            value: -5000,
+            short_name: 'Credit card Alice',
+          },
         ],
       },
       {
@@ -80,9 +95,24 @@ const mockOverviewData: OverviewResponse = {
         other: 0,
         net: 198000,
         accounts: [
-          { account_name: 'Bob Checking', type: 'depository', value: 150000 },
-          { account_name: 'Bob Brokerage', type: 'investment', value: 50000 },
-          { account_name: 'Bob Card', type: 'credit', value: -2000 },
+          {
+            account_name: 'Bob Checking (••••4444)',
+            type: 'depository',
+            value: 150000,
+            short_name: 'Chequing Bob',
+          },
+          {
+            account_name: 'Bob Brokerage (••••5555)',
+            type: 'investment',
+            value: 50000,
+            short_name: 'Investment Bob',
+          },
+          {
+            account_name: 'Bob Card (••••6666)',
+            type: 'credit',
+            value: -2000,
+            short_name: 'Credit card Bob',
+          },
         ],
       },
     ],
@@ -389,7 +419,7 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Asset Mix')).toBeInTheDocument();
   });
 
-  it('renders owner balances as one mini chart per owner, with every account name and balance visible without hovering', () => {
+  it('renders owner balances as a plain-HTML list per owner, with every short_name fully visible and the full account name on hover', () => {
     mockedUseOverview.mockReturnValue({
       data: mockOverviewData,
       isLoading: false,
@@ -399,19 +429,24 @@ describe('OverviewTab', () => {
     renderOverviewTab();
 
     const heading = screen.getByText('Owner Balances');
-    const chartCard = heading.closest('div');
-    expect(chartCard).not.toBeNull();
-    const withinCard = within(chartCard!);
+    const card = heading.closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
 
-    // One mini chart heading per owner (small multiples, not a shared axis).
+    // One mini list heading per owner (small multiples, not a shared axis).
     expect(withinCard.getByText('Alice')).toBeInTheDocument();
     expect(withinCard.getByText('Bob')).toBeInTheDocument();
 
-    // Every account name is a category-axis tick label, and every balance is
-    // a direct value label on its bar -- both rendered without hovering.
+    // Item 4: every account's server-computed short_name renders in full (not
+    // truncated -- it's already short), and every balance is a direct value
+    // label -- both visible without hovering.
     for (const owner of mockOverviewData.net_worth.owner_balances) {
       for (const account of owner.accounts) {
-        expect(withinCard.getByText(account.account_name)).toBeInTheDocument();
+        const shortNameEl = withinCard.getByText(account.short_name);
+        expect(shortNameEl).toBeInTheDocument();
+        // The full original account_name is revealed on hover via a native
+        // `title` attribute on the row.
+        expect(shortNameEl.closest('[title]')).toHaveAttribute('title', account.account_name);
       }
     }
     expect(withinCard.getByText('$100,000')).toBeInTheDocument();

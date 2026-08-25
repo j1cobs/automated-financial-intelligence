@@ -230,8 +230,13 @@ export function MetricTile({
         {formatValue(value, format)}
       </p>
       {sublabel && <p className="mt-1 text-xs text-ink-muted">{sublabel}</p>}
-      {metric && (
-        <div className="mt-2 flex items-end justify-between gap-2">
+      {/* Item 1 (regression from a prior parity round): always rendered, even when
+          `metric` is absent, so every tile in a grid reserves the same footer height
+          as `Sparkline`'s own fixed `h-8` box -- `min-h-8` is what makes tiles without
+          a `metric` prop (net_worth, total_assets, total_liabilities, ...) the same
+          height as tiles that have one, with no per-grid CSS needed. */}
+      <div className="mt-2 flex items-end justify-between gap-2 min-h-8">
+        {metric && (
           <div className="flex flex-col gap-0.5">
             <DeltaBadge metricKey={metricKey} metric={metric} />
             {showComparison && (
@@ -240,9 +245,9 @@ export function MetricTile({
               </p>
             )}
           </div>
-          <Sparkline metricKey={metricKey} metric={metric} />
-        </div>
-      )}
+        )}
+        {metric && <Sparkline metricKey={metricKey} metric={metric} />}
+      </div>
     </div>
   );
 }

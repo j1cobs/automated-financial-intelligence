@@ -300,8 +300,36 @@ def build_net_worth(
         )
         entry[bucket] += signed
         entry["net"] += signed
-        entry["accounts"].append({"account_name": row["account_name"], "type": account_type, "value": signed})
+        entry["accounts"].append(
+            {
+                "account_name": row["account_name"],
+                "type": account_type,
+                "value": signed,
+                "short_name": f"{_label_subtype(row['account_subtype'], lang)} {owner}",
+                "_mask": _clean(row["mask"]),
+            }
+        )
     owner_balances = sorted(owner_rows.values(), key=lambda r: r["net"], reverse=True)
+
+    # --- Disambiguate short names within each owner (Item 4) ------------------------
+    # `short_name` above is "{subtype label} {owner}" (e.g. "TFSA Jacob") -- short in
+    # the common one-account-per-subtype case. When an owner has more than one account
+    # sharing the same subtype label (two credit cards, two TFSAs), that collides --
+    # append a mask suffix, the same "••••NNNN" convention `PlaidIngestor` already
+    # uses for `account_name`, to ONLY the colliding accounts so the common case
+    # stays short.
+    for entry in owner_balances:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for account in entry["accounts"]:
+            groups.setdefault(account["short_name"], []).append(account)
+        for accounts in groups.values():
+            if len(accounts) > 1:
+                for account in accounts:
+                    mask = account["_mask"]
+                    if mask:
+                        account["short_name"] = f"{account['short_name']} ••••{mask}"
+        for account in entry["accounts"]:
+            del account["_mask"]
 
     credit_utilization = []
     for _, row in credit_df.iterrows():

@@ -18,6 +18,7 @@ export interface OwnerAccountItem {
   account_name: string;
   type: string;
   value: number;
+  short_name: string;
 }
 
 export interface OwnerBalanceItem {
