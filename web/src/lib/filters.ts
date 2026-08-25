@@ -47,6 +47,15 @@ export interface DashboardFilters {
   search: string | null;
   outliers_only: boolean;
   duplicates_only: boolean;
+  /**
+   * Inclusive day-level bounds (ISO `YYYY-MM-DD`), narrowing WITHIN whatever
+   * `period`/`months` already selects -- NOT a replacement for month-level
+   * filtering. `period`/`months` must already cover the requested range;
+   * `date_from`/`date_to` narrow further, they never widen it. Mirrors
+   * `api/filters.py::DashboardFilters.date_from`/`date_to`.
+   */
+  date_from: string | null;
+  date_to: string | null;
 }
 
 export const DEFAULT_FILTERS: DashboardFilters = {
@@ -60,6 +69,8 @@ export const DEFAULT_FILTERS: DashboardFilters = {
   search: null,
   outliers_only: false,
   duplicates_only: false,
+  date_from: null,
+  date_to: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +113,12 @@ export function toSearchParams(filters: DashboardFilters): URLSearchParams {
   if (filters.duplicates_only) {
     params.set('duplicates_only', 'true');
   }
+  if (filters.date_from) {
+    params.set('date_from', filters.date_from);
+  }
+  if (filters.date_to) {
+    params.set('date_to', filters.date_to);
+  }
 
   return params;
 }
@@ -142,6 +159,8 @@ export function fromSearchParams(params: URLSearchParams): DashboardFilters {
     search: params.get('search') || null,
     outliers_only: parseBool(params.get('outliers_only')),
     duplicates_only: parseBool(params.get('duplicates_only')),
+    date_from: params.get('date_from') || null,
+    date_to: params.get('date_to') || null,
   };
 }
 
@@ -168,29 +187,59 @@ function withoutArrayValue(values: string[] | null, value: string): string[] | n
 }
 
 /**
+ * `"Jul 27 – Aug 25, 2026"` -- same `en-US`/short-month-day/full-year style
+ * `TransactionsTab.tsx`'s `formatDate` already uses for ledger rows, applied
+ * to a range instead of a single date (year shown once, on the end date).
+ */
+export function formatDateRangeLabel(dateFrom: string, dateTo: string): string {
+  const start = new Date(`${dateFrom}T00:00:00`);
+  const end = new Date(`${dateTo}T00:00:00`);
+  const startLabel = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const endLabel = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${startLabel} – ${endLabel}`;
+}
+
+/**
  * One chip per active filter *value* (so selecting 3 owners produces 3
  * removable chips), plus one chip for the period when it isn't the default.
  * `options` is optional so chips can render before `/filter-options` has
  * loaded — months just fall back to their raw `YYYY-MM` key.
+ *
+ * A day-precise drill-down (`date_from`/`date_to` both set, e.g. the Cash
+ * Flow rolling-30-day-spend click-through) renders as exactly ONE chip with
+ * a human-readable range instead of the `period`/`months` chips it also
+ * carries as a required "covering" carrier (see `DashboardFilters.date_from`'s
+ * docstring) -- otherwise a day-precise 30-day window spanning two calendar
+ * months shows as "Custom" + two month chips, which reads as a coarse month
+ * filter even though the actual `/ledger` data is already day-precise.
  */
 export function activeFilterChips(filters: DashboardFilters, options?: FilterOptions): FilterChip[] {
   const chips: FilterChip[] = [];
+  const hasDayRange = Boolean(filters.date_from && filters.date_to);
 
-  if (filters.period !== DEFAULT_PERIOD) {
+  if (hasDayRange) {
     chips.push({
-      id: 'period',
-      label: `Period: ${PERIOD_LABELS[filters.period]}`,
-      remove: (f) => ({ ...f, period: DEFAULT_PERIOD, months: null }),
+      id: 'date_range',
+      label: formatDateRangeLabel(filters.date_from!, filters.date_to!),
+      remove: (f) => ({ ...f, period: DEFAULT_PERIOD, months: null, date_from: null, date_to: null }),
     });
-  }
-
-  if (filters.period === 'custom' && filters.months) {
-    for (const month of filters.months) {
+  } else {
+    if (filters.period !== DEFAULT_PERIOD) {
       chips.push({
-        id: `months:${month}`,
-        label: monthLabel(month, options),
-        remove: (f) => ({ ...f, months: withoutArrayValue(f.months, month) }),
+        id: 'period',
+        label: `Period: ${PERIOD_LABELS[filters.period]}`,
+        remove: (f) => ({ ...f, period: DEFAULT_PERIOD, months: null }),
       });
+    }
+
+    if (filters.period === 'custom' && filters.months) {
+      for (const month of filters.months) {
+        chips.push({
+          id: `months:${month}`,
+          label: monthLabel(month, options),
+          remove: (f) => ({ ...f, months: withoutArrayValue(f.months, month) }),
+        });
+      }
     }
   }
 
@@ -260,11 +309,21 @@ export function activeFilterChips(filters: DashboardFilters, options?: FilterOpt
  * Number of active filter *axes* (not values) — what a collapsed
  * "Filters (N)" button should show. Custom months count as one axis
  * alongside (not on top of) the period axis, since they're one control.
+ *
+ * A day-precise drill-down (`date_from`/`date_to` both set) counts as a
+ * single axis too, mirroring `activeFilterChips`'s single day-range chip —
+ * `period`/`months` are along for the ride as a "covering" carrier in that
+ * case, not a second independent axis a user turned on.
  */
 export function countActiveFilters(filters: DashboardFilters): number {
   let count = 0;
-  if (filters.period !== DEFAULT_PERIOD) count += 1;
-  if (filters.period === 'custom' && filters.months && filters.months.length > 0) count += 1;
+  const hasDayRange = Boolean(filters.date_from && filters.date_to);
+  if (hasDayRange) {
+    count += 1;
+  } else {
+    if (filters.period !== DEFAULT_PERIOD) count += 1;
+    if (filters.period === 'custom' && filters.months && filters.months.length > 0) count += 1;
+  }
   if (filters.owners && filters.owners.length > 0) count += 1;
   if (filters.categories && filters.categories.length > 0) count += 1;
   if (filters.accounts && filters.accounts.length > 0) count += 1;

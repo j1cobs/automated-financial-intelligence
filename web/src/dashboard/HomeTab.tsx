@@ -27,6 +27,26 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+/** Humanized, deliberately hedged phrasing for a projected (not confirmed) billing
+ *  date -- "next_expected_date" is a median-interval estimate, so the copy reads as
+ *  a guess ("~in 5 days" / "around Aug 29"), never as a scheduled certainty. */
+function formatRelativeDate(isoDate: string): string {
+  const target = new Date(`${isoDate}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysAway = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysAway >= 0 && daysAway <= 10) {
+    if (daysAway === 0) return '~today';
+    if (daysAway === 1) return '~tomorrow';
+    return `~in ${daysAway} days`;
+  }
+  if (daysAway < 0 && daysAway >= -10) {
+    return daysAway === -1 ? '~yesterday' : `~${Math.abs(daysAway)} days ago`;
+  }
+  const label = target.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `around ${label}`;
+}
+
 function InsightCard({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
@@ -75,6 +95,10 @@ export function HomeTab({ onNavigate }: HomeTabProps) {
   const trend = data.net_worth_trend;
   const latestNetWorth = trend.length > 0 ? trend[trend.length - 1].net_worth : null;
   const projection = data.cash_flow_projection;
+  const biggestExpense = data.biggest_expense_this_month;
+  const momDelta = data.net_worth_mom_delta;
+  const momTone = toneFor(momDelta, polarityOf('net_worth'));
+  const momDirection = directionOf(momDelta);
 
   return (
     <div className="space-y-6">
@@ -102,24 +126,45 @@ export function HomeTab({ onNavigate }: HomeTabProps) {
         )}
       </div>
 
+      {biggestExpense != null && (
+        <InsightCard title="Biggest Expense This Month">
+          <div className="mt-1 flex items-center justify-between text-sm">
+            <span className="text-ink-secondary">
+              {biggestExpense.description} <span className="text-ink-muted">· {biggestExpense.date}</span>
+            </span>
+            <span className="tabular-nums font-medium text-ink">{formatCurrency(biggestExpense.amount)}</span>
+          </div>
+        </InsightCard>
+      )}
+
       <InsightCard title="Net Worth Trend">
         {trend.length >= 2 ? (
-          <ResponsiveContainer width="100%" height={220} minWidth="100%">
-            <LineChart data={trend} margin={CHART_MARGIN.default}>
-              <CartesianGrid {...gridProps()} />
-              <XAxis dataKey="date" {...xAxisProps()} />
-              <YAxis {...yAxisProps()} tickFormatter={(value) => formatCurrency(value as number)} />
-              <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
-              <Line
-                type="monotone"
-                dataKey="net_worth"
-                stroke={positiveColor()}
-                strokeWidth={2}
-                dot={{ fill: positiveColor() }}
-                name="Net Worth"
-              />
-            </LineChart>
-          </ResponsiveContainer>
+          <>
+            {momDelta != null && (
+              <p
+                className="mb-2 text-sm tabular-nums font-medium"
+                style={{ color: TONE_TOKENS[momTone].text }}
+              >
+                {DIRECTION_GLYPH[momDirection]} {formatCurrency(Math.abs(momDelta))} since last month
+              </p>
+            )}
+            <ResponsiveContainer width="100%" height={220} minWidth="100%">
+              <LineChart data={trend} margin={CHART_MARGIN.default}>
+                <CartesianGrid {...gridProps()} />
+                <XAxis dataKey="date" {...xAxisProps()} />
+                <YAxis {...yAxisProps()} tickFormatter={(value) => formatCurrency(value as number)} />
+                <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
+                <Line
+                  type="monotone"
+                  dataKey="net_worth"
+                  stroke={positiveColor()}
+                  strokeWidth={2}
+                  dot={{ fill: positiveColor() }}
+                  name="Net Worth"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </>
         ) : (
           <EmptyNote>
             History starts the day balance tracking shipped — check back after a few more days for a trend.
@@ -200,6 +245,24 @@ export function HomeTab({ onNavigate }: HomeTabProps) {
           )}
         </InsightCard>
       </div>
+
+      <InsightCard title="Upcoming Recurring Charges">
+        {data.upcoming_recurring.length === 0 ? (
+          <EmptyNote>No recurring charges with a predictable cadence yet.</EmptyNote>
+        ) : (
+          <ul className="mt-2 space-y-1.5">
+            {data.upcoming_recurring.map((row) => (
+              <li key={row.description} className="flex items-center justify-between text-sm">
+                <span className="text-ink-secondary">
+                  {row.description}{' '}
+                  <span className="text-ink-muted">· {formatRelativeDate(row.next_expected_date)}</span>
+                </span>
+                <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </InsightCard>
     </div>
   );
 }

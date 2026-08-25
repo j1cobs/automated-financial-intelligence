@@ -94,12 +94,15 @@ function mockQueryError<T>(): UseQueryResult<T, Error> {
 
 const emptyData: HomeResponse = {
   net_worth_trend: [],
+  net_worth_mom_delta: null,
   recurring_monthly_spend: 0,
   recurring_items: [],
   top_merchants: [],
   cash_flow_projection: null,
   category_drift: [],
   subscriptions: [],
+  biggest_expense_this_month: null,
+  upcoming_recurring: [],
 };
 
 const fullData: HomeResponse = {
@@ -107,6 +110,7 @@ const fullData: HomeResponse = {
     { date: '2026-08-23', net_worth: 900 },
     { date: '2026-08-24', net_worth: 1000 },
   ],
+  net_worth_mom_delta: 240,
   recurring_monthly_spend: 50,
   recurring_items: [{ description: 'Gym Membership', amount: 50 }],
   top_merchants: [{ description: 'Amazon', amount: 250 }],
@@ -121,6 +125,15 @@ const fullData: HomeResponse = {
   },
   category_drift: [{ category: 'Groceries', current: 140, baseline: 100, drift_pct: 0.4 }],
   subscriptions: [{ description: 'Streaming Service', average_amount: 9.99, months_seen: 3 }],
+  biggest_expense_this_month: { description: 'Rent', amount: 1500, date: '2026-08-01' },
+  upcoming_recurring: [
+    {
+      description: 'Music Streaming',
+      amount: 12,
+      next_expected_date: '2026-09-01',
+      typical_interval_days: 30,
+    },
+  ],
 };
 
 describe('HomeTab', () => {
@@ -166,8 +179,27 @@ describe('HomeTab', () => {
     expect(screen.getByText(/nothing flagged recurring yet/i)).toBeInTheDocument();
     expect(screen.getByText(/not enough history yet to compare this month/i)).toBeInTheDocument();
     expect(screen.getByText(/none detected in the trailing 6 months/i)).toBeInTheDocument();
+    expect(screen.getByText(/no recurring charges with a predictable cadence yet/i)).toBeInTheDocument();
     // No net-worth-history yet -> no "current net worth" tile.
     expect(screen.queryByText('Net Worth')).not.toBeInTheDocument();
+    // No current-month expense yet -> no "biggest expense" callout.
+    expect(screen.queryByText('Biggest Expense This Month')).not.toBeInTheDocument();
+  });
+
+  it('renders the biggest expense callout and the net worth month-over-month delta', () => {
+    mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
+    render(<HomeTab onNavigate={onNavigate} />);
+    expect(screen.getByText('Biggest Expense This Month')).toBeInTheDocument();
+    expect(screen.getByText(/Rent/)).toBeInTheDocument();
+    expect(screen.getByText(/\$1,500/)).toBeInTheDocument();
+    expect(screen.getByText(/since last month/i)).toBeInTheDocument();
+  });
+
+  it('renders upcoming recurring charges', () => {
+    mockUseHome.mockReturnValue(mockQuerySuccess(fullData));
+    render(<HomeTab onNavigate={onNavigate} />);
+    expect(screen.getByText('Upcoming Recurring Charges')).toBeInTheDocument();
+    expect(screen.getByText(/Music Streaming/)).toBeInTheDocument();
   });
 
   it('renders the net worth trend chart once there are at least 2 snapshots', () => {

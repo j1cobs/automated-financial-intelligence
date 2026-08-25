@@ -584,6 +584,137 @@ class HomeInsightsTests(unittest.TestCase):
         descriptions = [row["description"] for row in result["subscriptions"]]
         self.assertNotIn("Too New", descriptions)
 
+    def test_subscription_detected_when_billing_day_is_regular(self) -> None:
+        # Netflix-shaped: same description, consistent amount (well within 15%), and
+        # billed on the same day-of-month (+/- 1-2 days) across 4 consecutive months.
+        days = [3, 4, 2, 3]
+        rows = [
+            _tx(
+                _month_start(m).replace(day=d).isoformat(),
+                15.49,
+                _EXPENSE,
+                description="Netflix",
+            )
+            for m, d in zip((4, 3, 2, 1), days, strict=True)
+        ]
+        df = _frame(rows)
+        result = build_home(df, [])
+        descriptions = [row["description"] for row in result["subscriptions"]]
+        self.assertIn("Netflix", descriptions)
+
+    def test_no_subscription_when_billing_day_is_irregular(self) -> None:
+        # The bug this pins: a description seen in 3+ of the trailing 6 months at a
+        # near-constant amount used to be flagged a "subscription" with no check on
+        # how regularly-spaced the occurrences were -- e.g. a restaurant visited
+        # often with fairly consistent per-visit pricing ("Cafe Du Parquet" in
+        # production). Scattered days-of-month must NOT be flagged.
+        days = [3, 17, 22, 9, 28]
+        rows = [
+            _tx(
+                _month_start(m).replace(day=d).isoformat(),
+                42.00,
+                _EXPENSE,
+                description="Cafe Du Parquet",
+            )
+            for m, d in zip((5, 4, 3, 2, 1), days, strict=True)
+        ]
+        df = _frame(rows)
+        result = build_home(df, [])
+        descriptions = [row["description"] for row in result["subscriptions"]]
+        self.assertNotIn("Cafe Du Parquet", descriptions)
+
+    def test_biggest_expense_this_month_picks_largest_by_absolute_amount(self) -> None:
+        today = date.today()
+        df = _frame(
+            [
+                _tx(today.isoformat(), 25.0, _EXPENSE, description="Coffee"),
+                _tx(today.isoformat(), 400.0, _EXPENSE, description="Rent Top-Up"),
+                _tx(today.isoformat(), 60.0, _EXPENSE, description="Groceries"),
+            ]
+        )
+        result = build_home(df, [])
+        biggest = result["biggest_expense_this_month"]
+        self.assertIsNotNone(biggest)
+        self.assertEqual(biggest["description"], "Rent Top-Up")
+        self.assertAlmostEqual(biggest["amount"], 400.0)
+        self.assertEqual(biggest["date"], today.isoformat())
+
+    def test_biggest_expense_this_month_is_none_without_current_month_expenses(self) -> None:
+        baseline = _month_start(3)
+        df = _frame([_tx(baseline.isoformat(), 50.0, _EXPENSE)])
+        result = build_home(df, [])
+        self.assertIsNone(result["biggest_expense_this_month"])
+
+    def test_net_worth_mom_delta_uses_closest_point_at_least_one_month_prior(self) -> None:
+        today = date.today()
+        history = [
+            {"date": (today - timedelta(days=95)).isoformat(), "net_worth": 1000.0},
+            # Closest point that is still >= 1 month before `today` -- must be picked
+            # over the (wrong) naive "second-to-last sample" approach.
+            {"date": (today - timedelta(days=40)).isoformat(), "net_worth": 1200.0},
+            {"date": (today - timedelta(days=10)).isoformat(), "net_worth": 1500.0},
+            {"date": today.isoformat(), "net_worth": 1600.0},
+        ]
+        empty = pd.DataFrame(
+            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
+        )
+        result = build_home(empty, history)
+        self.assertAlmostEqual(result["net_worth_mom_delta"], 1600.0 - 1200.0)
+
+    def test_net_worth_mom_delta_is_none_with_a_single_trend_point(self) -> None:
+        history = [{"date": date.today().isoformat(), "net_worth": 500.0}]
+        empty = pd.DataFrame(
+            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
+        )
+        result = build_home(empty, history)
+        self.assertIsNone(result["net_worth_mom_delta"])
+
+    def test_upcoming_recurring_projects_next_charge_from_median_interval(self) -> None:
+        base = date.today() - timedelta(days=90)
+        gaps = [29, 31, 30]
+        occurrence_dates = [base]
+        for gap in gaps:
+            occurrence_dates.append(occurrence_dates[-1] + timedelta(days=gap))
+        rows = [
+            _tx(d.isoformat(), 12.99, _EXPENSE, description="Music Streaming", is_recurring=True)
+            for d in occurrence_dates
+        ]
+        df = _frame(rows)
+        result = build_home(df, [])
+        upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
+        self.assertIn("Music Streaming", upcoming)
+        last_date = occurrence_dates[-1]
+        expected_next = last_date + timedelta(days=30)
+        actual_next = date.fromisoformat(upcoming["Music Streaming"]["next_expected_date"])
+        self.assertLessEqual(abs((actual_next - expected_next).days), 2)
+        self.assertEqual(upcoming["Music Streaming"]["typical_interval_days"], 30)
+
+    def test_upcoming_recurring_excludes_single_occurrence(self) -> None:
+        df = _frame(
+            [_tx(date.today().isoformat(), 9.99, _EXPENSE, description="One Timer", is_recurring=True)]
+        )
+        result = build_home(df, [])
+        descriptions = [row["description"] for row in result["upcoming_recurring"]]
+        self.assertNotIn("One Timer", descriptions)
+
+    def test_upcoming_recurring_uses_median_not_mean_interval(self) -> None:
+        # Gaps: 30, 30, 30, then one deliberately-skewed 90-day gap (a missed/late
+        # charge). Mean interval would be inflated by the outlier (45 days); the
+        # median stays at 30. Distinguishing the two is the point of this test.
+        base = date.today() - timedelta(days=180)
+        gaps = [30, 30, 30, 90]
+        occurrence_dates = [base]
+        for gap in gaps:
+            occurrence_dates.append(occurrence_dates[-1] + timedelta(days=gap))
+        rows = [
+            _tx(d.isoformat(), 8.0, _EXPENSE, description="Skewed Gap Sub", is_recurring=True)
+            for d in occurrence_dates
+        ]
+        df = _frame(rows)
+        result = build_home(df, [])
+        upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
+        self.assertEqual(upcoming["Skewed Gap Sub"]["typical_interval_days"], 30)
+
 
 if __name__ == "__main__":
     unittest.main()

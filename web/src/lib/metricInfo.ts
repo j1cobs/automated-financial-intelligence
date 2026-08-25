@@ -19,6 +19,27 @@ export interface MetricInfo {
 }
 
 export const METRIC_INFO: Readonly<Record<string, MetricInfo>> = Object.freeze({
+  income: {
+    label: 'Total Income',
+    definition: 'Total income across the transactions in the current filter.',
+    formula: 'sum of income transactions',
+    window: 'Current filter (whatever date range is active)',
+    excludes: ['Internal transfers between your own accounts', 'Transactions you flagged as duplicates'],
+  },
+  expenses: {
+    label: 'Total Expenses',
+    definition: 'Total spend across the transactions in the current filter.',
+    formula: 'sum of expense transactions',
+    window: 'Current filter (whatever date range is active)',
+    excludes: ['Internal transfers between your own accounts', 'Transactions you flagged as duplicates'],
+  },
+  net_flow: {
+    label: 'Net Flow',
+    definition: 'What was left over across the transactions in the current filter.',
+    formula: 'income − expenses',
+    window: 'Current filter (whatever date range is active)',
+    excludes: ['Internal transfers between your own accounts', 'Transactions you flagged as duplicates'],
+  },
   net_worth: {
     label: 'Net Worth',
     definition: "What you'd have left if you settled every account today.",

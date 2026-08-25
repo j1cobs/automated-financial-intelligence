@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import date
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
 
@@ -148,6 +149,95 @@ class EnrichBeforeFilterTests(unittest.TestCase):
         filtered, _ = apply_filters(df, _filters(period="all_time", accounts=["A"]))
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered.iloc[0]["tx_type"], "transfer")
+
+
+class DayLevelDateRangeTests(unittest.TestCase):
+    """`date_from`/`date_to` narrow WITHIN the period-selected months; they never widen it."""
+
+    def _week(self) -> pd.DataFrame:
+        return _frame(
+            [
+                _row("2026-05-01", 10.0, transaction_hash="may01"),
+                _row("2026-05-05", 10.0, transaction_hash="may05"),
+                _row("2026-05-10", 10.0, transaction_hash="may10"),
+                _row("2026-05-20", 10.0, transaction_hash="may20"),
+            ]
+        )
+
+    def test_date_range_narrows_within_the_selected_month(self) -> None:
+        filtered, _ = apply_filters(
+            self._week(),
+            _filters(period="all_time", date_from=date(2026, 5, 4), date_to=date(2026, 5, 11)),
+        )
+        self.assertEqual(set(filtered["transaction_hash"]), {"may05", "may10"})
+
+    def test_date_from_and_date_to_are_none_by_default(self) -> None:
+        f = DashboardFilters()
+        self.assertIsNone(f.date_from)
+        self.assertIsNone(f.date_to)
+
+    def test_none_date_range_is_a_no_op(self) -> None:
+        # Regression safety: an existing scenario (owner filter over all_time), run once
+        # with date_from/date_to explicitly None and once without passing them, must give
+        # identical results.
+        df = self.NonDateFilterTests_mixed()
+        with_explicit_none, _ = apply_filters(
+            df, _filters(period="all_time", owners=["Jacob"], date_from=None, date_to=None)
+        )
+        without_passing, _ = apply_filters(df, _filters(period="all_time", owners=["Jacob"]))
+        self.assertEqual(
+            set(with_explicit_none["transaction_hash"]), set(without_passing["transaction_hash"])
+        )
+        self.assertEqual(set(with_explicit_none["transaction_hash"]), {"a"})
+
+    def NonDateFilterTests_mixed(self) -> pd.DataFrame:
+        return _frame(
+            [
+                _row(
+                    "2026-05-01",
+                    10.0,
+                    transaction_hash="a",
+                    owner_name="Jacob",
+                    category="Groceries",
+                    account_name="Chequing",
+                    description="Loblaws",
+                ),
+                _row(
+                    "2026-05-02",
+                    500.0,
+                    transaction_hash="b",
+                    owner_name="Alexie",
+                    category="Travel",
+                    account_name="Visa",
+                    description="Air Canada",
+                    is_outlier=True,
+                ),
+            ]
+        )
+
+    def test_date_range_outside_the_selected_months_yields_nothing(self) -> None:
+        # period='custom' selecting only January; date_from/date_to point at March. The
+        # day-range must NOT bypass the month selection -- this is the core "narrow, don't
+        # widen" invariant.
+        df = self._spread_for_month_test()
+        filtered, _ = apply_filters(
+            df,
+            _filters(
+                period="custom",
+                months=["2026-01"],
+                date_from=date(2026, 3, 1),
+                date_to=date(2026, 3, 31),
+            ),
+        )
+        self.assertEqual(len(filtered), 0)
+
+    def _spread_for_month_test(self) -> pd.DataFrame:
+        return _frame(
+            [
+                _row("2026-01-10", 10.0, transaction_hash="a"),
+                _row("2026-03-15", 10.0, transaction_hash="c"),
+            ]
+        )
 
 
 class NonDateFilterTests(unittest.TestCase):

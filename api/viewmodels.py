@@ -34,6 +34,7 @@ import calendar
 from datetime import date
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from app.dashboard import (
@@ -64,6 +65,11 @@ MIN_MONTHLY_INCOME_FOR_RATE = 100.0
 MIN_DAYS_FOR_COMPLETE_MONTH = 28
 
 _ROLLING_SPEND_WINDOW_DAYS = 30
+
+# Subscription detection's day-of-month regularity gate (see build_home). A real
+# subscription bills on a near-fixed day each month; this is how many days of slack are
+# allowed around that day before a series stops reading as "regular."
+DAY_OF_MONTH_TOLERANCE_DAYS = 4
 
 
 def exclude_duplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -685,6 +691,25 @@ def build_budget(df: pd.DataFrame, budget_rows: list[dict[str, Any]]) -> dict[st
     return {"month": current_month_str, "items": items}
 
 
+def _is_day_of_month_regular(dates: pd.Series, tolerance_days: int) -> bool:
+    """True if every date in `dates` falls within `tolerance_days` of a common
+    day-of-month, handling month-end wraparound (day 30 and day 1-2 are "close"
+    across a month boundary; a plain numeric mean gets this wrong -- the mean of
+    [1, 2, 29, 30] is ~15.5, nowhere near the actual cluster). Uses a circular mean:
+    represent each day-of-month as an angle around a 30-day circle, average the unit
+    vectors, then check every date's angular distance from that mean is within
+    tolerance.
+    """
+    if len(dates) < 2:
+        return True
+    days = dates.dt.day.to_numpy(dtype=float)
+    angles = days / 30.0 * 2 * np.pi
+    mean_angle = np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))
+    diffs = np.abs((angles - mean_angle + np.pi) % (2 * np.pi) - np.pi)
+    max_day_diff = (diffs / (2 * np.pi) * 30.0).max()
+    return bool(max_day_diff <= tolerance_days)
+
+
 def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]]) -> dict[str, Any]:
     """Insights for the Home tab: a daily-check-in status surface, versus the four
     existing tabs which stay the "go deeper" analysis layer (PLAN.md's insight-first
@@ -698,15 +723,33 @@ def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]
     """
     net_worth_trend = [{"date": row["date"], "net_worth": row["net_worth"]} for row in net_worth_history]
 
+    # --- Month-over-month net worth delta (Home tab insight) ------------------------
+    # `net_worth_history`/`net_worth_trend` is sampled DAILY (one row per
+    # `account_balance_snapshots` calendar day), not monthly -- so `trend[-2]` would be
+    # yesterday, not a month ago. Walk back from the latest point to the closest sample
+    # that is at least a full calendar month older, using `DateOffset(months=1)` rather
+    # than a fixed day count so it lines up with an actual prior month, not ~30 days.
+    net_worth_mom_delta: float | None = None
+    if len(net_worth_trend) >= 2:
+        latest = net_worth_trend[-1]
+        latest_date = pd.to_datetime(latest["date"])
+        one_month_prior = latest_date - pd.DateOffset(months=1)
+        prior_candidates = [r for r in net_worth_trend if pd.to_datetime(r["date"]) <= one_month_prior]
+        if prior_candidates:
+            net_worth_mom_delta = latest["net_worth"] - prior_candidates[-1]["net_worth"]
+
     if all_time_df.empty:
         return {
             "net_worth_trend": net_worth_trend,
+            "net_worth_mom_delta": net_worth_mom_delta,
             "recurring_monthly_spend": 0.0,
             "recurring_items": [],
             "top_merchants": [],
             "cash_flow_projection": None,
             "category_drift": [],
             "subscriptions": [],
+            "biggest_expense_this_month": None,
+            "upcoming_recurring": [],
         }
 
     real = all_time_df[all_time_df["tx_type"] != "transfer"]
@@ -754,6 +797,10 @@ def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]
     # Same day-elapsed/days-in-month projection formula `build_budget` uses for
     # per-category projections, applied to the whole month's income/expenses instead.
     cash_flow_projection: dict[str, Any] | None = None
+    # Biggest single expense this month (Home tab insight) -- reuses the same
+    # current-month frame the projection above already builds, rather than
+    # re-filtering `real` from scratch.
+    biggest_expense: dict[str, Any] | None = None
     if current_month_str in all_time_df["month"].values:
         month_df = real[real["month"] == current_month_str]
         spent_so_far = float(month_df[month_df["tx_type"] == "expense"]["adjusted_amount"].abs().sum())
@@ -770,6 +817,17 @@ def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]
             "days_elapsed": days_elapsed,
             "days_in_month": days_in_month,
         }
+
+        month_expenses = month_df[month_df["tx_type"] == "expense"]
+        if not month_expenses.empty:
+            row = month_expenses.loc[month_expenses["adjusted_amount"].abs().idxmax()]
+            biggest_expense = {
+                "description": row["description"],
+                "amount": float(abs(row["adjusted_amount"])),
+                "date": row["date"].strftime("%Y-%m-%d")
+                if hasattr(row["date"], "strftime")
+                else str(row["date"]),
+            }
 
     # --- Category drift vs. the user's own baseline (Q4) ------------------------------
     # Baseline is the category's average spend across the user's own complete months,
@@ -804,6 +862,15 @@ def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]
     # in at least 3 of the trailing 6 months at a near-constant amount (within 15% of
     # its own mean) is flagged automatically, catching subscriptions the user never
     # went and hand-marked.
+    #
+    # Amount-stability alone is not enough: a restaurant the user visits often can have
+    # fairly consistent per-visit pricing and satisfy the same-amount/3-plus-months test
+    # (real case: "Cafe Du Parquet"). `category` can't discriminate this away -- per
+    # CLAUDE.md, the ML classifier is still a Phase-1 stub, so almost every real
+    # transaction is `category == "uncategorized"`. A real subscription bills on a
+    # near-fixed day each month; a casual repeat visit doesn't, so day-of-month
+    # regularity is the signal that's actually available. `DAY_OF_MONTH_TOLERANCE_DAYS`
+    # is a starting guess -- revisit it if real data starts mis-firing either way.
     trailing_6mo = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=6)]
     expense_6mo = trailing_6mo[trailing_6mo["tx_type"] == "expense"]
     subscriptions: list[dict[str, Any]] = []
@@ -818,19 +885,50 @@ def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]
         spread = float(amounts.max() - amounts.min()) / mean_amount
         if spread > 0.15:
             continue
+        if not _is_day_of_month_regular(group["date"], tolerance_days=DAY_OF_MONTH_TOLERANCE_DAYS):
+            continue
         subscriptions.append(
             {"description": description, "average_amount": mean_amount, "months_seen": int(months_seen)}
         )
     subscriptions.sort(key=lambda row: row["average_amount"], reverse=True)
 
+    # --- Upcoming recurring charges (Home tab insight) --------------------------------
+    # Projects each recurring description's next expected charge from its own history:
+    # the typical gap between occurrences, applied to the most recent one. Uses the
+    # MEDIAN interval rather than the mean -- one skipped or late month shouldn't skew
+    # the projection the way an outlier drags a mean.
+    upcoming_recurring: list[dict[str, Any]] = []
+    for description, group in recurring.groupby("description"):
+        occurrence_dates = group["date"].sort_values()
+        if len(occurrence_dates) < 2:
+            continue
+        intervals = occurrence_dates.diff().dropna().dt.days
+        typical_interval_days = float(intervals.median())
+        if typical_interval_days <= 0:
+            continue
+        last_date = occurrence_dates.iloc[-1]
+        next_expected = last_date + pd.Timedelta(days=typical_interval_days)
+        upcoming_recurring.append(
+            {
+                "description": description,
+                "amount": float(group["adjusted_amount"].abs().mean()),
+                "next_expected_date": next_expected.strftime("%Y-%m-%d"),
+                "typical_interval_days": round(typical_interval_days),
+            }
+        )
+    upcoming_recurring.sort(key=lambda row: row["next_expected_date"])
+
     return {
         "net_worth_trend": net_worth_trend,
+        "net_worth_mom_delta": net_worth_mom_delta,
         "recurring_monthly_spend": recurring_monthly_spend,
         "recurring_items": recurring_items,
         "top_merchants": top_merchants,
         "cash_flow_projection": cash_flow_projection,
         "category_drift": category_drift,
         "subscriptions": subscriptions[:10],
+        "biggest_expense_this_month": biggest_expense,
+        "upcoming_recurring": upcoming_recurring,
     }
 
 

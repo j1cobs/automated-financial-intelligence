@@ -342,7 +342,7 @@ describe('OverviewTab', () => {
     expect(screen.getByText('1 month hidden — no recorded income.')).toBeInTheDocument();
   });
 
-  it('renders a brush/zoom control on the savings rate trend chart (Fix 14)', () => {
+  it('renders no brush/zoom control on the savings rate trend chart -- a short, filter-bounded series has no use for one', () => {
     mockedUseOverview.mockReturnValue({
       data: mockOverviewData,
       isLoading: false,
@@ -353,7 +353,7 @@ describe('OverviewTab', () => {
 
     const heading = screen.getByText('Savings Rate Trend');
     const card = heading.closest('.rounded-lg') as HTMLElement;
-    expect(card.querySelector('.recharts-brush')).not.toBeNull();
+    expect(card.querySelector('.recharts-brush')).toBeNull();
     expect(container).toContainElement(card);
   });
 
@@ -389,7 +389,7 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Asset Mix')).toBeInTheDocument();
   });
 
-  it('renders owner balances chart with exactly one x-axis tick per owner', () => {
+  it('renders owner balances as one mini chart per owner, with every account name and balance visible without hovering', () => {
     mockedUseOverview.mockReturnValue({
       data: mockOverviewData,
       isLoading: false,
@@ -401,14 +401,21 @@ describe('OverviewTab', () => {
     const heading = screen.getByText('Owner Balances');
     const chartCard = heading.closest('div');
     expect(chartCard).not.toBeNull();
-    // Recharts renders axis tick labels in a separate z-index layer, sibling
-    // to (not nested under) the `.recharts-xAxis` group.
-    const tickLabels = Array.from(chartCard!.querySelectorAll('.recharts-xAxis-tick-labels text'))
-      .map((el) => el.textContent)
-      .filter((text): text is string => !!text);
-    expect(tickLabels.length).toBe(mockOverviewData.net_worth.owner_balances.length);
-    expect(screen.getByText('Alice')).toBeInTheDocument();
-    expect(screen.getByText('Bob')).toBeInTheDocument();
+    const withinCard = within(chartCard!);
+
+    // One mini chart heading per owner (small multiples, not a shared axis).
+    expect(withinCard.getByText('Alice')).toBeInTheDocument();
+    expect(withinCard.getByText('Bob')).toBeInTheDocument();
+
+    // Every account name is a category-axis tick label, and every balance is
+    // a direct value label on its bar -- both rendered without hovering.
+    for (const owner of mockOverviewData.net_worth.owner_balances) {
+      for (const account of owner.accounts) {
+        expect(withinCard.getByText(account.account_name)).toBeInTheDocument();
+      }
+    }
+    expect(withinCard.getByText('$100,000')).toBeInTheDocument();
+    expect(withinCard.getByText('$150,000')).toBeInTheDocument();
   });
 
   it('renders top categories chart', () => {
@@ -585,6 +592,50 @@ describe('OverviewTab', () => {
     // No progress bar for the row itself. (The credit-limit editor below still
     // has a text input for this card, which is expected.)
     expect(withinCard.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  // Standard "lower is better" credit-utilization guidance: <30% healthy,
+  // 30-60% elevated, >=60% serious. Covers both boundaries plus one case per band.
+  it.each([
+    [0.95, 'bg-serious'],
+    [0.6, 'bg-serious'],
+    [0.45, 'bg-warn'],
+    [0.3, 'bg-warn'],
+    [0.1, 'bg-pos'],
+  ])('renders utilization %s with meter class %s', (pct, expectedClass) => {
+    const data: OverviewResponse = {
+      ...mockOverviewData,
+      net_worth: {
+        ...mockOverviewData.net_worth,
+        credit_utilization: [
+          {
+            account_key: 'acct-tone-test',
+            account_name: 'Tone Test Card',
+            owner_name: 'Alice',
+            current: pct * 1000,
+            limit: 1000,
+            pct,
+            is_manual: false,
+          },
+        ],
+      },
+    };
+    mockedUseOverview.mockReturnValue({
+      data,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    // Scoped to the Credit Utilization card specifically -- Emergency Fund
+    // (elsewhere on the page) also renders a `[role="progressbar"]` meter, and
+    // its position relative to Credit Utilization is not guaranteed by the
+    // card-pairing layout, so a page-wide "first progressbar" query is fragile.
+    const card = screen.getByText('Credit Utilization').closest('div');
+    const meterFill = card!.querySelector('[role="progressbar"] > div');
+    expect(meterFill).not.toBeNull();
+    expect(meterFill).toHaveClass(expectedClass);
   });
 
   it('does not render the credit section when there are no credit cards', () => {

@@ -33,6 +33,7 @@ data that exists.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Literal
 
 import pandas as pd
@@ -70,6 +71,20 @@ class DashboardFilters(BaseModel):
     search: str | None = None
     outliers_only: bool = False
     duplicates_only: bool = False
+    date_from: date | None = Field(
+        default=None,
+        description=(
+            "Inclusive day-level lower bound, narrowing WITHIN whatever `period`/`months` already "
+            "selects -- NOT a replacement for month-level filtering (the module's month-granularity "
+            "invariant above is unchanged). Callers must ensure `period`/`months` already cover this "
+            "range; `date_from`/`date_to` narrow further, they never widen. Added for a Cash Flow "
+            "dashboard drill-down: jumping to a filtered Transactions view for exactly one week or one "
+            "rolling-30-day window needs day precision the month-granularity filters can't express alone."
+        ),
+    )
+    date_to: date | None = Field(
+        default=None, description="Inclusive day-level upper bound. See `date_from`."
+    )
 
     def is_default(self) -> bool:
         """True when nothing narrows the data — lets callers skip work and lets the UI
@@ -85,6 +100,8 @@ class DashboardFilters(BaseModel):
             and not self.search
             and not self.outliers_only
             and not self.duplicates_only
+            and self.date_from is None
+            and self.date_to is None
         )
 
 
@@ -99,6 +116,8 @@ def dashboard_filters(
     search: Annotated[str | None, Query()] = None,
     outliers_only: Annotated[bool, Query()] = False,
     duplicates_only: Annotated[bool, Query()] = False,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
 ) -> DashboardFilters:
     """FastAPI query-param dependency. Repeated params (`?owners=A&owners=B`) arrive as
     lists; omitting one entirely means "no constraint", which is not the same as an empty
@@ -114,6 +133,8 @@ def dashboard_filters(
         search=search,
         outliers_only=outliers_only,
         duplicates_only=duplicates_only,
+        date_from=date_from,
+        date_to=date_to,
     )
 
 
@@ -216,6 +237,13 @@ def apply_filters(df: pd.DataFrame, filters: DashboardFilters) -> tuple[pd.DataF
         selected_months = preset_month_keys(filters.period, df)
 
     date_mask = df["month"].isin(selected_months)
+    # Day-level narrowing WITHIN the month selection above -- see `date_from`/`date_to`'s
+    # docstrings. These never widen the window: a day outside the selected months stays
+    # excluded even if it falls inside [date_from, date_to].
+    if filters.date_from is not None:
+        date_mask &= df["date"] >= pd.Timestamp(filters.date_from)
+    if filters.date_to is not None:
+        date_mask &= df["date"] <= pd.Timestamp(filters.date_to)
     return df[non_date & date_mask], df[non_date]
 
 

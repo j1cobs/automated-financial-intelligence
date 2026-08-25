@@ -243,14 +243,33 @@ export interface SubscriptionItem {
   months_seen: number;
 }
 
+export interface BiggestExpenseItem {
+  description: string;
+  amount: number;
+  date: string;
+}
+
+export interface UpcomingRecurringItem {
+  description: string;
+  amount: number;
+  /** A median-interval projection, not a confirmed billing date. */
+  next_expected_date: string;
+  typical_interval_days: number;
+}
+
 export interface HomeResponse {
   net_worth_trend: NetWorthTrendItem[];
+  /** Latest net worth minus the closest sample at least one calendar month prior.
+   *  `null` when there isn't a full month of history yet. */
+  net_worth_mom_delta: number | null;
   recurring_monthly_spend: number;
   recurring_items: RecurringItem[];
   top_merchants: MerchantItem[];
   cash_flow_projection: CashFlowProjection | null;
   category_drift: CategoryDriftItem[];
   subscriptions: SubscriptionItem[];
+  biggest_expense_this_month: BiggestExpenseItem | null;
+  upcoming_recurring: UpcomingRecurringItem[];
 }
 
 // ---------------------------------------------------------------------------

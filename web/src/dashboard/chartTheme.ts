@@ -298,10 +298,35 @@ export function yAxisProps(width = 56) {
   } as const;
 }
 
+/**
+ * Character budget for a category-axis tick label at a 160px axis width
+ * (`AXIS_FONT_SIZE` 12, so ~6.6px/char average advance width for a sans-serif
+ * face, minus `tickMargin` and internal tick padding). Recharts hard-clips
+ * category tick text with no ellipsis when it overflows the axis's `width` --
+ * there is no built-in truncation for a category axis the way there is for a
+ * numeric one, so `truncateTickLabel` below does it by hand. The full,
+ * untruncated value is still available on hover: Recharts derives a vertical
+ * bar chart's tooltip label from the category axis's raw data value, not from
+ * `tickFormatter`'s output, so truncating the tick never truncates the
+ * tooltip.
+ */
+export const CATEGORY_TICK_CHAR_BUDGET = 22;
+
+/** Truncate a category-axis tick label to `maxChars`, trailing "…" when cut. */
+export function truncateTickLabel(value: string, maxChars: number = CATEGORY_TICK_CHAR_BUDGET): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
 /** Tooltip chrome. Enhances -- never the only way to read a value. */
 export function tooltipProps() {
   return {
-    cursor: { stroke: axisColor(), strokeWidth: 1 },
+    // `fill` is required here: Recharts' Bar-chart hover cursor falls back to
+    // its own hardcoded light-gray default when none is given, which reads as
+    // a stray light patch on a dark surface. Reuses `AREA_FILL_OPACITY` (the
+    // existing "series hue at 10%, never a saturated block" convention) rather
+    // than inventing a new translucency value.
+    cursor: { stroke: axisColor(), strokeWidth: 1, fill: axisColor(), fillOpacity: AREA_FILL_OPACITY },
     contentStyle: {
       backgroundColor: surfaceColor(),
       border: `1px solid ${hairlineColor()}`,

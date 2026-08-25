@@ -9,6 +9,9 @@ import { METRIC_INFO, metricInfoFor } from './metricInfo';
  * `METRIC_INFO` must carry no orphan entries beyond it.
  */
 const RENDERED_METRIC_KEYS = [
+  'income',
+  'expenses',
+  'net_flow',
   'net_worth',
   'total_assets',
   'total_liabilities',

@@ -5,6 +5,7 @@ import {
   fromSearchParams,
   activeFilterChips,
   countActiveFilters,
+  formatDateRangeLabel,
   type DashboardFilters,
 } from './filters';
 import type { FilterOptions } from './types';
@@ -47,6 +48,18 @@ describe('toSearchParams', () => {
     const params = toSearchParams({ ...DEFAULT_FILTERS, period: 'last_30_days' });
     expect(params.get('period')).toBe('last_30_days');
   });
+
+  it('serializes date_from/date_to as ISO date strings', () => {
+    const params = toSearchParams({ ...DEFAULT_FILTERS, date_from: '2026-05-04', date_to: '2026-05-11' });
+    expect(params.get('date_from')).toBe('2026-05-04');
+    expect(params.get('date_to')).toBe('2026-05-11');
+  });
+
+  it('omits date_from/date_to when null', () => {
+    const params = toSearchParams(DEFAULT_FILTERS);
+    expect(params.has('date_from')).toBe(false);
+    expect(params.has('date_to')).toBe(false);
+  });
 });
 
 describe('fromSearchParams', () => {
@@ -80,6 +93,18 @@ describe('fromSearchParams', () => {
     const parsed = fromSearchParams(new URLSearchParams('categories=Groceries&categories=Utilities'));
     expect(parsed.categories).toEqual(['Groceries', 'Utilities']);
   });
+
+  it('parses date_from/date_to back into ISO date strings', () => {
+    const parsed = fromSearchParams(new URLSearchParams('date_from=2026-05-04&date_to=2026-05-11'));
+    expect(parsed.date_from).toBe('2026-05-04');
+    expect(parsed.date_to).toBe('2026-05-11');
+  });
+
+  it('defaults date_from/date_to to null when absent', () => {
+    const parsed = fromSearchParams(new URLSearchParams(''));
+    expect(parsed.date_from).toBeNull();
+    expect(parsed.date_to).toBeNull();
+  });
 });
 
 describe('round trip', () => {
@@ -90,6 +115,7 @@ describe('round trip', () => {
     { ...DEFAULT_FILTERS, owners: ['Alice', 'Bob'], categories: ['Groceries'] },
     { ...DEFAULT_FILTERS, accounts: ['Chase Checking'], amount_min: 10, amount_max: 500.5 },
     { ...DEFAULT_FILTERS, search: 'coffee shop', outliers_only: true, duplicates_only: true },
+    { ...DEFAULT_FILTERS, date_from: '2026-05-04', date_to: '2026-05-11' },
   ];
 
   it.each(cases)('fromSearchParams(toSearchParams(f)) deep-equals f (%#)', (filters) => {
@@ -152,6 +178,46 @@ describe('activeFilterChips', () => {
     expect(amountChips).toHaveLength(1);
     expect(amountChips[0].remove(filters)).toEqual(DEFAULT_FILTERS);
   });
+
+  it('renders exactly one day-range chip when date_from/date_to are set, instead of period/months chips', () => {
+    // The shape a drill-down (e.g. rolling-30-day-spend click-through)
+    // actually produces: period/months are set as a required "covering"
+    // carrier alongside the day-precise bounds -- see
+    // `DashboardFilters.date_from`'s docstring.
+    const filters: DashboardFilters = {
+      ...DEFAULT_FILTERS,
+      period: 'custom',
+      months: ['2026-07', '2026-08'],
+      date_from: '2026-07-27',
+      date_to: '2026-08-25',
+    };
+    const chips = activeFilterChips(filters, options);
+
+    const dayRangeChips = chips.filter((chip) => chip.id === 'date_range');
+    expect(dayRangeChips).toHaveLength(1);
+    expect(dayRangeChips[0].label).toBe('Jul 27 – Aug 25, 2026');
+    expect(chips.some((chip) => chip.id === 'period')).toBe(false);
+    expect(chips.some((chip) => chip.id.startsWith('months:'))).toBe(false);
+  });
+
+  it('removing the day-range chip clears period, months, date_from, and date_to together', () => {
+    const filters: DashboardFilters = {
+      ...DEFAULT_FILTERS,
+      period: 'custom',
+      months: ['2026-07', '2026-08'],
+      date_from: '2026-07-27',
+      date_to: '2026-08-25',
+    };
+    const chips = activeFilterChips(filters, options);
+    const dayRangeChip = chips.find((chip) => chip.id === 'date_range')!;
+    expect(dayRangeChip.remove(filters)).toEqual(DEFAULT_FILTERS);
+  });
+});
+
+describe('formatDateRangeLabel', () => {
+  it('formats a range as "Mon D – Mon D, YYYY"', () => {
+    expect(formatDateRangeLabel('2026-07-27', '2026-08-25')).toBe('Jul 27 – Aug 25, 2026');
+  });
 });
 
 describe('countActiveFilters', () => {
@@ -173,6 +239,22 @@ describe('countActiveFilters', () => {
     expect(countActiveFilters({ ...DEFAULT_FILTERS, amount_min: 10, amount_max: 20 })).toBe(1);
   });
 
+  it('counts a day-range (date_from/date_to) as a single axis, not doubled with period/months', () => {
+    const filters: DashboardFilters = {
+      ...DEFAULT_FILTERS,
+      period: 'custom',
+      months: ['2026-07', '2026-08'],
+      date_from: '2026-07-27',
+      date_to: '2026-08-25',
+    };
+    expect(countActiveFilters(filters)).toBe(1);
+  });
+
+  it('does not undercount to 0 when only date_from/date_to are set (period/months absent)', () => {
+    const filters: DashboardFilters = { ...DEFAULT_FILTERS, date_from: '2026-07-27', date_to: '2026-08-25' };
+    expect(countActiveFilters(filters)).toBe(1);
+  });
+
   it('counts every axis when everything is active (period and custom months count separately)', () => {
     const filters: DashboardFilters = {
       period: 'custom',
@@ -185,6 +267,8 @@ describe('countActiveFilters', () => {
       search: 'coffee',
       outliers_only: true,
       duplicates_only: true,
+      date_from: null,
+      date_to: null,
     };
     expect(countActiveFilters(filters)).toBe(9);
   });

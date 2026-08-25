@@ -27,6 +27,7 @@ import {
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { directionOf, toneFor, toneLabel, DIRECTION_GLYPH, TONE_TOKENS } from '../lib/polarity';
+import type { TabId } from './tabs';
 
 /**
  * Transactions tab -- ledger + anomaly scatter (PLAN.md Phase 15, Fix 10).
@@ -73,7 +74,7 @@ function formatAxisDate(timestamp: number): string {
  * ships a direction glyph and an sr-only label per the design system's
  * semantic-colour rule (see `lib/polarity.ts`).
  */
-function AmountCell({ amount }: { amount: number }) {
+export function AmountCell({ amount }: { amount: number }) {
   const direction = directionOf(amount);
   const tone = toneFor(amount, 'normal');
   const tokens = TONE_TOKENS[tone];
@@ -492,7 +493,31 @@ function VirtualizedLedgerTable({
   );
 }
 
-export function TransactionsTab() {
+/** Labels for the "Back to X" drill-down-return button. Mirrors
+ *  `Dashboard.tsx`'s `TABS` labels -- kept local rather than shared, since
+ *  each tab component here is otherwise self-contained (see that file's own
+ *  comment on the pattern) and only one extra string is at stake. */
+const TAB_LABELS: Record<TabId, string> = {
+  home: 'Home',
+  overview: 'Overview',
+  cashflow: 'Cash Flow',
+  budget: 'Budget',
+  transactions: 'Transactions',
+};
+
+interface TransactionsTabProps {
+  /** Set when the user arrived here via a cross-tab drill-down (e.g. the
+   *  Cash Flow rolling-30-day-spend chart) -- renders a "Back to X" button
+   *  that restores the tab + filters snapshotted before the drill-down.
+   *  `dateRangeLabel` is display-only (Item 3) -- a human-readable rendering
+   *  of the snapshotted `date_from`/`date_to`, when the drill-down set them,
+   *  so this area can state the active range explicitly rather than relying
+   *  solely on the FilterBar chip. */
+  returnTo?: { tab: TabId; dateRangeLabel?: string | null } | null;
+  onReturn?: () => void;
+}
+
+export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabProps) {
   const ledgerQuery = useLedger();
   const anomaliesQuery = useAnomalies();
   const categoriesQuery = useCategories();
@@ -552,8 +577,29 @@ export function TransactionsTab() {
     [ledgerQuery.data, sortKey, sortDir],
   );
 
+  const ledgerSummary = useMemo(() => {
+    const count = sortedTransactions.length;
+    const sum = sortedTransactions.reduce((total, tx) => total + tx.amount, 0);
+    return { count, sum };
+  }, [sortedTransactions]);
+
   return (
     <div className="space-y-6 sm:space-y-8">
+      {returnTo && onReturn && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onReturn}
+            className="flex min-h-9 items-center gap-1 rounded-md border border-hairline px-3 py-1.5 text-xs font-medium text-ink-secondary hover:text-ink sm:text-sm"
+          >
+            <span aria-hidden="true">←</span> Back to {TAB_LABELS[returnTo.tab]}
+          </button>
+          {returnTo.dateRangeLabel && (
+            <span className="text-xs text-ink-muted">Showing {returnTo.dateRangeLabel}</span>
+          )}
+        </div>
+      )}
+
       {/* Anomalies Section */}
       <div>
         <h2 className="mb-1 text-base font-semibold text-ink sm:text-lg">Anomalies</h2>
@@ -612,8 +658,14 @@ export function TransactionsTab() {
 
         {ledgerQuery.data && (
           <div>
-            <p className="mb-2 text-xs font-medium text-ink-secondary">
-              {sortedTransactions.length} {sortedTransactions.length === 1 ? 'transaction' : 'transactions'}
+            <p className="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs font-medium text-ink-secondary">
+              <span>
+                {ledgerSummary.count} {ledgerSummary.count === 1 ? 'transaction' : 'transactions'}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                Net <AmountCell amount={ledgerSummary.sum} />
+              </span>
             </p>
             {sortedTransactions.length > VIRTUALIZE_THRESHOLD ? (
               <VirtualizedLedgerTable

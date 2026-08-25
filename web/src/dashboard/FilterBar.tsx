@@ -232,7 +232,7 @@ export function FilterBar() {
   }
 
   return (
-    <div className="sticky top-0 z-10 border-b border-hairline bg-surface-1 px-3 py-3 sm:px-6">
+    <div className="sticky top-0 z-40 border-b border-hairline bg-surface-1 px-3 py-3 sm:px-6">
       {/* Desktop / tablet layout */}
       <div className="hidden flex-wrap items-end gap-3 sm:flex">
         {renderCoreControls('desktop')}

@@ -19,7 +19,9 @@ import { useCashFlow } from '../lib/queries';
 import { useFilters } from '../lib/FilterContext';
 import { MetricInfoBadge } from './MetricTile';
 import { TabSkeleton, ErrorState } from './LoadingState';
+import { PeriodTransactionsPreview } from './PeriodTransactionsPreview';
 import { strings } from '../lib/strings';
+import { daysBefore, parseWeekRange, parseMonthRange } from '../lib/dateRanges';
 import type {
   RollingSpendItem,
   CashFlowSeriesItem,
@@ -240,9 +242,7 @@ function StatTile({
   tone: Tone;
   /** For `pos-neg`, the value whose sign decides the colour (usually `value` itself). */
   sign?: number;
-  /** Optional metricInfo key (Fix 13) -- renders the hover/tap tooltip badge.
-   *  Not every tile here has a registry entry (`income`/`expenses`/`net_flow`
-   *  are period totals, not one of the `avg_*` metrics `metricInfo.ts` covers). */
+  /** Optional metricInfo key (Fix 13) -- renders the hover/tap tooltip badge. */
   metricKey?: string;
 }) {
   const formatted =
@@ -271,20 +271,30 @@ function StatTile({
 }
 
 /** Income vs. expenses over a period, grouped bars plus a net line. Shared by the
- *  monthly and weekly charts (Fix 6 / Fix 10) -- same shape, same treatment. */
-function FlowBarChart({
+ *  monthly and weekly charts (Fix 6 / Fix 10) -- same shape, same treatment.
+ *  Both call sites pass `onBarClick` so a click on either chart opens the
+ *  same (period-agnostic) `PeriodTransactionsPreview` -- mirrors how the
+ *  category-breakdown chart below already sets `cursor`/`onClick` per-bar. */
+function FlowBarChart<T extends CashFlowSeriesItem | WeeklyTrendItem>({
   title,
   data,
   xKey,
   themeEpoch,
+  onBarClick,
 }: {
   title: string;
-  data: (CashFlowSeriesItem | WeeklyTrendItem)[];
+  data: T[];
   xKey: 'month' | 'week';
   themeEpoch: number;
+  onBarClick?: (row: T) => void;
 }) {
   const income = incomeColor();
   const expense = expenseColor();
+  const handleClick = onBarClick
+    ? (bar: { payload?: T }) => {
+        if (bar.payload) onBarClick(bar.payload);
+      }
+    : undefined;
   return (
     <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
       <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">{title}</h3>
@@ -302,6 +312,8 @@ function FlowBarChart({
               fill={income}
               maxBarSize={BAR_MAX_SIZE}
               radius={BAR_RADIUS}
+              cursor={onBarClick ? 'pointer' : undefined}
+              onClick={handleClick}
               {...surfaceGapProps()}
             />
             <Bar
@@ -310,6 +322,8 @@ function FlowBarChart({
               fill={expense}
               maxBarSize={BAR_MAX_SIZE}
               radius={BAR_RADIUS}
+              cursor={onBarClick ? 'pointer' : undefined}
+              onClick={handleClick}
               {...surfaceGapProps()}
             />
             <Line
@@ -331,11 +345,51 @@ function FlowBarChart({
  * distribution. Uses `useCashFlow()` from `lib/queries.ts` (returns
  * `CashFlowResponse` from `lib/types.ts`) and Recharts.
  */
-export function CashFlowTab() {
+export function CashFlowTab({
+  onDrillDownToTransactions,
+}: {
+  /** Rolling-30-day-spend point click -> switch to Transactions filtered to
+   *  that 30-day window (Dashboard.tsx owns the snapshot + tab switch; this
+   *  tab just reports which range was clicked). Optional so this component
+   *  keeps working standalone (e.g. in tests) with no drill-down wired up. */
+  onDrillDownToTransactions?: (dateFrom: string, dateTo: string) => void;
+}) {
   const { data, isLoading, error, refetch } = useCashFlow();
   const { filters, patchFilters } = useFilters();
   const themeEpoch = useChartTheme();
   const showBrush = useShowBrush();
+  const [previewPeriod, setPreviewPeriod] = useState<{
+    label: string;
+    dateFrom: string;
+    dateTo: string;
+  } | null>(null);
+
+  // Weekly/monthly bar click -> open PeriodTransactionsPreview for the
+  // clicked bar's exact date range. `parseWeekRange`/`parseMonthRange`
+  // return `null` for an unparseable value, which both are documented to
+  // mean "no drill-down available" -- so an unparseable bar simply doesn't
+  // open a preview, rather than opening one with an error message.
+  function handleWeekBarClick(row: WeeklyTrendItem) {
+    const range = parseWeekRange(row.week);
+    if (!range) return;
+    setPreviewPeriod({
+      label: `Week of ${range.from} – ${range.to}`,
+      dateFrom: range.from,
+      dateTo: range.to,
+    });
+  }
+
+  function handleMonthBarClick(row: CashFlowSeriesItem) {
+    const range = parseMonthRange(row.month);
+    if (!range) return;
+    // "August 2026", not the raw date range -- matches the month-label
+    // format `FilterOptions.months` already uses elsewhere in the UI.
+    const label = new Date(`${range.from}T00:00:00`).toLocaleDateString('en-US', {
+      month: 'long',
+      year: 'numeric',
+    });
+    setPreviewPeriod({ label, dateFrom: range.from, dateTo: range.to });
+  }
 
   // Cross-filtering (Fix 14): clicking a category segment adds it to the
   // active filters via the shared FilterContext. `OTHER_LABEL` is a
@@ -346,6 +400,16 @@ export function CashFlowTab() {
     const current = filters.categories ?? [];
     if (current.includes(category)) return;
     patchFilters({ categories: [...current, category] });
+  }
+
+  // Rolling-30-day-spend point click. Each point's `date` is the *last* day
+  // of the 30-day window it summarizes (see the chart's own tooltip copy
+  // below), so the window is [date - 29 days, date].
+  function handleRollingSpendClick(row: RollingSpendItem) {
+    if (!onDrillDownToTransactions) return;
+    const from = daysBefore(row.date, 29);
+    if (!from) return;
+    onDrillDownToTransactions(from, row.date);
   }
 
   if (isLoading) {
@@ -386,9 +450,27 @@ export function CashFlowTab() {
 
       {/* Key metrics stat tiles */}
       <div className="grid grid-cols-2 gap-2 sm:gap-4 sm:grid-cols-3 lg:grid-cols-6">
-        <StatTile label="Total Income" value={data.income} format="currency" tone="income" />
-        <StatTile label="Total Expenses" value={data.expenses} format="currency" tone="expense" />
-        <StatTile label="Net Flow" value={data.net_flow} format="currency" tone="pos-neg" />
+        <StatTile
+          label="Total Income"
+          value={data.income}
+          format="currency"
+          tone="income"
+          metricKey="income"
+        />
+        <StatTile
+          label="Total Expenses"
+          value={data.expenses}
+          format="currency"
+          tone="expense"
+          metricKey="expenses"
+        />
+        <StatTile
+          label="Net Flow"
+          value={data.net_flow}
+          format="currency"
+          tone="pos-neg"
+          metricKey="net_flow"
+        />
         <StatTile
           label="Savings Rate"
           value={data.savings_rate}
@@ -416,23 +498,27 @@ export function CashFlowTab() {
         Inter-account transfers are excluded from income and expense totals.
       </p>
 
-      {/* Income vs Expenses Chart */}
+      {/* Income vs Expenses Chart -- clicking a bar opens a two-column preview
+          of that month's transactions (income vs expenses). */}
       {data.month_over_month.length > 0 && (
         <FlowBarChart
           title="Income vs Expenses"
           data={data.month_over_month}
           xKey="month"
           themeEpoch={themeEpoch}
+          onBarClick={handleMonthBarClick}
         />
       )}
 
-      {/* Income vs Expenses by week */}
+      {/* Income vs Expenses by week -- clicking a bar opens a two-column preview
+          of that week's transactions (income vs expenses). */}
       {data.weekly_trend.length > 0 && (
         <FlowBarChart
           title="Income vs Expenses (weekly)"
           data={data.weekly_trend}
           xKey="week"
           themeEpoch={themeEpoch}
+          onBarClick={handleWeekBarClick}
         />
       )}
 
@@ -461,7 +547,40 @@ export function CashFlowTab() {
                   name="30-day total"
                   stroke={expenseColor()}
                   strokeWidth={2}
-                  dot={false}
+                  dot={
+                    onDrillDownToTransactions
+                      ? (dotProps: {
+                          cx?: number;
+                          cy?: number;
+                          index?: number;
+                          payload?: RollingSpendItem;
+                        }) => {
+                          const { cx, cy, index, payload } = dotProps;
+                          if (cx === undefined || cy === undefined || !payload) {
+                            return <g key={`rolling-spend-dot-${index}`} />;
+                          }
+                          return (
+                            // Invisible click target -- the point itself stays
+                            // undrawn (a dot per day would be noise); only
+                            // `activeDotProps()` below draws a visible marker,
+                            // on hover. r=14 (28px hit diameter) clears the
+                            // `dataviz` skill's 24px minimum tap-target guidance;
+                            // r=8 (16px) previously did not.
+                            <circle
+                              key={`rolling-spend-dot-${index}`}
+                              data-testid={`rolling-spend-point-${index}`}
+                              cx={cx}
+                              cy={cy}
+                              r={14}
+                              fill="transparent"
+                              style={{ cursor: 'pointer' }}
+                              onClick={() => handleRollingSpendClick(payload)}
+                            />
+                          );
+                        }
+                      : false
+                  }
+                  activeDot={activeDotProps()}
                 />
                 {showBrush && <Brush dataKey="date" {...brushProps()} />}
               </LineChart>
@@ -543,6 +662,15 @@ export function CashFlowTab() {
             </ResponsiveContainer>
           </div>
         </div>
+      )}
+
+      {previewPeriod && (
+        <PeriodTransactionsPreview
+          label={previewPeriod.label}
+          dateFrom={previewPeriod.dateFrom}
+          dateTo={previewPeriod.dateTo}
+          onClose={() => setPreviewPeriod(null)}
+        />
       )}
     </div>
   );

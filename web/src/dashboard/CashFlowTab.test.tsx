@@ -11,6 +11,13 @@ import type { CashFlowResponse } from '../lib/types';
 // Mock the queries module
 vi.mock('../lib/queries');
 
+// PeriodTransactionsPreview issues its own one-off `/ledger` request via
+// `apiFetch`, deliberately not `useLedger()` -- mock the low-level fetch so
+// the click test can assert on the exact URL it built.
+vi.mock('../lib/api', () => ({
+  apiFetch: vi.fn(),
+}));
+
 // Recharts' ResponsiveContainer measures its parent via ResizeObserver, which
 // jsdom doesn't implement, so charts never receive a nonzero size and render
 // no children (bars, lines, etc). Give the wrapped chart an explicit fixed
@@ -27,7 +34,10 @@ vi.mock('recharts', async (importOriginal) => {
   };
 });
 
+import { apiFetch } from '../lib/api';
+
 const mockUseCashFlow = vi.mocked(queries.useCashFlow);
+const mockedApiFetch = vi.mocked(apiFetch);
 
 function renderCashFlowTab() {
   const queryClient = new QueryClient({
@@ -456,5 +466,117 @@ describe('CashFlowTab', () => {
     renderCashFlowTab();
 
     expect(screen.getByText('Click a bar to add that category to your filters.')).toBeInTheDocument();
+  });
+
+  describe('weekly bar click -> transactions preview', () => {
+    // A real `week` value, as produced by `api/viewmodels.py`'s
+    // `df["week"] = df["date"].dt.to_period("W-SUN").astype(str)`:
+    // "YYYY-MM-DD/YYYY-MM-DD", Monday through Sunday inclusive (confirmed by
+    // running `pd.Period(<date>, freq="W-SUN")` directly).
+    const weekMockData: CashFlowResponse = {
+      ...baseMockData,
+      weekly_trend: [{ week: '2024-01-08/2024-01-14', income: 1200, expenses: 800, net: 400 }],
+    };
+
+    beforeEach(() => {
+      mockedApiFetch.mockReset();
+      mockedApiFetch.mockResolvedValue({ transactions: [] });
+    });
+
+    it("opens a preview and requests the clicked week's exact date range", async () => {
+      mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(weekMockData));
+
+      const { container } = renderCashFlowTab();
+
+      const heading = screen.getByText('Income vs Expenses (weekly)');
+      const card = heading.closest('.rounded-lg') as HTMLElement;
+      const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
+      expect(firstBar).toBeTruthy();
+      fireEvent.click(firstBar!);
+
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+      expect(screen.getByText('Week of 2024-01-08 – 2024-01-14')).toBeInTheDocument();
+
+      expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+      const requestedPath = mockedApiFetch.mock.calls[0][0] as string;
+      const [, qs] = requestedPath.split('?');
+      const params = new URLSearchParams(qs);
+      expect(params.get('period')).toBe('custom');
+      expect(params.get('date_from')).toBe('2024-01-08');
+      expect(params.get('date_to')).toBe('2024-01-14');
+      expect(params.getAll('months')).toEqual(['2024-01']);
+
+      // Sanity: the click landed inside this render.
+      expect(container).toContainElement(card);
+    });
+
+    it('closes the preview on Escape', async () => {
+      mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(weekMockData));
+
+      renderCashFlowTab();
+
+      const heading = screen.getByText('Income vs Expenses (weekly)');
+      const card = heading.closest('.rounded-lg') as HTMLElement;
+      const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
+      fireEvent.click(firstBar!);
+
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('monthly bar click -> transactions preview', () => {
+    beforeEach(() => {
+      mockedApiFetch.mockReset();
+      mockedApiFetch.mockResolvedValue({ transactions: [] });
+    });
+
+    it("opens a preview and requests the clicked month's exact date range", async () => {
+      mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+      const { container } = renderCashFlowTab();
+
+      const heading = screen.getByText('Income vs Expenses');
+      const card = heading.closest('.rounded-lg') as HTMLElement;
+      const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
+      expect(firstBar).toBeTruthy();
+      fireEvent.click(firstBar!);
+
+      // baseMockData.month_over_month[0].month === '2024-01' -> Jan 1-31.
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+      expect(screen.getByText('January 2024')).toBeInTheDocument();
+
+      expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+      const requestedPath = mockedApiFetch.mock.calls[0][0] as string;
+      const [, qs] = requestedPath.split('?');
+      const params = new URLSearchParams(qs);
+      expect(params.get('period')).toBe('custom');
+      expect(params.get('date_from')).toBe('2024-01-01');
+      expect(params.get('date_to')).toBe('2024-01-31');
+      expect(params.getAll('months')).toEqual(['2024-01']);
+
+      // Sanity: the click landed inside this render.
+      expect(container).toContainElement(card);
+    });
+
+    it('closes the preview on Escape', async () => {
+      mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
+
+      renderCashFlowTab();
+
+      const heading = screen.getByText('Income vs Expenses');
+      const card = heading.closest('.rounded-lg') as HTMLElement;
+      const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
+      fireEvent.click(firstBar!);
+
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
   });
 });

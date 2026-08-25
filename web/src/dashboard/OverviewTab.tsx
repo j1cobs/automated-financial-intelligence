@@ -1,9 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useOverview } from '../lib/queries';
 import { useSetCreditLimit } from '../lib/mutations';
 import { useFilters } from '../lib/FilterContext';
-import type { PieLabelRenderProps, TooltipContentProps } from 'recharts';
 import type {
+  AssetMixItem,
   CreditUtilizationItem,
   MonthOverMonthItem,
   OwnerBalanceItem,
@@ -15,9 +15,6 @@ import { strings } from '../lib/strings';
 import {
   LineChart,
   Line,
-  Brush,
-  PieChart,
-  Pie,
   BarChart,
   Bar,
   XAxis,
@@ -27,6 +24,7 @@ import {
   Legend,
   ResponsiveContainer,
   Cell,
+  LabelList,
   ReferenceLine,
 } from 'recharts';
 import {
@@ -42,38 +40,19 @@ import {
   legendProps,
   referenceLineProps,
   surfaceGapProps,
-  surfaceColor,
-  axisColor,
+  onFillTextColor,
+  AXIS_FONT_SIZE,
   CHART_MARGIN,
   BAR_MAX_SIZE,
   BAR_RADIUS_HORIZONTAL,
+  truncateTickLabel,
 } from './chartTheme';
 
-/** See `CashFlowTab.tsx`'s identical helper -- a brush competes for height with
- *  the chart itself below the `sm` breakpoint, so it's omitted there rather
- *  than shrunk further (PLAN.md Phase 15, Fix 14). */
-function useShowBrush(): boolean {
-  const [show, setShow] = useState(() => typeof window === 'undefined' || window.innerWidth >= 640);
-  useEffect(() => {
-    function onResize() {
-      setShow(window.innerWidth >= 640);
-    }
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  return show;
-}
-
-/** Tokenized styling for a Recharts `<Brush>`. */
-function brushProps() {
-  return {
-    stroke: axisColor(),
-    fill: surfaceColor(),
-    travellerWidth: 8,
-    height: 20,
-    tickFormatter: () => '',
-  } as const;
-}
+/** Shared category-axis width (Item 2): wide enough for realistic account
+ *  names ("World Elite Mastercard (....3265)") and category/description
+ *  labels without eating most of the chart's plottable area. Paired with
+ *  `truncateTickLabel`'s character budget in `chartTheme.ts`. */
+const CATEGORY_AXIS_WIDTH = 160;
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -88,22 +67,108 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function OwnerBalancesTooltip({ active, payload }: Partial<TooltipContentProps<number, string>>) {
-  if (!active || !payload || payload.length === 0) {
-    return null;
+/** Pivots the API's long `{balance, subtype_label}` rows into one wide row so
+ *  a single stacked `<Bar>` per subtype can plot the Asset Mix chart (Item E:
+ *  a horizontal stacked bar in place of a pie, per the `dataviz` skill's
+ *  part-to-whole guidance). `category` is a constant field, not real data --
+ *  it exists only to give the hidden category axis a stable key. */
+function buildAssetMixRow(items: AssetMixItem[]): Record<string, number | string> {
+  const row: Record<string, number | string> = { category: 'Assets' };
+  for (const item of items) {
+    row[item.subtype_label] = item.balance;
   }
-  const row = payload[0]?.payload as OwnerBalanceItem | undefined;
-  if (!row) {
+  return row;
+}
+
+const ASSET_MIX_HEIGHT = 120;
+
+interface AssetMixLabelProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
+
+/** Direct value+percent label centered on a stacked segment -- omitted (falls
+ *  back to the legend + tooltip) when the segment is too narrow to hold text
+ *  without overlapping its neighbours. 56px is roughly enough for a short
+ *  label like "Savings 12%" at the shared axis font size. */
+function renderAssetMixSegmentLabel(props: AssetMixLabelProps, label: string, pct: number, fill: string) {
+  const { x, y, width, height } = props;
+  if (x == null || y == null || width == null || height == null || width < 56) {
     return null;
   }
   return (
-    <div className="rounded-md border border-hairline bg-surface-1 p-2 text-xs shadow-sm sm:text-sm">
-      <p className="mb-1 font-semibold text-ink">{row.owner}</p>
-      {row.accounts.map((account) => (
-        <p key={account.account_name} className="text-ink-secondary">
-          {account.account_name} ({account.type}): {formatCurrency(account.value)}
-        </p>
-      ))}
+    <text
+      x={x + width / 2}
+      y={y + height / 2}
+      textAnchor="middle"
+      dominantBaseline="central"
+      fontSize={AXIS_FONT_SIZE}
+      fontWeight={600}
+      fill={onFillTextColor(fill)}
+    >
+      {`${label} ${(pct * 100).toFixed(0)}%`}
+    </text>
+  );
+}
+
+/** Fixed order matches the stacked-series colors the old single Owner
+ *  Balances chart used (`categoricalColor(0)` depository, `(1)` investment,
+ *  `(7)` credit, `(6)` other) -- Item F keeps the same colors, just moves
+ *  them onto per-account bars instead of stacked segments. */
+const ACCOUNT_TYPE_COLOR_INDEX: Record<string, number> = {
+  depository: 0,
+  investment: 1,
+  credit: 7,
+  other: 6,
+};
+
+const ACCOUNT_TYPE_LABELS: Record<string, string> = {
+  depository: 'Depository',
+  investment: 'Investment',
+  credit: 'Credit',
+  other: 'Other',
+};
+
+function accountTypeColor(type: string): string {
+  const index = ACCOUNT_TYPE_COLOR_INDEX[type];
+  return index != null ? categoricalColor(index) : categoricalColor(6);
+}
+
+/** One horizontal mini bar chart per owner (Item F small multiples) --
+ *  account name on the category axis, one bar per account, a direct value
+ *  label on every bar so every balance is visible without hovering. Color
+ *  encodes account type only (via `accountTypeColor`); owner is disambiguated
+ *  by which mini chart a bar sits in, not by a second hue. */
+function OwnerBalanceMiniChart({ owner }: { owner: OwnerBalanceItem }) {
+  const height = Math.max(80, owner.accounts.length * 32 + 24);
+  return (
+    <div>
+      <p className="mb-1 text-sm font-medium text-ink">{owner.owner}</p>
+      <ResponsiveContainer width="100%" height={height} minWidth="100%">
+        <BarChart data={owner.accounts} layout="vertical" margin={CHART_MARGIN.default}>
+          <CartesianGrid {...gridProps()} />
+          <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
+          <YAxis
+            dataKey="account_name"
+            type="category"
+            {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+            tickFormatter={(value: string) => truncateTickLabel(value)}
+          />
+          <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
+          <Bar dataKey="value" name="Balance" maxBarSize={BAR_MAX_SIZE} radius={BAR_RADIUS_HORIZONTAL}>
+            {owner.accounts.map((account, index) => (
+              <Cell key={`cell-${index}`} fill={accountTypeColor(account.type)} />
+            ))}
+            <LabelList
+              dataKey="value"
+              position="right"
+              formatter={(value: unknown) => formatCurrency(Number(value))}
+            />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
     </div>
   );
 }
@@ -174,9 +239,12 @@ function Meter({ pct, tone }: { pct: number; tone: MeterTone }) {
   );
 }
 
+/** Standard "lower is better" credit-utilization guidance: under ~30% utilization
+ *  is considered healthy by most scoring models, 30-60% is elevated but not urgent,
+ *  and above 60% meaningfully impacts credit health/available headroom. */
 function creditTone(pct: number): MeterTone {
-  if (pct >= 0.9) return 'serious';
-  if (pct >= 0.7) return 'warn';
+  if (pct >= 0.6) return 'serious';
+  if (pct >= 0.3) return 'warn';
   return 'pos';
 }
 
@@ -300,7 +368,6 @@ export function OverviewTab() {
   const { filters, patchFilters } = useFilters();
   // Re-render charts (their colours are resolved from CSS vars in JS) when the theme flips.
   useChartTheme();
-  const showBrush = useShowBrush();
 
   // Cross-filtering (Fix 14): clicking a category bar adds it to the active
   // filters via the shared FilterContext -- no separate filter mechanism.
@@ -345,13 +412,19 @@ export function OverviewTab() {
   const dormantCount = nw.dormant_accounts.length;
   const monthOverMonthRows = buildMonthOverMonthRows(ov.month_over_month);
   const sortedIncomeBreakdown = [...ov.income_breakdown].sort((a, b) => b.amount - a.amount);
+  const assetMixTotal = nw.asset_mix.reduce((sum, item) => sum + item.balance, 0);
+  // Fixed order (depository, investment, credit, other), filtered to types
+  // actually present -- drives the Owner Balances shared legend.
+  const ownerBalanceAccountTypes = Object.keys(ACCOUNT_TYPE_COLOR_INDEX).filter((type) =>
+    nw.owner_balances.some((owner) => owner.accounts.some((account) => account.type === type)),
+  );
 
   return (
     <div className="space-y-6">
       {/* KPI Tiles -- MetricTile (Fix 12/13): value + baseline comparison +
           sparkline where the API provides it, plus a hover/tap tooltip for
           every metric from `metricInfo.ts`. */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricTile metricKey="net_worth" value={nw.net_worth} />
         <MetricTile metricKey="total_assets" value={nw.total_assets} />
         <MetricTile metricKey="total_liabilities" value={nw.total_liabilities} />
@@ -373,8 +446,10 @@ export function OverviewTab() {
         </div>
       )}
 
-      {/* Income and Expenses Row */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      {/* Income and Expenses Row -- all three tiles pass an equivalent `metric`
+          prop today, so this row isn't actually stretch-broken; `items-start`
+          is added anyway as defense-in-depth against a future tile that doesn't. */}
+      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-3">
         <MetricTile
           metricKey="avg_monthly_income"
           value={ov.avg_monthly_income}
@@ -402,9 +477,14 @@ export function OverviewTab() {
           <ResponsiveContainer width="100%" height={250} minWidth="100%">
             <LineChart data={ov.savings_rate_trend} margin={CHART_MARGIN.default}>
               <CartesianGrid {...gridProps()} />
-              <XAxis dataKey="month" {...xAxisProps()} />
+              {/* `interval="preserveStartEnd"` thins month ticks on a short
+                  filter-bounded series so labels don't crowd into each other;
+                  a wider y-axis (64 vs. the 56px default) gives the
+                  percent-formatted ticks (e.g. "-100.0%") room too -- both
+                  scoped to this chart rather than the shared axis defaults. */}
+              <XAxis dataKey="month" {...xAxisProps()} interval="preserveStartEnd" />
               <YAxis
-                {...yAxisProps()}
+                {...yAxisProps(64)}
                 tickFormatter={(value) => formatPercent(value)}
                 domain={[-1, 1]}
                 allowDataOverflow={true}
@@ -420,7 +500,6 @@ export function OverviewTab() {
                 name="Savings Rate"
                 connectNulls={false}
               />
-              {showBrush && <Brush dataKey="month" {...brushProps()} />}
             </LineChart>
           </ResponsiveContainer>
           {hiddenSavingsMonths > 0 && (
@@ -432,83 +511,70 @@ export function OverviewTab() {
         </div>
       )}
 
-      {/* Asset Mix and Owner Balances */}
-      <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
-        {/* Asset Mix Pie Chart */}
+      {/* Emergency Fund and Asset Mix -- paired because both are short, fixed
+          -height cards (a few text lines + meter; a single 120px stacked bar).
+          Owner Balances and Income Sources (below, after Credit Utilization
+          and the Top Categories/Month-over-Month row) are the tall/variable
+          pair instead -- regrouped by actual content height, not by adding
+          more `items-start` CSS to a mismatched pairing. */}
+      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+        {ov.emergency_fund_months !== null && (
+          <Card
+            title="Emergency Fund"
+            caption="Liquid savings ÷ average monthly expenses."
+            metricKey="emergency_fund_months"
+          >
+            <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
+            <div className="mt-3">
+              <Meter pct={ov.emergency_fund_months / 6} tone={emergencyFundTone(ov.emergency_fund_months)} />
+            </div>
+            <p className="mt-2 text-xs text-ink-muted">Goal: 6 months of expenses covered.</p>
+          </Card>
+        )}
+
+        {/* Asset Mix -- a single 100%-width horizontal stacked bar, not a pie:
+            the `dataviz` skill's `choosing-a-form.md` prefers a stacked bar for
+            part-to-whole data. Same color assignment as before
+            (`categoricalScale(n)[index]`), just a different mark. */}
         {nw?.asset_mix && nw.asset_mix.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Asset Mix</h3>
-            <ResponsiveContainer width="100%" height={250} minWidth="100%">
-              <PieChart>
-                <Pie
-                  data={nw.asset_mix}
-                  dataKey="balance"
-                  nameKey="subtype_label"
-                  cx="50%"
-                  cy="50%"
-                  outerRadius={80}
-                  label={(props: PieLabelRenderProps) => {
-                    const entry = props.payload as unknown as { subtype_label: string; percent?: number };
-                    const percent = (props as unknown as { percent?: number }).percent ?? 0;
-                    return `${entry.subtype_label} ${(percent * 100).toFixed(0)}%`;
-                  }}
-                >
-                  {nw.asset_mix.map((_, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={categoricalScale(nw.asset_mix.length)[index]}
-                      {...surfaceGapProps()}
-                    />
-                  ))}
-                </Pie>
+            <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
+              <BarChart
+                data={[buildAssetMixRow(nw.asset_mix)]}
+                layout="vertical"
+                margin={CHART_MARGIN.compact}
+              >
+                <XAxis type="number" hide domain={[0, assetMixTotal]} />
+                <YAxis dataKey="category" type="category" hide />
                 <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-
-        {/* Owner Balances Bar Chart */}
-        {nw?.owner_balances && nw.owner_balances.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
-            <ResponsiveContainer width="100%" height={250} minWidth="100%">
-              <BarChart data={nw.owner_balances} margin={CHART_MARGIN.default}>
-                <CartesianGrid {...gridProps()} />
-                <XAxis dataKey="owner" {...xAxisProps()} />
-                <YAxis {...yAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <Tooltip content={<OwnerBalancesTooltip />} />
-                <Legend {...legendProps()} />
-                <ReferenceLine y={0} {...referenceLineProps()} />
-                <Bar
-                  dataKey="depository"
-                  stackId="a"
-                  fill={categoricalColor(0)}
-                  name="Depository"
-                  {...surfaceGapProps()}
-                />
-                <Bar
-                  dataKey="investment"
-                  stackId="a"
-                  fill={categoricalColor(1)}
-                  name="Investment"
-                  {...surfaceGapProps()}
-                />
-                <Bar
-                  dataKey="credit"
-                  stackId="a"
-                  fill={categoricalColor(7)}
-                  name="Credit"
-                  {...surfaceGapProps()}
-                />
-                {nw.owner_balances.some((row) => row.other !== 0) && (
-                  <Bar
-                    dataKey="other"
-                    stackId="a"
-                    fill={categoricalColor(6)}
-                    name="Other"
-                    {...surfaceGapProps()}
-                  />
-                )}
+                <Legend {...legendProps()} verticalAlign="bottom" />
+                {nw.asset_mix.map((item, index) => {
+                  const fill = categoricalScale(nw.asset_mix.length)[index];
+                  const pct = assetMixTotal > 0 ? item.balance / assetMixTotal : 0;
+                  return (
+                    <Bar
+                      key={item.subtype_label}
+                      dataKey={item.subtype_label}
+                      stackId="assets"
+                      fill={fill}
+                      name={item.subtype_label}
+                      {...surfaceGapProps()}
+                    >
+                      <LabelList
+                        dataKey={item.subtype_label}
+                        content={(props: object) =>
+                          renderAssetMixSegmentLabel(
+                            props as AssetMixLabelProps,
+                            item.subtype_label,
+                            pct,
+                            fill,
+                          )
+                        }
+                      />
+                    </Bar>
+                  );
+                })}
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -529,7 +595,7 @@ export function OverviewTab() {
 
       {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) and
           Month-over-month by category (app/dashboard.py:891-912) */}
-      <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
         {ov?.top_categories && ov.top_categories.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
@@ -542,7 +608,12 @@ export function OverviewTab() {
               <BarChart data={ov.top_categories} layout="vertical" margin={CHART_MARGIN.default}>
                 <CartesianGrid {...gridProps()} />
                 <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis dataKey="category" type="category" {...yAxisProps(96)} />
+                <YAxis
+                  dataKey="category"
+                  type="category"
+                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                  tickFormatter={(value: string) => truncateTickLabel(value)}
+                />
                 <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
                 <Bar
                   dataKey="amount"
@@ -569,7 +640,12 @@ export function OverviewTab() {
               <BarChart data={monthOverMonthRows} layout="vertical" margin={CHART_MARGIN.default}>
                 <CartesianGrid {...gridProps()} />
                 <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis dataKey="category" type="category" {...yAxisProps(96)} />
+                <YAxis
+                  dataKey="category"
+                  type="category"
+                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                  tickFormatter={(value: string) => truncateTickLabel(value)}
+                />
                 <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
                 <Legend {...legendProps()} />
                 <Bar
@@ -592,20 +668,43 @@ export function OverviewTab() {
         )}
       </div>
 
-      {/* Emergency fund progress + Income sources — app/dashboard.py:914-959 */}
-      <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
-        {ov.emergency_fund_months !== null && (
-          <Card
-            title="Emergency Fund"
-            caption="Liquid savings ÷ average monthly expenses."
-            metricKey="emergency_fund_months"
-          >
-            <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
-            <div className="mt-3">
-              <Meter pct={ov.emergency_fund_months / 6} tone={emergencyFundTone(ov.emergency_fund_months)} />
+      {/* Owner Balances and Income Sources -- paired because both are
+          tall/variable-height (small multiples that grow with owner/account
+          count; a chart with a 250px floor that grows with data). See the
+          Emergency Fund/Asset Mix grid above for the short/fixed-height
+          pair this was split from. */}
+      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+        {/* Owner Balances -- small multiples: one horizontal mini bar chart per
+            owner (Recharts has no clean two-tier categorical axis, so faking
+            "owner" as a second axis dimension would be awkward), account name
+            on the category axis, one bar per account with a direct value
+            label so every balance is visible without hovering. Color stays a
+            single dimension (account type via `categoricalScale`) per the
+            `dataviz` skill's categorical-hue rule -- owner is disambiguated by
+            spatial separation, not a second hue. One shared legend covers
+            account type for the whole group instead of repeating per chart.
+            One mini-chart per row (not two-per-row) so the account-name axis
+            gets the full card width -- see `yAxisProps` call below. */}
+        {nw?.owner_balances && nw.owner_balances.length > 0 && (
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
+            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
+            <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+              {ownerBalanceAccountTypes.map((type) => (
+                <span key={type} className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                  <span
+                    className="inline-block h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: accountTypeColor(type) }}
+                  />
+                  {ACCOUNT_TYPE_LABELS[type] ?? type}
+                </span>
+              ))}
             </div>
-            <p className="mt-2 text-xs text-ink-muted">Goal: 6 months of expenses covered.</p>
-          </Card>
+            <div className="grid grid-cols-1 gap-4">
+              {nw.owner_balances.map((owner) => (
+                <OwnerBalanceMiniChart key={owner.owner} owner={owner} />
+              ))}
+            </div>
+          </div>
         )}
 
         {sortedIncomeBreakdown.length > 0 && (
@@ -619,7 +718,12 @@ export function OverviewTab() {
               <BarChart data={sortedIncomeBreakdown} layout="vertical" margin={CHART_MARGIN.default}>
                 <CartesianGrid {...gridProps()} />
                 <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis dataKey="description" type="category" {...yAxisProps(96)} />
+                <YAxis
+                  dataKey="description"
+                  type="category"
+                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                  tickFormatter={(value: string) => truncateTickLabel(value)}
+                />
                 <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
                 <Bar
                   dataKey="amount"
@@ -634,8 +738,10 @@ export function OverviewTab() {
         )}
       </div>
 
-      {/* Additional Metrics */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* Additional Metrics -- all three tiles are the same MetricTile shape
+          (no `metric` prop), so not stretch-broken today; `items-start` added
+          for the same defense-in-depth reason as the Income/Expenses row above. */}
+      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <MetricTile metricKey="flagged_count" value={ov.flagged_count} format="number" />
         {ov.avg_weekly_expense > 0 && (
           <MetricTile metricKey="avg_weekly_expense" value={ov.avg_weekly_expense} />

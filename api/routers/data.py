@@ -308,14 +308,32 @@ class SubscriptionItem(BaseModel):
     """Out of the trailing 6 months."""
 
 
+class BiggestExpenseItem(BaseModel):
+    description: str
+    amount: float
+    date: str
+
+
+class UpcomingRecurringItem(BaseModel):
+    description: str
+    amount: float
+    next_expected_date: str
+    """A projection (last occurrence + median inter-occurrence interval), not a
+    confirmed billing date -- the frontend hedges its copy accordingly."""
+    typical_interval_days: int
+
+
 class HomeResponse(BaseModel):
     net_worth_trend: list[NetWorthTrendItem]
+    net_worth_mom_delta: float | None
     recurring_monthly_spend: float
     recurring_items: list[RecurringItem]
     top_merchants: list[MerchantItem]
+    biggest_expense_this_month: BiggestExpenseItem | None
     cash_flow_projection: CashFlowProjection | None
     category_drift: list[CategoryDriftItem]
     subscriptions: list[SubscriptionItem]
+    upcoming_recurring: list[UpcomingRecurringItem]
 
 
 class LedgerItem(BaseModel):
