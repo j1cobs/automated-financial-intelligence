@@ -149,6 +149,53 @@ class UpsertTransactionsFieldTests(unittest.TestCase):
         rows = cursor.executemany.call_args[0][1]
         self.assertEqual(rows[0][2], "unknown:unknown")  # account_key
 
+    def test_pending_and_pending_transaction_id_round_trip(self) -> None:
+        import pandas as pd
+
+        frame = pd.DataFrame.from_records([self._row(pending=True, pending_transaction_id="pend-1")])
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").upsert_transactions(frame)
+
+        rows = cursor.executemany.call_args[0][1]
+        self.assertEqual(rows[0][-2], True)  # pending
+        self.assertEqual(rows[0][-1], "pend-1")  # pending_transaction_id
+
+    def test_missing_pending_stores_null_not_false(self) -> None:
+        """Migration 019 (Phase 17): `pending` is nullable on purpose. A row from a source
+        that never carries the field at all (seed data, the non-Plaid fallback path) must
+        store SQL NULL -- "status unknown" -- not FALSE, which would falsely assert the
+        transaction is confirmed posted."""
+        import pandas as pd
+
+        row = self._row()
+        self.assertNotIn("pending", row)
+        self.assertNotIn("pending_transaction_id", row)
+        frame = pd.DataFrame.from_records([row])
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").upsert_transactions(frame)
+
+        rows = cursor.executemany.call_args[0][1]
+        self.assertIsNone(rows[0][-2])  # pending: NULL, not False
+        self.assertIsNot(rows[0][-2], False)
+        self.assertIsNone(rows[0][-1])  # pending_transaction_id
+
+    def test_user_owned_columns_absent_even_with_pending_fields(self) -> None:
+        """Regression guard: adding pending/pending_transaction_id to the INSERT/ON CONFLICT
+        lists (Phase 17) must not have also reintroduced user_category, is_recurring, or
+        is_duplicate -- those stay out so a pipeline re-run can never clear a manual edit."""
+        import pandas as pd
+
+        frame = pd.DataFrame.from_records([self._row(pending=False, pending_transaction_id=None)])
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").upsert_transactions(frame)
+
+        sql = cursor.executemany.call_args[0][0]
+        for column in ("user_category", "is_recurring", "is_duplicate"):
+            self.assertNotIn(column, sql)
+
 
 class LogPipelineRunTests(unittest.TestCase):
     def test_success_row(self) -> None:
@@ -168,7 +215,9 @@ class LogPipelineRunTests(unittest.TestCase):
 
         sql, params = cursor.execute.call_args[0]
         self.assertIn("INSERT INTO pipeline_runs", sql)
-        self.assertEqual(params, (started_at, "success", 3, 1, 2, None, None, None, "schedule"))
+        self.assertEqual(
+            params, (started_at, "success", 3, 1, 2, None, None, None, None, None, "schedule")
+        )
 
     def test_failure_row_defaults_counts_to_none(self) -> None:
         import datetime as dt
@@ -182,7 +231,8 @@ class LogPipelineRunTests(unittest.TestCase):
 
         sql, params = cursor.execute.call_args[0]
         self.assertEqual(
-            params, (started_at, "failed", None, None, None, None, "OperationalError", None, None)
+            params,
+            (started_at, "failed", None, None, None, None, None, None, "OperationalError", None, None),
         )
 
 
@@ -457,6 +507,56 @@ class PopPendingOauthStateTests(unittest.TestCase):
         self.assertIsNone(result)
         # Second DELETE (unconditional cleanup) still runs even when nothing matched.
         self.assertEqual(cursor.execute.call_count, 2)
+
+
+class DeleteTransactionsByExternalIdsTests(unittest.TestCase):
+    def test_deletes_matching_rows_only(self) -> None:
+        from unittest.mock import PropertyMock
+
+        connect, cursor = _mock_connect()
+        type(cursor).rowcount = PropertyMock(return_value=3)
+        with patch("database.db.psycopg.connect", connect):
+            deleted = DatabaseClient("postgresql://x").delete_transactions_by_external_ids(
+                ["id-1", "id-2", "id-3"]
+            )
+
+        self.assertEqual(deleted, 3)
+        sql, params = cursor.execute.call_args[0]
+        self.assertIn("DELETE FROM transactions", sql)
+        self.assertIn("external_id = ANY(%s)", sql)
+        self.assertEqual(params, (["id-1", "id-2", "id-3"],))
+
+    def test_empty_list_deletes_nothing_and_skips_db(self) -> None:
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            deleted = DatabaseClient("postgresql://x").delete_transactions_by_external_ids([])
+
+        self.assertEqual(deleted, 0)
+        connect.assert_not_called()
+
+
+class SyncCursorTests(unittest.TestCase):
+    def test_get_sync_cursors_returns_mapping(self) -> None:
+        connect, cursor = _mock_connect([("fp-1", "cursor-1"), ("fp-2", "cursor-2")])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_sync_cursors()
+
+        self.assertEqual(result, {"fp-1": "cursor-1", "fp-2": "cursor-2"})
+
+    def test_get_sync_cursors_empty_table(self) -> None:
+        connect, cursor = _mock_connect([])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_sync_cursors()
+        self.assertEqual(result, {})
+
+    def test_set_sync_cursor_upserts_on_conflict(self) -> None:
+        with patch.object(DatabaseClient, "_execute_many") as execute_many:
+            DatabaseClient("postgresql://x").set_sync_cursor("fp-1", "cursor-new")
+
+        sql, rows = execute_many.call_args[0]
+        self.assertIn("INSERT INTO plaid_sync_state", sql)
+        self.assertIn("ON CONFLICT (token_fingerprint) DO UPDATE", sql)
+        self.assertEqual(rows, [("fp-1", "cursor-new")])
 
 
 if __name__ == "__main__":

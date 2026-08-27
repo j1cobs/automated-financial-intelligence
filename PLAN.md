@@ -4335,6 +4335,142 @@ now cross-references this phase.
 
 ---
 
+## Phase 17 — Migrate Plaid ingestion to `/transactions/sync` — IMPLEMENTED (2026-08-25), test coverage pending
+
+A hotel stay at Le Germain produced **five stored rows** where the bank shows **one charge**. The user
+booked the room, put down a deposit to secure the stay, and ate at the restaurant; the card issuer
+authorized each separately and then settled everything as a single `-723.01` charge. Four of the five
+stored rows sum to ~724 — close to the settled total but not equal, which is the normal signature of
+released holds and tip adjustments rather than a clean partition.
+
+**Root cause:** `ingestion/plaid_ingestor.py` uses `/transactions/get`, fetching and immediately
+discarding both `pending` and `pending_transaction_id`. In Plaid's model a pending authorization that
+posts becomes a **brand-new transaction with a new `transaction_id`**, and the pending one simply **stops
+appearing** in `/transactions/get`. There is no removal signal. `build_transaction_hash` keys on
+`transaction_id`, so the settled `-723.01` lands as a new row while the four superseded authorizations
+persist forever. `reconcile_transactions` cannot close this: it buckets by natural key `(account_key,
+transaction_date, description, amount)`; each stale authorization has a distinct amount, so Plaid
+returns **zero** of that key and the guard deliberately skips it. That guard protects real history aging
+out of Plaid's rolling window and is correct — it is simply blind to this case.
+
+**Intended outcome:** Move to `/transactions/sync`, whose `removed` array reports superseded and
+reversed transactions explicitly. Pending→posted stops being inference. Going forward a stay like this
+settles into one row without user intervention.
+
+### Decisions locked
+
+| Question | Decision |
+|---|---|
+| Verify before building | **Yes** — read-only probe against live Plaid first |
+| Delete or flag superseded rows | **Delete** on exact Plaid lineage (`removed`); flag only on heuristic |
+| The 4 stale Germain rows already stored | **Manual** — user flags them with the existing `is_duplicate` checkbox |
+| Scope | Migrate to `/transactions/sync` |
+| `reconcile_transactions` | **Keep, but run only on a full-refresh sync** |
+| Initial-sync history depth | **Accept full history** (not capped to 90 days) |
+| `BaseIngestor` seam | **Keep `fetch_transactions`**; add a parallel `sync_transactions()` |
+| Old `/transactions/get` path | Keep as rollback insurance; delete in a follow-up |
+| Store Plaid's `pending` flag | **Yes**, ingest and store; do not surface in the UI yet |
+
+### The hazard this phase must close
+
+`reconcile_transactions` assumes the fetched frame is *everything Plaid currently returns for the
+window*. Under `/transactions/sync`, after the first run the frame is only the delta. The zero-count
+guard protects untouched keys, but a key present in the delta is **not** protected: the user really
+made four separate `IKEA $250.00` charges on 2026-07-02. If Plaid `modified` one of them, the delta
+carries **one** row for that natural key, the DB holds **four**, `excess = 3`, and the reconciliation
+logic deletes **three genuine transactions**. Therefore reconcile must be **structurally** prevented from
+running on a delta — gated by a `full_refresh` flag threaded from the ingestor, not by convention or
+comment.
+
+### Probe result (2026-08-25, all 3 production institutions): Gate passed
+
+Sync returned 200 on all 3 tokens (204/331/187 transactions, history back to March–April 2026). A Le
+Germain match was found: exactly one live row (the settled `$723.01` charge, `pending=False`,
+`pending_transaction_id=bNvnqEP3...Ee13EE`), and the DB holds 5 Germain rows with the same
+`pending_transaction_id` matching stored `external_id` on one of them (`id=18969`, `$524.81`) exactly.
+The other three stored rows (`$0.00`, `$198.20`, `$1.39`) have no lineage evidence in the current
+snapshot — expected, since a cold-start sync (`cursor=null`) has no prior baseline for `removed` to
+reference; they remain the manual cleanup case. **The union rule is confirmed:** this first sync
+`removed` was empty, but `pending_transaction_id` on the settled row carries the lineage pointer,
+so the effective deletion signal must be the union of Plaid's explicit `removed` array **and** every
+non-null `pending_transaction_id` on `added`/`modified` rows.
+
+### Shipped contracts
+
+**`SyncResult` dataclass** (`ingestion/plaid_ingestor.py`):
+```python
+@dataclass
+class SyncResult:
+    added: pd.DataFrame                    # same normalized columns as IngestResult produces
+    modified: pd.DataFrame                 # same shape
+    removed_ids: list[str]                 # Plaid transaction_ids — union of removed[] + pending lineage
+    duplicate_accounts_skipped: int
+    full_refresh: bool                     # True iff EVERY token started from a null cursor
+    cursors: dict[str, str]                # token_fingerprint (sha256) -> next_cursor
+```
+
+**Ingestor method:** `sync_transactions(self, stored_cursors: dict[str, str]) -> SyncResult` — fetches
+all deltas since the last sync. `stored_cursors` is keyed by `token_fingerprint = sha256(access_token).hexdigest()`;
+the raw token is never stored or logged, only its fingerprint.
+
+**DB methods:**
+- `get_sync_cursors() -> dict[str, str]` — returns `{token_fingerprint: cursor}` for every Item with a prior sync
+- `set_sync_cursor(fingerprint, cursor)` — persists the next cursor for one Item. Must only be called after every
+  write (upsert, delete, reconcile) has committed — advancing the cursor first means a crash mid-write loses
+  that delta permanently.
+- `delete_transactions_by_external_ids(external_ids: list[str]) -> int` — deletes rows by Plaid's authoritative
+  `removed` lineage. Safe to call on a delta. Returns the number of rows deleted.
+- `reconcile_transactions(..., *, full_refresh: bool)` — now requires keyword-only `full_refresh: bool`, raises
+  `ValueError` if False. Reconciliation is only sound when the fetched frame is the full current window, not a
+  delta; the guard prevents the IKEA-delta hazard.
+
+**Migrations:**
+- `018_plaid_sync_state.sql`: Creates `plaid_sync_state` table with `token_fingerprint` (TEXT PRIMARY KEY),
+  `cursor` (TEXT NOT NULL), `updated_at` (TIMESTAMPTZ DEFAULT NOW())
+- `019_transaction_pending.sql`: Adds `pending` (BOOLEAN, nullable on purpose) and `pending_transaction_id` (TEXT)
+  columns to `transactions`. NULL means "ingested before this phase, status unknown" and must never be confused with FALSE.
+- `020_pipeline_runs_sync.sql`: Adds `removed_count` (INTEGER) and `full_refresh` (BOOLEAN) columns to `pipeline_runs`
+
+**Pipeline orchestration** (`pipeline/runner.py::run_pipeline`):
+1. `sync_transactions()` — fetch added/modified/removed
+2. Canonicalize account keys, upsert accounts, snapshot balances
+3. Classify + score `added ∪ modified`
+4. `upsert_transactions(added ∪ modified)`
+5. `delete_transactions_by_external_ids(removed_ids)`
+6. `reconcile_transactions(..., full_refresh=True)` **only if** `result.full_refresh`
+7. `set_sync_cursor()` for each token — **last**, after every write above has committed
+
+Step 7's position is load-bearing: advancing the cursor before rows are durable means sync never
+replays that delta and those transactions are lost permanently.
+
+### Verification
+
+- All existing Python tests green (`python -m unittest discover -s tests -v`).
+- Initial sync with a null cursor sets `full_refresh=True`; a second run with a stored cursor sets it `False`.
+- A `removed` id deletes exactly that row and nothing else.
+- **The IKEA regression test:** four stored `IKEA $250.00` rows on one date; a delta modifying one of them;
+  assert `reconcile_transactions` is not called and all four rows survive.
+- `reconcile_transactions(full_refresh=False)` raises `ValueError`.
+- Cursor is not persisted when the upsert raises.
+- `pending` / `pending_transaction_id` round-trip through sync runs; `user_category` / `is_recurring` / `is_duplicate`
+  survive and are unmodified.
+- `token_fingerprint` is a sha256 hex digest, never the raw token.
+
+### Follow-ups (not in this phase)
+
+1. Delete the old `fetch_transactions`/`/transactions/get` path once sync has run clean in production
+   for approximately 2 weeks, confirming cursor state is stable and no crashes are eating deltas.
+2. Decide whether to surface `pending` in the ledger UI — currently stored but unsurfaced.
+
+### References
+
+See `docs/adr/0003-transactions-sync-and-superseded-authorizations.md` for the detailed rationale behind
+this phase (the Germain case as motivating example, why `/transactions/get` structurally cannot solve it,
+why reconcile is kept but gated, and why `removed` justifies deletion where `is_duplicate` justifies
+only flagging).
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working

@@ -119,6 +119,8 @@ class DatabaseClient:
         transactions_updated: int | None = None,
         stale_duplicates_removed: int | None = None,
         duplicate_accounts_skipped: int | None = None,
+        removed_count: int | None = None,
+        full_refresh: bool | None = None,
         error_class: str | None = None,
         error_message: str | None = None,
         trigger_type: str | None = None,
@@ -127,13 +129,18 @@ class DatabaseClient:
         (counts, errors) lives instead of the GitHub Actions log, which is visible to anyone with
         repo read access. `trigger_type` ("schedule" / "workflow_dispatch" / "local") distinguishes
         the daily cron from a manual run, so two same-day rows are self-explanatory rather than
-        looking like a duplicate-write bug."""
+        looking like a duplicate-write bug.
+
+        `removed_count` / `full_refresh` (migration 020, Phase 17) record the
+        /transactions/sync outcome: how many rows Plaid's `removed` lineage caused to be
+        deleted, and whether this run's sync was a full refresh (the only case
+        reconcile_transactions is allowed to run) versus an incremental delta."""
         sql = """
         INSERT INTO pipeline_runs (
             started_at, status, transactions_inserted, transactions_updated,
-            stale_duplicates_removed, duplicate_accounts_skipped, error_class, error_message,
-            trigger_type
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            stale_duplicates_removed, duplicate_accounts_skipped, removed_count, full_refresh,
+            error_class, error_message, trigger_type
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with psycopg.connect(self.database_url) as connection:
             with connection.cursor() as cursor:
@@ -146,6 +153,8 @@ class DatabaseClient:
                         transactions_updated,
                         stale_duplicates_removed,
                         duplicate_accounts_skipped,
+                        removed_count,
+                        full_refresh,
                         error_class,
                         error_message,
                         trigger_type,
@@ -629,6 +638,47 @@ class DatabaseClient:
             conn.commit()
         return rehashed, deleted + external_id_deleted
 
+    def get_sync_cursors(self) -> dict[str, str]:
+        """{token_fingerprint: cursor} for every Plaid Item that has completed at least one
+        /transactions/sync call. token_fingerprint is sha256(access_token) — the raw token is
+        never stored (see migration 018)."""
+        sql = "SELECT token_fingerprint, cursor FROM plaid_sync_state"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {fingerprint: cursor for fingerprint, cursor in rows}
+
+    def set_sync_cursor(self, token_fingerprint: str, cursor: str) -> None:
+        """Persist the next /transactions/sync cursor for one Item, keyed by its
+        sha256(access_token) fingerprint. Must only be called after every write from that
+        sync page has committed — advancing the cursor first means a crash mid-write loses
+        that delta permanently, since sync never replays a delta once its cursor is passed."""
+        sql = """
+        INSERT INTO plaid_sync_state (token_fingerprint, cursor)
+        VALUES (%s, %s)
+        ON CONFLICT (token_fingerprint) DO UPDATE
+        SET cursor     = EXCLUDED.cursor,
+            updated_at = NOW()
+        """
+        self._execute_many(sql, [(token_fingerprint, cursor)])
+
+    def delete_transactions_by_external_ids(self, external_ids: list[str]) -> int:
+        """Delete transactions by Plaid's authoritative `removed` lineage (plus superseded
+        `pending_transaction_id`s folded in by the caller) — see the ingestion/ sync section
+        of CLAUDE.md. Unlike reconcile_transactions, which infers duplication from counts,
+        this deletes only ids Plaid has explicitly stated are gone, so it's safe to run on a
+        delta and not just a full refresh. Returns the number of rows deleted."""
+        if not external_ids:
+            return 0
+        sql = "DELETE FROM transactions WHERE external_id = ANY(%s)"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (external_ids,))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted
+
     def upsert_categories(self, categories: Iterable[str]) -> None:
         sql = """
         INSERT INTO categories (name)
@@ -639,8 +689,22 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
-    def reconcile_transactions(self, frame: pd.DataFrame, start_date, end_date) -> int:
+    def reconcile_transactions(
+        self, frame: pd.DataFrame, start_date, end_date, *, full_refresh: bool
+    ) -> int:
         """Trim stored duplicate transactions using Plaid's own per-natural-key counts.
+
+        `full_refresh` is a required keyword-only guard: this method may only run when the
+        caller has confirmed `frame` is everything Plaid currently returns for the window, not
+        a delta. Under /transactions/sync (Phase 17), `frame` is normally only the delta since
+        the last cursor — most calls, after the first one, are NOT a full refresh. If a natural
+        key has one stored copy touched by a delta, this method would see fetched_count=1
+        against, say, four stored genuine IKEA-style repeats, compute excess=3, and delete three
+        real transactions that Plaid never said anything about. That is strictly worse than the
+        bug this method exists to fix. Callers must pass full_refresh=True only when they know
+        every token involved started its sync from a null cursor (see SyncResult.full_refresh in
+        ingestion/plaid_ingestor.py); passing False raises immediately below rather than silently
+        running unsafely.
 
         Why this exists: persistence is append-only, and the same real transaction can arrive
         again carrying a *new* Plaid transaction_id — after an Item re-link, or when one real
@@ -677,6 +741,12 @@ class DatabaseClient:
 
         Returns the number of rows deleted.
         """
+        if not full_refresh:
+            raise ValueError(
+                "reconcile_transactions must only run on a full-refresh sync — see "
+                "database/migrations, and the IKEA-delta hazard in this docstring"
+            )
+
         fetched_counts: Counter[tuple[str, str, str, str]] = Counter()
         for record in frame.to_dict("records"):
             fetched_counts[
@@ -779,6 +849,11 @@ class DatabaseClient:
         Columns the user owns — user_category, is_recurring, is_duplicate — are deliberately
         absent from both the INSERT list and the conflict-update list, so a pipeline run can
         never clear a manual edit. Keep them out when adding columns here.
+
+        `pending` / `pending_transaction_id` (migration 019) round-trip Plaid's pending-
+        authorization lineage. `pending` is left as None/NULL when the source record doesn't
+        carry it at all (e.g. the seed-data / non-Plaid fallback path) rather than defaulted to
+        False — NULL means "status unknown," which is not the same claim as "confirmed posted."
         """
         # No relocation pass is needed: build_transaction_hash keys on the transaction_id, so a
         # transaction Plaid has revised (pending -> posted) or re-attributed to another account
@@ -796,8 +871,10 @@ class DatabaseClient:
             balance,
             category,
             outlier_score,
-            is_outlier
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            is_outlier,
+            pending,
+            pending_transaction_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (transaction_hash) DO UPDATE
         SET external_id = EXCLUDED.external_id,
             account_key = EXCLUDED.account_key,
@@ -807,6 +884,8 @@ class DatabaseClient:
             category = EXCLUDED.category,
             outlier_score = EXCLUDED.outlier_score,
             is_outlier = EXCLUDED.is_outlier,
+            pending = EXCLUDED.pending,
+            pending_transaction_id = EXCLUDED.pending_transaction_id,
             updated_at = NOW()
         """
         rows = []
@@ -836,6 +915,8 @@ class DatabaseClient:
                     record.get("category"),
                     float(record.get("outlier_score", 0.0)),
                     bool(record.get("is_outlier", False)),
+                    record.get("pending"),
+                    record.get("pending_transaction_id"),
                 )
             )
 

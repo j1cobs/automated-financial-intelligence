@@ -290,12 +290,12 @@ class ReconcileTransactionsTests(unittest.TestCase):
             for i in range(n)
         ]
 
-    def _run(self, fetched_n: int, stored_rows):
+    def _run(self, fetched_n: int, stored_rows, full_refresh: bool = True):
         connect, cursor = _mock_connect()
         cursor.fetchall.return_value = stored_rows
         with patch("database.db.psycopg.connect", connect):
             deleted = DatabaseClient("postgresql://x").reconcile_transactions(
-                self._frame(fetched_n), date(2026, 4, 28), date(2026, 7, 27)
+                self._frame(fetched_n), date(2026, 4, 28), date(2026, 7, 27), full_refresh=full_refresh
             )
         return deleted, cursor
 
@@ -347,6 +347,25 @@ class ReconcileTransactionsTests(unittest.TestCase):
         # separately, reconciliation would see 0 fetched and silently skip.
         deleted, _ = self._run(1, self._stored(3))
         self.assertEqual(deleted, 2)
+
+    def test_full_refresh_false_raises_regardless_of_content(self) -> None:
+        # The IKEA-delta hazard, Phase 17: a delta modifying one of four genuine IKEA taps
+        # must never reach the trimming logic at all -- the guard fires before any DB read,
+        # not based on what the delta or the stored rows actually contain.
+        with self.assertRaises(ValueError):
+            self._run(1, self._stored(4), full_refresh=False)
+
+    def test_full_refresh_false_raises_even_with_nothing_to_delete(self) -> None:
+        # Not "raises when it would have deleted something" -- raises unconditionally.
+        with self.assertRaises(ValueError):
+            self._run(0, [], full_refresh=False)
+
+    def test_full_refresh_true_with_genuine_full_snapshot_all_four_survive(self) -> None:
+        # Pre-Phase-17 behavior is unchanged for an actual full fetch: 4 stored genuine IKEA
+        # repeats against a full snapshot containing all 4 rows deletes nothing.
+        deleted, cursor = self._run(4, self._stored(4), full_refresh=True)
+        self.assertEqual(deleted, 0)
+        self.assertFalse([c for c in cursor.execute.call_args_list if "DELETE" in str(c[0][0])])
 
 
 class DuplicateFlagTests(unittest.TestCase):

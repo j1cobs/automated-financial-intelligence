@@ -21,6 +21,8 @@ class PipelineResult(NamedTuple):
     updated: int
     removed: int
     duplicate_accounts_skipped: int
+    removed_count: int
+    full_refresh: bool
 
 
 def _build_ingestor(settings):
@@ -53,6 +55,11 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     database = DatabaseClient(settings.database_url)
     database.ensure_schema()
 
+    # Step 1-2: resume each Plaid Item's /transactions/sync cursor (or start a full refresh if
+    # this Item has never synced) and pull every added/modified/removed transaction since then.
+    stored_cursors = database.get_sync_cursors()
+    result = ingestor.sync_transactions(stored_cursors)
+
     # strict=False is deliberate: plaid_access_token_owners is optional (_build_ingestor only
     # enforces equal length when it's non-empty), so an empty owners list must zip to {} here,
     # not raise.
@@ -62,17 +69,18 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # Re-map each account onto its existing canonical account_key (if any) *before* persisting,
     # so a Plaid Item re-link (new account_ids for the same physical accounts, e.g. after
     # credential rotation) merges into existing history instead of creating a duplicate account.
+    # Unchanged by the sync migration (Phase 17) -- account discovery/canonicalization is
+    # independent of how transactions are fetched.
     key_remap = database.canonicalize_account_keys(accounts)
     for account in accounts:
         account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
     database.upsert_plaid_accounts(accounts)
     database.record_balance_snapshots(accounts)
 
-    transactions, duplicate_accounts_skipped = ingestor.fetch_transactions(
-        start_date=start_date, end_date=end_date
-    )
-    if transactions.empty:
-        return PipelineResult(transactions, 0, 0, 0, duplicate_accounts_skipped)
+    # Step 3-4: combine this run's added + modified rows into one frame and remap their
+    # account_keys through the same key_remap used above, so sync-sourced rows land on the
+    # same canonical account_key as the accounts block just persisted.
+    transactions = pd.concat([result.added, result.modified], ignore_index=True)
     transactions["account_key"] = transactions["account_key"].map(lambda key: key_remap.get(key, key))
 
     models = build_placeholder_models()
@@ -81,13 +89,37 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
 
     database.upsert_categories(transactions["category"].dropna().astype(str).tolist())
     inserted, updated = database.upsert_transactions(transactions)
-    # Upserts are append-only: a transaction that acquires a new Plaid transaction_id (e.g. a
-    # pending charge that posts, or an account re-linked under a new Item) hashes differently
-    # and lands as an extra row alongside its older copy. Reconciling this window against what
-    # Plaid just returned trims those stale leftovers. Must run after upsert_transactions, and
-    # on the frame whose account_key has already been remapped through key_remap above.
-    removed = database.reconcile_transactions(transactions, start_date, end_date)
-    return PipelineResult(transactions, inserted, updated, removed, duplicate_accounts_skipped)
+
+    # Step 5: Plaid's `removed` (plus superseded pending_transaction_id lineage, already folded
+    # in by sync_transactions) is authoritative, so these ids are safe to delete on a delta, not
+    # just a full refresh.
+    removed_count = database.delete_transactions_by_external_ids(result.removed_ids)
+
+    # Step 6: reconcile_transactions infers duplication from Plaid's per-natural-key counts,
+    # which is only sound when `transactions` is everything Plaid currently returns for the
+    # window -- true only when every token's sync started from a null cursor. Never call this on
+    # a delta (see the IKEA-delta hazard in reconcile_transactions's docstring).
+    removed = 0
+    if result.full_refresh:
+        removed = database.reconcile_transactions(
+            transactions, start_date, end_date, full_refresh=True
+        )
+
+    # Step 7: advance each Item's cursor only after every write above (upsert, delete, and any
+    # reconcile) has committed. Advancing earlier would mean a crash between here and the writes
+    # loses that delta permanently, since sync never replays a delta once its cursor is passed.
+    for fingerprint, cursor in result.cursors.items():
+        database.set_sync_cursor(fingerprint, cursor)
+
+    return PipelineResult(
+        transactions,
+        inserted,
+        updated,
+        removed,
+        result.duplicate_accounts_skipped,
+        removed_count,
+        result.full_refresh,
+    )
 
 
 def main() -> None:
@@ -132,6 +164,8 @@ def main() -> None:
         transactions_updated=result.updated,
         stale_duplicates_removed=result.removed,
         duplicate_accounts_skipped=result.duplicate_accounts_skipped,
+        removed_count=result.removed_count,
+        full_refresh=result.full_refresh,
         trigger_type=trigger_type,
     )
     LOGGER.info("Pipeline run: success")

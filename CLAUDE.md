@@ -57,21 +57,29 @@ Layered, single-direction data flow orchestrated by `pipeline/runner.py::run_pip
 ingest → classify/score → persist. `main.py` is a thin entry point that calls it.
 
 - `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a _normalized_ DataFrame
-  (`description`, `amount`, `account_name`, `source`, `date`, ...). `PlaidIngestor` is the only implementation;
-  `BaseIngestor` remains as the interface seam for future sources. Each real account is ingested once per run:
-  `fetch_transactions` claims an account for the first token that reveals it and skips it for later tokens, using the
-  same identity tuple `canonicalize_account_keys` matches on. That is what keeps a co-owned account visible through
-  two Plaid Items from delivering every transaction twice. `_post()`'s error logging is deliberately scrubbed: on a
-  non-2xx response it logs only `status_code`/`error_type`/`error_code` parsed from Plaid's JSON body, never the raw
-  `response.text` — the daily pipeline's stdout becomes the GitHub Actions run log, which is visible to anyone with
-  repo read access, so nothing account- or transaction-identifying (e.g. an account mask) belongs in it. Keep new log
-  statements in this file to that same standard.
+  (`description`, `amount`, `account_name`, `source`, `date`, ...) and remains the interface seam for future
+  sources; it is not delta-shaped, since a source with no pending/posted concept (a CSV import, manual entry)
+  has no `added`/`modified`/`removed` story to tell. `PlaidIngestor.sync_transactions()` (new, Phase 17) is a
+  Plaid-specific addition alongside it, not a change to the seam. It returns a `SyncResult` with `added` and
+  `modified` DataFrames plus `removed_ids` (a list of Plaid transaction_ids to delete — the union of Plaid's
+  explicit `removed` array and any non-null `pending_transaction_id` carried by an `added`/`modified` row,
+  since a cold-start sync never populates `removed` but can still carry that lineage pointer). It replaces
+  `fetch_transactions` (`/transactions/get`) for live ingestion by calling `/transactions/sync` instead;
+  `fetch_transactions` is kept as a rollback fallback, not deleted. Each real account is claimed once per run:
+  both paths claim an account for the first token that
+  reveals it and skip it for later tokens, using the same identity tuple `canonicalize_account_keys` matches on.
+  That is what keeps a co-owned account visible through two Plaid Items from delivering every transaction twice.
+  `_post()`'s error logging is deliberately scrubbed: on a non-2xx response it logs only `status_code`/`error_type`/
+  `error_code` parsed from Plaid's JSON body, never the raw `response.text` — the daily pipeline's stdout becomes
+  the GitHub Actions run log, which is visible to anyone with repo read access, so nothing account- or
+  transaction-identifying (e.g. an account mask) belongs in it. Keep new log statements in this file to that same
+  standard.
 - `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
   but the pipeline currently uses `analytics/placeholders.py` (`build_placeholder_models`), which stamps
   `category="uncategorized"`, `outlier_score=0.0`, `is_outlier=False`. The data path is wired end-to-end before ML is
   switched on (Phase 1). When changing "the classifier," check which module `runner.py` actually imports.
 - `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
-  (currently 001–013) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
+  (currently 001–020) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
   (`DATABASE_URL`). `pipeline_runs` (migration 013) is where per-run detail lives — `pipeline/runner.py::main()`
   writes one row per run via `log_pipeline_run()` (counts on success; `error_class`/a truncated `error_message` on
   failure, never a raw exception that could embed transaction content) — instead of putting that detail in the
@@ -87,17 +95,30 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
     such an index; 010 dropped it and 005 is now an intentional no-op. Do not recreate it.
   - `transactions_external_id` (migration 009) is a partial UNIQUE index on `external_id`, catching the same Plaid
     transaction stored under two accounts.
-  - `reconcile_transactions` runs after every upsert in `pipeline/runner.py`. Persistence is otherwise append-only, so
-    the same real transaction returning under a *new* `transaction_id` (Item re-link, or one account exposed through
-    two Items) lands as a second row. Reconciliation trims stored copies per natural key down to the number Plaid
-    currently returns. A natural key Plaid returns **zero** of is skipped and never touched — that is real history aged
-    out of Plaid's rolling window, not a duplicate. This guard is load-bearing; do not relax it.
+  - `reconcile_transactions` runs only on a full-refresh sync (Phase 17: it requires a keyword-only `full_refresh: bool`
+    parameter and raises `ValueError` immediately if False). Persistence is otherwise append-only, so the same real
+    transaction returning under a *new* `transaction_id` (Item re-link, or one account exposed through two Items)
+    lands as a second row. Reconciliation trims stored copies per natural key down to the number Plaid currently
+    returns. A natural key Plaid returns **zero** of is skipped and never touched — that is real history aged out of
+    Plaid's rolling window, not a duplicate. This guard is load-bearing; do not relax it. Under `/transactions/sync`,
+    after the first run, the fetched frame is normally only a delta — if a natural key present in that delta has one
+    stored row touched, the method would compute excess copies and delete genuine repeats Plaid never mentioned, which
+    is worse than the bug this method fixes. See `docs/adr/0003-transactions-sync-and-superseded-authorizations.md`
+    for the full story.
   - `is_duplicate` (migration 012) is a user-set flag for copies no rule can identify. Flagged rows are excluded from
     analytics but never deleted, so the call is reversible. Like `user_category` and `is_recurring`, it survives
     pipeline re-runs only because `upsert_transactions` never names that column — keep it out of the INSERT.
   - Account identity is `(official_name, account_subtype, account_type, mask)`, matched by `canonicalize_account_keys`
     (after `persistent_account_id`). `owner_name` is excluded: it records which token revealed the account, not who
     owns it.
+  - Cursor state (Phase 17) now lives in `plaid_sync_state` (migration 018), keyed by `sha256(access_token)`
+    fingerprint — the raw token is never stored. `get_sync_cursors()`/`set_sync_cursor()` read/write it.
+  - `transactions.pending`/`pending_transaction_id` (migration 019) are new columns, round-tripped by
+    `upsert_transactions`. `pending` is nullable on purpose: NULL means "ingested before this phase, status unknown"
+    and must never be treated as FALSE.
+  - `delete_transactions_by_external_ids()` (Phase 17) is the handler for Plaid's authoritative `removed` — safe to
+    call on a delta, unlike `reconcile_transactions`, because deletion is keyed on Plaid transaction_ids it
+    explicitly states are gone.
 - `core/` — shared, UI-agnostic helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`,
   `google_oauth.py`.
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
