@@ -158,8 +158,11 @@ class UpsertTransactionsFieldTests(unittest.TestCase):
             DatabaseClient("postgresql://x").upsert_transactions(frame)
 
         rows = cursor.executemany.call_args[0][1]
-        self.assertEqual(rows[0][-2], True)  # pending
-        self.assertEqual(rows[0][-1], "pend-1")  # pending_transaction_id
+        # Migration 021 (Phase 18) appended 5 more columns after pending_transaction_id
+        # (pfc_primary, pfc_detailed, pfc_confidence, merchant_name, category_source), so
+        # pending/pending_transaction_id are no longer the last two positions.
+        self.assertEqual(rows[0][-7], True)  # pending
+        self.assertEqual(rows[0][-6], "pend-1")  # pending_transaction_id
 
     def test_missing_pending_stores_null_not_false(self) -> None:
         """Migration 019 (Phase 17): `pending` is nullable on purpose. A row from a source
@@ -177,9 +180,71 @@ class UpsertTransactionsFieldTests(unittest.TestCase):
             DatabaseClient("postgresql://x").upsert_transactions(frame)
 
         rows = cursor.executemany.call_args[0][1]
-        self.assertIsNone(rows[0][-2])  # pending: NULL, not False
-        self.assertIsNot(rows[0][-2], False)
-        self.assertIsNone(rows[0][-1])  # pending_transaction_id
+        # See test_pending_and_pending_transaction_id_round_trip for why -7/-6, not -2/-1.
+        self.assertIsNone(rows[0][-7])  # pending: NULL, not False
+        self.assertIsNot(rows[0][-7], False)
+        self.assertIsNone(rows[0][-6])  # pending_transaction_id
+
+    def test_pfc_and_merchant_fields_round_trip(self) -> None:
+        import pandas as pd
+
+        frame = pd.DataFrame.from_records(
+            [
+                self._row(
+                    merchant_name="Couche-Tard",
+                    pfc_primary="FOOD_AND_DRINK",
+                    pfc_detailed="FOOD_AND_DRINK_CONVENIENCE_STORES",
+                    pfc_confidence="HIGH",
+                    category_source="plaid",
+                )
+            ]
+        )
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").upsert_transactions(frame)
+
+        rows = cursor.executemany.call_args[0][1]
+        # Column order per the INSERT list: ..., pfc_primary, pfc_detailed, pfc_confidence,
+        # merchant_name, category_source (the last five columns).
+        pfc_primary, pfc_detailed, pfc_confidence, merchant_name, category_source = rows[0][-5:]
+        self.assertEqual(pfc_primary, "FOOD_AND_DRINK")
+        self.assertEqual(pfc_detailed, "FOOD_AND_DRINK_CONVENIENCE_STORES")
+        self.assertEqual(pfc_confidence, "HIGH")
+        self.assertEqual(merchant_name, "Couche-Tard")
+        self.assertEqual(category_source, "plaid")
+
+    def test_missing_pfc_and_merchant_fields_store_null_not_default(self) -> None:
+        import pandas as pd
+
+        row = self._row()
+        for field in ("merchant_name", "pfc_primary", "pfc_detailed", "pfc_confidence", "category_source"):
+            self.assertNotIn(field, row)
+        frame = pd.DataFrame.from_records([row])
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").upsert_transactions(frame)
+
+        rows = cursor.executemany.call_args[0][1]
+        for value in rows[0][-5:]:
+            self.assertIsNone(value)
+
+    def test_user_category_is_recurring_is_duplicate_survive_reupsert_of_new_columns(self) -> None:
+        """Regression check: adding the 5 Phase-18 columns must not have reintroduced
+        user_category/is_recurring/is_duplicate into the INSERT or ON CONFLICT lists --
+        those stay absent so a pipeline re-run (which now also carries pfc_* fields) still
+        never clears a manual edit."""
+        import pandas as pd
+
+        frame = pd.DataFrame.from_records(
+            [self._row(merchant_name="Couche-Tard", pfc_primary="FOOD_AND_DRINK")]
+        )
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").upsert_transactions(frame)
+
+        sql = cursor.executemany.call_args[0][0]
+        for column in ("user_category", "is_recurring", "is_duplicate"):
+            self.assertNotIn(column, sql)
 
     def test_user_owned_columns_absent_even_with_pending_fields(self) -> None:
         """Regression guard: adding pending/pending_transaction_id to the INSERT/ON CONFLICT
@@ -424,17 +489,148 @@ class UpsertBudgetTests(unittest.TestCase):
 
 
 class UpdateTransactionCategoryTests(unittest.TestCase):
-    def test_writes_user_category(self) -> None:
+    def test_writes_user_category_with_none_merchant_key(self) -> None:
+        """merchant_key=None: only the target row's user_category is set, no merchant
+        memory is touched, and the method returns 0 (no backfill)."""
         connect, cursor = _mock_connect()
         with patch("database.db.psycopg.connect", connect):
-            DatabaseClient("postgresql://x").update_transaction_category("hash123", "Groceries")
+            backfilled = DatabaseClient("postgresql://x").update_transaction_category(
+                "hash123", "Groceries", None
+            )
 
+        self.assertEqual(backfilled, 0)
         self.assertEqual(cursor.execute.call_count, 2)
         insert_sql = cursor.execute.call_args_list[0][0][0]
         update_sql = cursor.execute.call_args_list[1][0][0]
         self.assertIn("INSERT INTO categories", insert_sql)
         self.assertIn("SET user_category", update_sql)
         self.assertNotIn("SET category ", update_sql)
+        for call in cursor.execute.call_args_list:
+            self.assertNotIn("merchant_categories", call[0][0])
+
+    def test_real_merchant_key_upserts_merchant_memory_and_backfills(self) -> None:
+        """merchant_key given: upserts merchant_categories[key] and the exact-match
+        backfill UPDATE runs, returning its rowcount."""
+        from unittest.mock import PropertyMock
+
+        connect, cursor = _mock_connect()
+        type(cursor).rowcount = PropertyMock(return_value=41)
+        with patch("database.db.psycopg.connect", connect):
+            backfilled = DatabaseClient("postgresql://x").update_transaction_category(
+                "hash123", "Groceries", "COUCHE-TARD"
+            )
+
+        self.assertEqual(backfilled, 41)
+        sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        self.assertTrue(any("INSERT INTO merchant_categories" in sql for sql in sqls))
+        merchant_upsert_sql = next(sql for sql in sqls if "INSERT INTO merchant_categories" in sql)
+        self.assertIn("ON CONFLICT (merchant_key) DO UPDATE", merchant_upsert_sql)
+        backfill_sql = next(sql for sql in sqls if "user_category IS NULL" in sql)
+        self.assertIn("COALESCE(t.merchant_name, t.description)", backfill_sql)
+
+    def test_backfill_never_overwrites_a_row_with_a_different_user_category(self) -> None:
+        """The critical guard: update_transaction_category's backfill UPDATE must carry a
+        `WHERE user_category IS NULL` clause so one correction can never silently clobber
+        a different explicit correction already set on another row sharing the same raw
+        merchant string. This test asserts the guard is present in the SQL sent to the DB
+        (a real Postgres WHERE clause is what actually enforces it; mocked psycopg cannot
+        simulate row-level effects)."""
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").update_transaction_category(
+                "hash123", "Groceries", "COUCHE-TARD"
+            )
+
+        sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        backfill_sql = next(sql for sql in sqls if "UPDATE transactions AS t" in sql)
+        self.assertIn("t.user_category IS NULL", backfill_sql)
+        self.assertIn("t.transaction_hash != %s", backfill_sql)
+
+    def test_documented_exact_match_limitation_does_not_merge_spelling_variants(self) -> None:
+        """Confirms current documented behavior (not a bug report): the backfill matches on
+        the RAW COALESCE(merchant_name, description) string, so two rows for the same real
+        merchant under different raw spellings (one carrying merchant_name, the other
+        falling back to description) are NOT merged by this exact-match SQL. That
+        cross-spelling merge only happens later, when the cascade recomputes merchant_key
+        at pipeline-run time. This is asserted at the SQL level: the WHERE clause compares
+        COALESCE(merchant_name, description) directly, not a normalized merchant_key."""
+        connect, cursor = _mock_connect()
+        with patch("database.db.psycopg.connect", connect):
+            DatabaseClient("postgresql://x").update_transaction_category(
+                "hash123", "Groceries", "CAFE DU PARQUET"
+            )
+
+        sqls = [call[0][0] for call in cursor.execute.call_args_list]
+        backfill_sql = next(sql for sql in sqls if "UPDATE transactions AS t" in sql)
+        # The match is against the raw stored string, never a merchant_key column/function.
+        self.assertNotIn("merchant_key", backfill_sql)
+        self.assertIn("COALESCE(t.merchant_name, t.description) = (", backfill_sql)
+
+
+class MerchantCategoriesAccessorTests(unittest.TestCase):
+    def test_get_merchant_category_returns_value(self) -> None:
+        connect, cursor = _mock_connect()
+        cursor.fetchone.return_value = ("FOOD_AND_DRINK",)
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_merchant_category("METRO")
+        self.assertEqual(result, "FOOD_AND_DRINK")
+
+    def test_get_merchant_category_returns_none_when_absent(self) -> None:
+        connect, cursor = _mock_connect()
+        cursor.fetchone.return_value = None
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_merchant_category("UNKNOWN")
+        self.assertIsNone(result)
+
+    def test_get_all_merchant_categories_returns_mapping(self) -> None:
+        connect, cursor = _mock_connect(
+            [("METRO", "FOOD_AND_DRINK"), ("SAQ", "FOOD_AND_DRINK")]
+        )
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_all_merchant_categories()
+        self.assertEqual(result, {"METRO": "FOOD_AND_DRINK", "SAQ": "FOOD_AND_DRINK"})
+
+    def test_get_all_merchant_categories_empty(self) -> None:
+        connect, cursor = _mock_connect([])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_all_merchant_categories()
+        self.assertEqual(result, {})
+
+    def test_set_merchant_category_inserts(self) -> None:
+        with patch.object(DatabaseClient, "_execute_many") as execute_many:
+            DatabaseClient("postgresql://x").set_merchant_category("METRO", "FOOD_AND_DRINK")
+        sql, rows = execute_many.call_args[0]
+        self.assertIn("INSERT INTO merchant_categories", sql)
+        self.assertIn("ON CONFLICT (merchant_key) DO UPDATE", sql)
+        self.assertEqual(rows, [("METRO", "FOOD_AND_DRINK", "user")])
+
+    def test_set_merchant_category_on_existing_key_updates_not_duplicates(self) -> None:
+        """ON CONFLICT DO UPDATE means calling this twice for the same key is a rewrite,
+        never a second row -- asserted here at the SQL-shape level since the mocked cursor
+        cannot simulate an actual unique-constraint upsert."""
+        with patch.object(DatabaseClient, "_execute_many") as execute_many:
+            DatabaseClient("postgresql://x").set_merchant_category("METRO", "FOOD_AND_DRINK")
+            DatabaseClient("postgresql://x").set_merchant_category("METRO", "GROCERIES", source="user")
+        self.assertEqual(execute_many.call_count, 2)
+        second_sql, second_rows = execute_many.call_args_list[1][0]
+        self.assertIn("ON CONFLICT (merchant_key) DO UPDATE", second_sql)
+        self.assertEqual(second_rows, [("METRO", "GROCERIES", "user")])
+
+
+class GetTransactionMerchantFieldsTests(unittest.TestCase):
+    def test_returns_merchant_name_and_description_for_existing_hash(self) -> None:
+        connect, cursor = _mock_connect()
+        cursor.fetchone.return_value = ("Couche-Tard", "COUCHE-TARD #123")
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_merchant_fields("hash-1")
+        self.assertEqual(result, ("Couche-Tard", "COUCHE-TARD #123"))
+
+    def test_returns_none_for_nonexistent_hash(self) -> None:
+        connect, cursor = _mock_connect()
+        cursor.fetchone.return_value = None
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_merchant_fields("missing")
+        self.assertIsNone(result)
 
 
 class EnsureSchemaTests(unittest.TestCase):

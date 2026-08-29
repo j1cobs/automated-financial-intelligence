@@ -37,6 +37,7 @@ def _settings(**overrides) -> Settings:
         labeled_dataset_path="labeled_transactions.csv",
         jwt_secret="test-secret",
         frontend_origin="https://example.vercel.app",
+        categorizer_mode="cascade",
     )
     base.update(overrides)
     return Settings(**base)
@@ -118,6 +119,8 @@ class ApiDataTestCase(unittest.TestCase):
         self.mock_db.get_categories.return_value = ["Groceries", "Income", "Shopping"]
         self.mock_db.get_budgets.return_value = [{"category": "Shopping", "monthly_limit": 200.0}]
         self.mock_db.get_net_worth_history.return_value = []
+        self.mock_db.get_transaction_merchant_fields.return_value = ("Weird Purchase", "Weird Purchase")
+        self.mock_db.update_transaction_category.return_value = 0
         app.dependency_overrides[get_settings] = lambda: self.settings
         app.dependency_overrides[get_db] = lambda: self.mock_db
         self.client = TestClient(app)
@@ -214,7 +217,10 @@ class CsrfTests(ApiDataTestCase):
                 response = getattr(self.client, method)(
                     path, json=body, headers={"X-CSRF-Token": "csrf-token-value"}
                 )
-                self.assertEqual(response.status_code, 204)
+                # The category endpoint returns 200 + {"backfilled_count": ...} (Phase 18);
+                # every other write endpoint is still a bare 204.
+                expected = 200 if path == "/transactions/hash-2/category" else 204
+                self.assertEqual(response.status_code, expected)
 
 
 class WriteEndpointDbCallTests(ApiDataTestCase):
@@ -244,11 +250,56 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         self.mock_db.upsert_budget.assert_called_once_with("Shopping", 300.0)
 
     def test_category_calls_update_transaction_category(self) -> None:
+        # get_transaction_merchant_fields default (set in setUp) is
+        # ("Weird Purchase", "Weird Purchase") -> merchant_key("Weird Purchase", "Weird Purchase").
+        from analytics.categorizer import merchant_key
+
+        expected_key = merchant_key("Weird Purchase", "Weird Purchase")
+
         response = self.client.patch(
             "/transactions/hash-2/category", json={"category": "Groceries"}, headers=self._headers()
         )
-        self.assertEqual(response.status_code, 204)
-        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "Groceries")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"backfilled_count": 0})
+        self.mock_db.get_transaction_merchant_fields.assert_called_once_with("hash-2")
+        self.mock_db.update_transaction_category.assert_called_once_with(
+            "hash-2", "Groceries", expected_key
+        )
+
+    def test_category_endpoint_computes_merchant_key_and_returns_backfilled_count(self) -> None:
+        """End-to-end (mocked DB) check of the endpoint's own composition: it fetches
+        merchant fields, computes merchant_key via the shared normalizer, passes that key
+        to update_transaction_category, and surfaces its return value as backfilled_count."""
+        from analytics.categorizer import merchant_key
+
+        self.mock_db.get_transaction_merchant_fields.return_value = (
+            None,
+            "CAFE DU PARQUET MONTREAL QC",
+        )
+        self.mock_db.update_transaction_category.return_value = 41
+        expected_key = merchant_key(None, "CAFE DU PARQUET MONTREAL QC")
+
+        response = self.client.patch(
+            "/transactions/hash-2/category", json={"category": "FOOD_AND_DRINK"}, headers=self._headers()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"backfilled_count": 41})
+        self.mock_db.update_transaction_category.assert_called_once_with(
+            "hash-2", "FOOD_AND_DRINK", expected_key
+        )
+
+    def test_category_endpoint_no_merchant_fields_passes_none_key(self) -> None:
+        self.mock_db.get_transaction_merchant_fields.return_value = None
+
+        response = self.client.patch(
+            "/transactions/hash-2/category", json={"category": "Groceries"}, headers=self._headers()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.mock_db.update_transaction_category.assert_called_once_with(
+            "hash-2", "Groceries", None
+        )
 
     def test_recurring_calls_update_transaction_recurring(self) -> None:
         response = self.client.patch(
