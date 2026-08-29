@@ -24,7 +24,21 @@ _PURCHASE_PREFIX_RE = re.compile(r"^PURCHASE\s*/\s*", re.IGNORECASE)
 # An unrestricted `[A-Z]{2}` matched the last two letters of any multi-word merchant name that
 # happens to end that way (e.g. "Uber Eats US" -> "UBER", eating "EATS US" as if it were a
 # city+province) — exactly the over-merging this normalizer is designed to avoid.
-_CANADIAN_PROVINCE_CODES = ("AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT")
+_CANADIAN_PROVINCE_CODES = (
+    "AB",
+    "BC",
+    "MB",
+    "NB",
+    "NL",
+    "NS",
+    "NT",
+    "NU",
+    "ON",
+    "PE",
+    "QC",
+    "SK",
+    "YT",
+)
 _TRAILING_CITY_PROVINCE_RE = re.compile(
     r"\s+[A-Z][A-Z'.-]*\s+(?:" + "|".join(_CANADIAN_PROVINCE_CODES) + r")$"
 )
@@ -74,7 +88,9 @@ class CascadeCategorizer:
     layering rule).
     """
 
-    def categorize(self, frame: pd.DataFrame, merchant_lookup: dict[str, str]) -> pd.DataFrame:
+    def categorize(
+        self, frame: pd.DataFrame, merchant_lookup: dict[str, str]
+    ) -> pd.DataFrame:
         """Returns a copy of `frame` with `category` and `category_source` columns set.
 
         Resolution order per row, first hit wins:
@@ -92,9 +108,21 @@ class CascadeCategorizer:
         result = frame.copy()
 
         n = len(result)
-        merchant_names = result["merchant_name"] if "merchant_name" in result.columns else pd.Series([None] * n, index=result.index)
-        descriptions = result["description"] if "description" in result.columns else pd.Series([None] * n, index=result.index)
-        pfc_primaries = result["pfc_primary"] if "pfc_primary" in result.columns else pd.Series([None] * n, index=result.index)
+        merchant_names = (
+            result["merchant_name"]
+            if "merchant_name" in result.columns
+            else pd.Series([None] * n, index=result.index)
+        )
+        descriptions = (
+            result["description"]
+            if "description" in result.columns
+            else pd.Series([None] * n, index=result.index)
+        )
+        pfc_primaries = (
+            result["pfc_primary"]
+            if "pfc_primary" in result.columns
+            else pd.Series([None] * n, index=result.index)
+        )
 
         def _resolve(merchant_name, description, pfc_primary) -> tuple[str, str]:
             key = merchant_key(
@@ -109,14 +137,18 @@ class CascadeCategorizer:
 
         resolved = [
             _resolve(mn, desc, pfc)
-            for mn, desc, pfc in zip(merchant_names, descriptions, pfc_primaries)
+            for mn, desc, pfc in zip(
+                merchant_names, descriptions, pfc_primaries, strict=True
+            )
         ]
 
         if resolved:
-            categories, sources = zip(*resolved)
+            categories, sources = zip(*resolved, strict=True)
         else:
             categories, sources = (), ()
 
         result["category"] = pd.Series(categories, index=result.index, dtype="object")
-        result["category_source"] = pd.Series(sources, index=result.index, dtype="object")
+        result["category_source"] = pd.Series(
+            sources, index=result.index, dtype="object"
+        )
         return result
