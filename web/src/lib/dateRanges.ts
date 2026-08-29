@@ -75,10 +75,17 @@ export function parseMonthRange(month: string): { from: string; to: string } | n
  * copy: a plotted `date` is the last day of the 30-day window it summarizes,
  * so the window's start is `daysBefore(date, 29)`. Returns `null` for an
  * unparseable date.
+ *
+ * Constructs the output string from local getters to avoid timezone-conversion
+ * bugs: `toISOString()` converts to UTC, which causes off-by-one errors in
+ * positive UTC-offset zones where local midnight precedes UTC midnight.
  */
 export function daysBefore(date: string, days: number): string | null {
   const d = new Date(`${date}T00:00:00`);
   if (Number.isNaN(d.getTime())) return null;
   d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
