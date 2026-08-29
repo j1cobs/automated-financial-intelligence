@@ -13,6 +13,7 @@ import { toneFor, polarityOf, directionOf, TONE_TOKENS, DIRECTION_GLYPH } from '
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { gridProps, xAxisProps, yAxisProps, tooltipProps, CHART_MARGIN, positiveColor } from './chartTheme';
 import type { TabId } from './tabs';
+import { formatCategory } from '../lib/categories';
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -217,7 +218,7 @@ export function HomeTab({ onNavigate }: HomeTabProps) {
                 const direction = directionOf(row.drift_pct);
                 return (
                   <li key={row.category} className="flex items-center justify-between text-sm">
-                    <span className="text-ink-secondary">{row.category}</span>
+                    <span className="text-ink-secondary">{formatCategory(row.category)}</span>
                     <span className="tabular-nums font-medium" style={{ color: TONE_TOKENS[tone].text }}>
                       {DIRECTION_GLYPH[direction]} {formatPercent(Math.abs(row.drift_pct))}
                     </span>

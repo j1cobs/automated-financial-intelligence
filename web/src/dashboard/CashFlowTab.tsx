@@ -22,6 +22,7 @@ import { TabSkeleton, ErrorState } from './LoadingState';
 import { PeriodTransactionsPreview } from './PeriodTransactionsPreview';
 import { strings } from '../lib/strings';
 import { daysBefore, parseWeekRange, parseMonthRange } from '../lib/dateRanges';
+import { formatCategory } from '../lib/categories';
 import type {
   RollingSpendItem,
   CashFlowSeriesItem,
@@ -646,7 +647,7 @@ export function CashFlowTab({
                     <Bar
                       key={category}
                       dataKey={category}
-                      name={category}
+                      name={formatCategory(category)}
                       stackId="expenses"
                       fill={fill}
                       maxBarSize={BAR_MAX_SIZE}

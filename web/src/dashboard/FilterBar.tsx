@@ -18,6 +18,7 @@ import { useFilterOptions } from '../lib/queries';
 import { activeFilterChips, countActiveFilters, PERIOD_LABELS, type PeriodPreset } from '../lib/filters';
 import { MultiSelectPopover } from './MultiSelectPopover';
 import type { FilterOptions } from '../lib/types';
+import { formatCategory } from '../lib/categories';
 
 const PERIOD_OPTIONS: PeriodPreset[] = [
   'last_30_days',
@@ -149,7 +150,10 @@ export function FilterBar() {
         <MultiSelectPopover
           id={`${idPrefix}-categories`}
           label="Category"
-          options={(options?.categories ?? []).map((category) => ({ value: category, label: category }))}
+          options={(options?.categories ?? []).map((category) => ({
+            value: category,
+            label: formatCategory(category),
+          }))}
           selected={filters.categories}
           onChange={(values) => patchFilters({ categories: values })}
         />

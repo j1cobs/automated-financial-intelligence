@@ -12,6 +12,7 @@ import type {
 import { MetricTile, MetricInfoBadge } from './MetricTile';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
+import { formatCategory } from '../lib/categories';
 import {
   LineChart,
   Line,
@@ -694,9 +695,13 @@ export function OverviewTab() {
                   dataKey="category"
                   type="category"
                   {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(value)}
+                  tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
                 />
-                <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
+                <Tooltip
+                  {...tooltipProps()}
+                  formatter={(value) => formatCurrency(value as number)}
+                  labelFormatter={(label) => formatCategory(label as string)}
+                />
                 <Bar
                   dataKey="amount"
                   fill={expenseColor()}
@@ -726,9 +731,13 @@ export function OverviewTab() {
                   dataKey="category"
                   type="category"
                   {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(value)}
+                  tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
                 />
-                <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
+                <Tooltip
+                  {...tooltipProps()}
+                  formatter={(value) => formatCurrency(value as number)}
+                  labelFormatter={(label) => formatCategory(label as string)}
+                />
                 <Legend {...legendProps()} />
                 <Bar
                   dataKey="last_month"

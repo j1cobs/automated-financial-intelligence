@@ -36,7 +36,7 @@ import {
   ledgerQueryKey,
   anomaliesQueryKey,
 } from './queries';
-import type { LedgerItem, LedgerResponse } from './types';
+import type { CategoryUpdateResponse, LedgerItem, LedgerResponse } from './types';
 
 /** Every analytics endpoint a ledger edit can change the numbers of. */
 const ANALYTICS_QUERY_KEYS = [overviewQueryKey, cashFlowQueryKey, budgetQueryKey, anomaliesQueryKey] as const;
@@ -125,7 +125,7 @@ export function useUpdateCategory() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ hash, category }: { hash: string; category: string }) =>
-      apiFetch<void>(`/transactions/${encodeURIComponent(hash)}/category`, {
+      apiFetch<CategoryUpdateResponse>(`/transactions/${encodeURIComponent(hash)}/category`, {
         method: 'PATCH',
         body: { category },
       }),

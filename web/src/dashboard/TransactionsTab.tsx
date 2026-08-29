@@ -15,6 +15,7 @@ import type { TooltipContentProps } from 'recharts';
 import { useLedger, useAnomalies, useCategories } from '../lib/queries';
 import { useUpdateCategory, useUpdateRecurring, useUpdateDuplicate } from '../lib/mutations';
 import type { LedgerItem, AnomalyItem } from '../lib/types';
+import { formatCategory } from '../lib/categories';
 import {
   categoricalColor,
   CATEGORICAL_SLOTS,
@@ -133,7 +134,7 @@ function AnomalyTooltip({ active, payload }: Partial<TooltipContentProps<number,
     <div className="rounded-md border border-hairline bg-surface-1 p-2 text-xs shadow-sm sm:text-sm">
       <p className="mb-1 font-semibold text-ink">{point.description}</p>
       <p className="text-ink-secondary">
-        {formatDate(point.date)} · {point.category}
+        {formatDate(point.date)} · {formatCategory(point.category)}
       </p>
       <p className="text-ink-secondary">{formatCurrency(point.amount)}</p>
       {point.owner_name && <p className="text-ink-muted">{point.owner_name}</p>}
@@ -197,7 +198,7 @@ function AnomalyScatter({ anomalies }: { anomalies: AnomalyItem[] }) {
           {byBucket.map(({ bucket, points: bucketPoints }) => (
             <Scatter
               key={bucket}
-              name={bucket}
+              name={formatCategory(bucket)}
               data={bucketPoints}
               fill={bucketPoints[0]?.color}
               fillOpacity={0.75}
@@ -374,7 +375,7 @@ function LedgerRow({
             <option value="">{UNCATEGORIZED_LABEL}</option>
             {categories?.map((cat) => (
               <option key={cat} value={cat}>
-                {cat}
+                {formatCategory(cat)}
               </option>
             ))}
           </select>
@@ -383,7 +384,7 @@ function LedgerRow({
             onClick={() => onStartEdit(tx.hash, tx.category || '')}
             className="flex min-h-9 w-full items-center rounded px-2 py-1 text-left text-ink hover:bg-surface-3"
           >
-            {tx.category || <span className="text-ink-muted">—</span>}
+            {tx.category ? formatCategory(tx.category) : <span className="text-ink-muted">—</span>}
           </button>
         )}
       </td>
@@ -538,6 +539,11 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
   // an unhandled promise rejection with `mutateAsync` and no visible failure at all.
   const editFailed = updateCategory.isError || updateRecurring.isError || updateDuplicate.isError;
 
+  // Merchant-memory backfill confirmation (PLAN.md Phase 18, Step 4): the API
+  // reports how many other rows from the same merchant it just recategorized
+  // along with this edit. Most corrections backfill nothing -- silent then.
+  const backfilledCount = updateCategory.isSuccess ? (updateCategory.data?.backfilled_count ?? 0) : 0;
+
   const handleCategoryChange = async (hash: string, newCategory: string) => {
     setEditingHash(null);
     try {
@@ -644,6 +650,12 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
         {editFailed && (
           <div className="mb-2 rounded border border-neg bg-surface-2 px-3 py-2 text-xs text-neg-text sm:text-sm">
             {strings.loading.editFailed}
+          </div>
+        )}
+
+        {!editFailed && backfilledCount > 0 && (
+          <div className="mb-2 rounded border border-hairline bg-surface-2 px-3 py-2 text-xs text-ink-secondary sm:text-sm">
+            {strings.ledger.categoryBackfilled(backfilledCount)}
           </div>
         )}
 

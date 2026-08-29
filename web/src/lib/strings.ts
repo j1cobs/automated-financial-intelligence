@@ -55,4 +55,12 @@ export const strings = {
      *  back -- see `mutations.ts`'s `onError`. */
     editFailed: 'Failed to save your change. It has been reverted — please try again.',
   },
+  ledger: {
+    /** Confirmation shown after a category correction backfills other rows from
+     *  the same merchant (PLAN.md Phase 18, Step 4's merchant-memory cascade).
+     *  Only rendered when `backfilled_count > 0` -- most corrections have
+     *  nothing to backfill and this stays silent. */
+    categoryBackfilled: (count: number): string =>
+      `Updated ${count} other ${count === 1 ? 'transaction' : 'transactions'} from this merchant.`,
+  },
 } as const;

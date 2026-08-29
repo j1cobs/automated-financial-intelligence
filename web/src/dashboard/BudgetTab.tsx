@@ -26,6 +26,7 @@ import type { BudgetItem } from '../lib/types';
 import { LINE_PROPS, inkMutedColor, negativeColor, useChartTheme } from './chartTheme';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { DIRECTION_GLYPH, type Tone } from '../lib/polarity';
+import { formatCategory } from '../lib/categories';
 
 /** How many trailing months the per-category sparkline shows. */
 const SPARKLINE_MONTHS = 6;
@@ -213,7 +214,7 @@ function BudgetItemRow({
     >
       <div className="flex-1 min-w-0">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <h3 className="font-medium text-sm text-ink break-words">{item.category}</h3>
+          <h3 className="font-medium text-sm text-ink break-words">{formatCategory(item.category)}</h3>
           <span
             className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide ${toneClasses[badge.tone]}`}
           >

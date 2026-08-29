@@ -22,7 +22,12 @@ vi.mock('recharts', async (importOriginal) => {
 });
 
 import { TransactionsTab } from './TransactionsTab';
-import type { LedgerResponse, AnomaliesResponse, CategoriesResponse } from '../lib/types';
+import type {
+  LedgerResponse,
+  AnomaliesResponse,
+  CategoriesResponse,
+  CategoryUpdateResponse,
+} from '../lib/types';
 
 // Mock the queries and mutations
 vi.mock('../lib/queries', () => ({
@@ -125,10 +130,10 @@ function mockQueryError<T>(): UseQueryResult<T, Error> {
   } as unknown as UseQueryResult<T, Error>;
 }
 
-function mockMutation<TVariables, TContext = unknown>(
-  mutateAsync: (vars: TVariables) => Promise<void>,
-  overrides: Partial<UseMutationResult<void, Error, TVariables, TContext>> = {},
-): UseMutationResult<void, Error, TVariables, TContext> {
+function mockMutation<TData, TVariables, TContext = unknown>(
+  mutateAsync: (vars: TVariables) => Promise<TData>,
+  overrides: Partial<UseMutationResult<TData, Error, TVariables, TContext>> = {},
+): UseMutationResult<TData, Error, TVariables, TContext> {
   return {
     mutate: vi.fn(),
     mutateAsync,
@@ -144,11 +149,13 @@ function mockMutation<TVariables, TContext = unknown>(
     variables: undefined,
     context: undefined,
     ...overrides,
-  } as unknown as UseMutationResult<void, Error, TVariables, TContext>;
+  } as unknown as UseMutationResult<TData, Error, TVariables, TContext>;
 }
 
 function setDefaultMutations() {
-  mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseUpdateCategory.mockReturnValue(
+    mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+  );
   mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
   mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
 }
@@ -536,7 +543,9 @@ describe('TransactionsTab', () => {
   describe('Category editing', () => {
     it('calls useUpdateCategory mutation when category is changed', async () => {
       const user = userEvent.setup();
-      const mockMutateAsync = vi.fn().mockResolvedValue(undefined);
+      const mockMutateAsync = vi
+        .fn()
+        .mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse);
 
       const mockLedgerData: LedgerResponse = {
         transactions: [
@@ -606,7 +615,9 @@ describe('TransactionsTab', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-      mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
       mockedUseUpdateRecurring.mockReturnValue(mockMutation(mockMutateAsync));
       mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
 
@@ -650,7 +661,9 @@ describe('TransactionsTab', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-      mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
       mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
       mockedUseUpdateDuplicate.mockReturnValue(mockMutation(mockMutateAsync));
 

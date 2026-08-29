@@ -7,6 +7,7 @@
  */
 
 import type { FilterOptions } from './types';
+import { formatCategory } from './categories';
 
 export type PeriodPreset =
   'last_30_days' | 'current_month' | 'last_3_months' | 'last_6_months' | 'ytd' | 'all_time' | 'custom';
@@ -254,7 +255,7 @@ export function activeFilterChips(filters: DashboardFilters, options?: FilterOpt
   for (const category of filters.categories ?? []) {
     chips.push({
       id: `categories:${category}`,
-      label: category,
+      label: formatCategory(category),
       remove: (f) => ({ ...f, categories: withoutArrayValue(f.categories, category) }),
     });
   }
