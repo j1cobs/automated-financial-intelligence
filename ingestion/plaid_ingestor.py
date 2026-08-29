@@ -26,6 +26,10 @@ _NORMALIZED_COLUMNS = [
     "source",
     "pending",
     "pending_transaction_id",
+    "merchant_name",
+    "pfc_primary",
+    "pfc_detailed",
+    "pfc_confidence",
 ]
 
 
@@ -54,6 +58,12 @@ class PlaidIngestor(BaseIngestor):
         self.access_tokens = access_tokens
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        # Scoped to this instance's lifetime (one PlaidIngestor per run_pipeline() call, per
+        # _build_ingestor) -- both _claim_accounts and fetch_accounts need the same /accounts/get
+        # data for every token in a run, so this cache turns two Plaid API calls per token per
+        # run into one. Keyed on the raw response's "accounts" list, before owner_name is baked
+        # in, since the two callers pass different owner_name values ("" vs. the real owner).
+        self._raw_accounts_cache: dict[str, list[dict[str, Any]]] = {}
 
     def _post(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = requests.post(
@@ -76,16 +86,21 @@ class PlaidIngestor(BaseIngestor):
         return response.json()
 
     def _fetch_accounts_raw(self, access_token: str, owner_name: str) -> list[dict[str, Any]]:
-        data = self._post(
-            "accounts/get",
-            {
-                "client_id": self.client_id,
-                "secret": self.secret,
-                "access_token": access_token,
-            },
-        )
+        raw_accounts = self._raw_accounts_cache.get(access_token)
+        if raw_accounts is None:
+            data = self._post(
+                "accounts/get",
+                {
+                    "client_id": self.client_id,
+                    "secret": self.secret,
+                    "access_token": access_token,
+                },
+            )
+            raw_accounts = data.get("accounts", [])
+            self._raw_accounts_cache[access_token] = raw_accounts
+
         results = []
-        for a in data.get("accounts", []):
+        for a in raw_accounts:
             balances = a.get("balances", {})
             mask = a.get("mask")
             name = a.get("name", "")
@@ -172,10 +187,12 @@ class PlaidIngestor(BaseIngestor):
         (`/transactions/sync`). `pending` and `pending_transaction_id` are kept as-is (None
         if absent) — do not coerce `pending` to a bool with a default of False, since NULL vs
         FALSE has a specific meaning downstream (NULL = "status unknown", used by
-        pre-sync-migration rows).
+        pre-sync-migration rows). `merchant_name`, `pfc_primary`, `pfc_detailed`, and
+        `pfc_confidence` follow the same rule: absent stays None, never a coerced default.
         """
         account_id = transaction.get("account_id", "unknown")
         account_key, account_name = account_map.get(account_id, (f"plaid:{account_id}", account_id))
+        pfc = transaction.get("personal_finance_category") or {}
         return {
             "transaction_id": transaction.get("transaction_id", ""),
             "date": pd.to_datetime(transaction.get("date"), errors="coerce").date(),
@@ -187,6 +204,10 @@ class PlaidIngestor(BaseIngestor):
             "source": "plaid",
             "pending": transaction.get("pending"),
             "pending_transaction_id": transaction.get("pending_transaction_id"),
+            "merchant_name": transaction.get("merchant_name"),
+            "pfc_primary": pfc.get("primary"),
+            "pfc_detailed": pfc.get("detailed"),
+            "pfc_confidence": pfc.get("confidence_level"),
         }
 
     def _claim_accounts(
@@ -362,6 +383,11 @@ class PlaidIngestor(BaseIngestor):
                         cursor = starting_cursor
                         continue
                     if error_code == "PAGINATION_INVALID_CURSOR":
+                        # Deliberately do NOT re-evaluate every_token_started_null here. This token
+                        # will now fetch from the start (cursor = None), but if it had a cursor at the
+                        # time of the error, every_token_started_null remains False. Skipping
+                        # reconciliation for this run (rather than misapplying it against a partial
+                        # delta) is the fail-safe outcome; a later full-refresh run will reconcile.
                         LOGGER.warning(
                             "Plaid sync cursor invalid for token suffix=%s; resetting to full refresh",
                             access_token[-6:],

@@ -7,7 +7,7 @@ from typing import NamedTuple
 import pandas as pd
 import psycopg
 
-from analytics.placeholders import build_placeholder_models
+from analytics.models import build_models
 from core.config import ConfigError, load_settings
 from database.db import DatabaseClient
 from ingestion.plaid_ingestor import PlaidIngestor
@@ -83,8 +83,17 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     transactions = pd.concat([result.added, result.modified], ignore_index=True)
     transactions["account_key"] = transactions["account_key"].map(lambda key: key_remap.get(key, key))
 
-    models = build_placeholder_models()
-    transactions["category"] = models.classifier.categorize(transactions["description"])
+    models = build_models(settings.categorizer_mode)
+    if settings.categorizer_mode == "cascade":
+        # CascadeCategorizer.categorize takes the whole frame (it needs pfc_primary and
+        # merchant_name, not just description) plus the merchant-memory lookup, and it sets
+        # both `category` and `category_source` on the returned frame itself.
+        merchant_lookup = database.get_all_merchant_categories()
+        transactions = models.classifier.categorize(transactions, merchant_lookup)
+    else:
+        # "placeholder" mode's classifier predates the cascade and keeps the old
+        # Series-in/Series-out signature (see analytics/placeholders.py).
+        transactions["category"] = models.classifier.categorize(transactions["description"])
     transactions = models.outlier_detector.score(transactions)
 
     database.upsert_categories(transactions["category"].dropna().astype(str).tolist())

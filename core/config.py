@@ -74,6 +74,7 @@ class Settings:
     labeled_dataset_path: str
     jwt_secret: str | None
     frontend_origin: str | None
+    categorizer_mode: str
 
 
 def load_settings() -> Settings:
@@ -119,4 +120,5 @@ def load_settings() -> Settings:
         or "labeled_transactions.csv",
         jwt_secret=_read_value("JWT_SECRET", secrets),
         frontend_origin=_read_value("FRONTEND_ORIGIN", secrets),
+        categorizer_mode=_read_value("CATEGORIZER_MODE", secrets, "cascade") or "cascade",
     )

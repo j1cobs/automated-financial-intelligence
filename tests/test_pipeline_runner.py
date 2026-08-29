@@ -56,6 +56,7 @@ def _settings(**overrides) -> SimpleNamespace:
         plaid_access_token_owners=["Alex", "Sam"],
         plaid_base_url="https://sandbox.plaid.com",
         github_event_name=None,
+        categorizer_mode="cascade",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -125,6 +126,7 @@ class RunPipelineTests(unittest.TestCase):
         database.delete_transactions_by_external_ids.return_value = 0
         database.reconcile_transactions.return_value = 0
         database.get_sync_cursors.return_value = {}
+        database.get_all_merchant_categories.return_value = {}
         return database
 
     def test_happy_path(self) -> None:
@@ -178,6 +180,32 @@ class RunPipelineTests(unittest.TestCase):
         self.assertEqual(result.inserted, 0)
         self.assertEqual(result.updated, 0)
         database.set_sync_cursor.assert_called_once_with("fp-1", "cursor-after-empty-delta")
+
+    def test_empty_sync_with_full_refresh_calls_reconcile_and_completes(self) -> None:
+        """Regression test: when both added and modified are empty but full_refresh=True,
+        reconcile_transactions should still be called and the pipeline should complete without
+        raising."""
+        settings = _settings()
+        database = self._database()
+        database.reconcile_transactions.return_value = 0
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = []
+        ingestor.sync_transactions.return_value = _sync_result(full_refresh=True)
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+        ):
+            result = run_pipeline()
+
+        self.assertTrue(result.transactions.empty)
+        self.assertEqual(result.inserted, 0)
+        self.assertEqual(result.updated, 0)
+        database.reconcile_transactions.assert_called_once()
+        _, kwargs = database.reconcile_transactions.call_args
+        self.assertEqual(kwargs["full_refresh"], True)
 
     def test_reconcile_not_called_when_sync_is_not_a_full_refresh(self) -> None:
         settings = _settings()
@@ -320,6 +348,115 @@ class RunPipelineTests(unittest.TestCase):
 
         database.record_balance_snapshots.assert_called_once_with(accounts)
         self.assertEqual(call_order, ["upsert_plaid_accounts", "record_balance_snapshots"])
+
+
+class CategorizerModeWiringTests(unittest.TestCase):
+    """categorizer_mode selects between the cascade (whole-frame) and placeholder
+    (description-Series) call shapes -- see analytics/models.py::build_models and
+    PLAN.md's Step 3-wiring."""
+
+    def _added_frame(self) -> pd.DataFrame:
+        return pd.DataFrame.from_records(
+            [
+                {
+                    "transaction_id": "tx-1",
+                    "date": "2026-07-01",
+                    "description": "Coffee Shop",
+                    "amount": 5.25,
+                    "balance": None,
+                    "account_key": "plaid:acc1",
+                    "account_name": "Checking",
+                    "source": "plaid",
+                    "pending": False,
+                    "pending_transaction_id": None,
+                    "merchant_name": "Coffee Shop",
+                    "pfc_primary": "FOOD_AND_DRINK",
+                    "pfc_detailed": "FOOD_AND_DRINK_COFFEE",
+                    "pfc_confidence": "HIGH",
+                }
+            ]
+        )
+
+    def _database(self) -> MagicMock:
+        database = MagicMock()
+        database.canonicalize_account_keys.return_value = {}
+        database.upsert_transactions.return_value = (1, 0)
+        database.delete_transactions_by_external_ids.return_value = 0
+        database.reconcile_transactions.return_value = 0
+        database.get_sync_cursors.return_value = {}
+        return database
+
+    def test_cascade_mode_calls_merchant_lookup_and_passes_whole_frame(self) -> None:
+        settings = _settings(categorizer_mode="cascade")
+        database = self._database()
+        database.get_all_merchant_categories.return_value = {"COFFEE SHOP": "FOOD_AND_DRINK"}
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = []
+        ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame())
+
+        fake_bundle = SimpleNamespace(
+            classifier=MagicMock(),
+            outlier_detector=MagicMock(),
+        )
+        fake_bundle.classifier.categorize.return_value = self._added_frame().assign(
+            category="FOOD_AND_DRINK", category_source="merchant"
+        )
+        fake_bundle.outlier_detector.score.side_effect = lambda frame: frame.assign(
+            outlier_score=0.0, is_outlier=False
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.build_models", return_value=fake_bundle) as build_models,
+        ):
+            run_pipeline()
+
+        build_models.assert_called_once_with("cascade")
+        database.get_all_merchant_categories.assert_called_once()
+        fake_bundle.classifier.categorize.assert_called_once()
+        call_args = fake_bundle.classifier.categorize.call_args[0]
+        frame_arg, lookup_arg = call_args[0], call_args[1]
+        # The whole frame, not just a description Series -- pfc_primary/merchant_name
+        # must survive into the call.
+        self.assertIsInstance(frame_arg, pd.DataFrame)
+        self.assertIn("pfc_primary", frame_arg.columns)
+        self.assertIn("merchant_name", frame_arg.columns)
+        self.assertEqual(lookup_arg, {"COFFEE SHOP": "FOOD_AND_DRINK"})
+
+    def test_placeholder_mode_still_uses_series_in_series_out(self) -> None:
+        settings = _settings(categorizer_mode="placeholder")
+        database = self._database()
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = []
+        ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame())
+
+        fake_bundle = SimpleNamespace(
+            classifier=MagicMock(),
+            outlier_detector=MagicMock(),
+        )
+        fake_bundle.classifier.categorize.return_value = pd.Series(["Uncategorized"])
+        fake_bundle.outlier_detector.score.side_effect = lambda frame: frame.assign(
+            outlier_score=0.0, is_outlier=False
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.build_models", return_value=fake_bundle) as build_models,
+        ):
+            result = run_pipeline()
+
+        build_models.assert_called_once_with("placeholder")
+        database.get_all_merchant_categories.assert_not_called()
+        fake_bundle.classifier.categorize.assert_called_once()
+        call_args = fake_bundle.classifier.categorize.call_args[0]
+        self.assertIsInstance(call_args[0], pd.Series)
+        self.assertEqual(list(result.transactions["category"]), ["Uncategorized"])
 
 
 class MainTests(unittest.TestCase):
