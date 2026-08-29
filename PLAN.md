@@ -4471,6 +4471,200 @@ only flagging).
 
 ---
 
+## Phase 18 — Transaction categorization: Plaid PFC + merchant memory — IMPLEMENTED (2026-08-26), all tests green
+
+Every transaction was stamped `category = 'Uncategorized'` by a placeholder. A live bug split the category into two case
+variants (`'Uncategorized'` / `'uncategorized'`), with the lowercase one missing from the canonical `categories` table.
+The goal is to make categories real via a three-layer cascade and retire the placeholder.
+
+**Measurement at decision time (2026-08-26, live database):** **0** budget rows, **0** user corrections, and two case-split
+category strings (754 + 62 rows). Zero budgets and corrections meant nothing downstream breaks if the taxonomy changes —
+the cheapest possible moment to switch.
+
+**Why not a BERT model.** Two HuggingFace models were investigated and rejected:
+- `fahadkamraan/transaction-categorizer` (DistilBERT, 17 labels, US-English-only, 99.88% accuracy that suspiciously
+  suggests exact-string dedup missing near-duplicates like `METRO #4521` vs. `METRO #7832`, 14 monthly downloads)
+- `kuro-08/bert-transaction-categorization` (BERT-base, 25 labels, consumer-lifestyle taxonomy with no Income/Fees/Insurance,
+  no disclosed metrics, no public training set)
+
+Both are English-only. The accounts are Quebec-based (Desjardins, BNC), where merchants read `HYDRO-QUEBEC`, `COUCHE-TARD`,
+`PROVIGO`, `METRO`, `LE GERMAIN CHARLEVOIX BAIE`. A US-English transformer has never seen those tokens. For a single
+household with ~150 distinct merchants (top ~30 repeat monthly), **the merchant name is the label** — a lookup, not an
+inference. Merchant memory (user corrections, remembered and applied going forward) is a better fit.
+
+### Decisions locked
+
+| Question | Decision |
+|---|---|
+| Categorization strategy | **Three-layer cascade:** merchant memory (user corrections) → Plaid PFC primary → UNCATEGORIZED fallback |
+| Taxonomy | **Adopt Plaid's PFC primary wholesale** — 17 observed values with 100% coverage; no ambiguity |
+| Layer 3 (TF-IDF) | **Deferred** — no evidence of a coverage gap yet; build when the cascade is insufficient |
+| Correction scope | **Per-merchant, not per-row** — one correction applies to every future transaction from that merchant, with exact-match backfill |
+| Storage format | **Raw `SCREAMING_SNAKE_CASE`** (e.g. `FOOD_AND_DRINK`); frontend formats for display (same rule as savings_rate) |
+
+### Step 0 probe (read-only, before production code)
+
+Throwaway `scripts/_probe_categories.py` probe (deleted after use) against live Plaid, 2026-08-26, all 3 tokens.
+**Gate passed.** Results (729 transactions):
+
+| Measurement | Value | Meaning |
+|---|---|---|
+| PFC coverage | **100%** (729/729) | Every transaction carries a `personal_finance_category` |
+| Distinct PFC primary values | **17** (exactly Plaid's taxonomy: FOOD_AND_DRINK, GENERAL_MERCHANDISE, INCOME, ..., OTHER, plus UNCATEGORIZED for non-Plaid) | Seeding "what was observed" and "Plaid's official set" are identical |
+| Confidence distribution | 67% LOW (491), 25% HIGH (179), 8% VERY_HIGH (58), <1% MEDIUM | Plaid's best guess is often not high-confidence; merchant memory carries weight beyond coverage alone |
+| Top merchant gap | Café du Parquet under 3 spellings: `Cafe Du Parquet` (35), `CAFE DU PARQUET MONTREAL QC` (25), `Purchase /CAFE DU PARQUET` (5) — **65 from one merchant** | Concrete bug: naive key (uppercase + trim) would split into 3; the `merchant_key()` normalizer must strip city/province tails and Purchase prefixes |
+| merchant_name coverage | **71.2%** (519/729) — the other ~29% requires normalized-description fallback | The description fallback is regular traffic, not an edge case; both key paths needed in the normalizer |
+| Case-split bug in live DB | `'Uncategorized'` (754 rows) / `'uncategorized'` (62 rows) as separate strings, lowercase not in canonical table | Migration 023 collapses both onto `UNCATEGORIZED` in one pass |
+
+### Shipped contracts
+
+**`CascadeCategorizer.categorize(frame, merchant_lookup) → DataFrame`** (`analytics/categorizer.py`):
+```python
+def categorize(self, frame: pd.DataFrame, merchant_lookup: dict[str, str]) -> pd.DataFrame:
+    """Returns a copy of frame with `category` and `category_source` columns set.
+    
+    Resolution per row, first hit wins:
+    1. Merchant memory — merchant_lookup[merchant_key(merchant_name, description)]
+       → category_source = "merchant"
+    2. Plaid PFC primary — row["pfc_primary"] when present
+       → category_source = "plaid"
+    3. Fallback → category = "UNCATEGORIZED", category_source = "none"
+    """
+```
+
+**`merchant_key(merchant_name: str | None, description: str) → str`** (`analytics/categorizer.py`):
+Normalizes merchant identity — prefers `merchant_name` (Plaid-cleaned) when present, falls back to `description`.
+Uppercases, strips leading `Purchase /`, strips trailing `<city> <2-letter province>`, strips trailing store numbers,
+collapses whitespace. Bias: under-merge (two keys for one merchant costs one correction) over over-merge (one key for two
+merchants silently corrupts a category).
+
+**`build_models(mode: str) → PlaceholderModelBundle`** (`analytics/models.py`):
+```python
+def build_models(mode: str) -> PlaceholderModelBundle:
+    """Select model bundle for mode: "cascade" (production) or "placeholder" (tests)."""
+```
+Wired via `core/config.py::CATEGORIZER_MODE` (env var, default `"cascade"`). The seam allows toggling between
+`CascadeCategorizer` (Phase 18) and the pre-Phase-18 placeholder, keeping tests backward-compatible. Outlier detection
+is always the placeholder (unchanged this phase).
+
+**`update_transaction_category(transaction_hash, category, merchant_key) → int`** (`database/db.py`, updated signature):
+```python
+def update_transaction_category(
+    self, transaction_hash: str, category: str, merchant_key: str | None
+) -> int:
+    """Set user_category on target row; upsert merchant_categories[merchant_key] = category;
+    backfill user_category on rows with matching COALESCE(merchant_name, description)
+    where user_category IS NULL. Returns backfilled count (not counting target row)."""
+```
+Takes merchant_key as third argument (computed by caller from `analytics/categorizer.py::merchant_key()` via
+`database/db.py::get_transaction_merchant_fields()`). Atomically: sets `user_category` on target, remembers correction
+in merchant_categories (so cascade applies it on next pipeline run), and backfills other rows (exact-string match on
+raw merchant_name/description, never overwriting different corrections). The API endpoint returns
+`CategoryUpdateResponse(backfilled_count: int)`.
+
+**Migrations:**
+- `021_transaction_pfc.sql`: Add `pfc_primary`, `pfc_detailed`, `pfc_confidence`, `merchant_name`, `category_source` to `transactions`
+- `022_merchant_categories.sql`: Create `merchant_categories(merchant_key TEXT PRIMARY KEY, category TEXT, source TEXT, updated_at TIMESTAMPTZ)`
+- `023_pfc_taxonomy.sql`: Normalize case bug (all `'Uncategorized'`/`'uncategorized'` → `'UNCATEGORIZED'`), delete old case variants from `categories` table, insert Plaid's 17 primary labels + `UNCATEGORIZED`
+
+**Ingestion (`ingestion/plaid_ingestor.py::_normalize()`):**
+Add four fields, all nullable (absent → None, never coerced):
+```python
+pfc = transaction.get("personal_finance_category") or {}
+"merchant_name":   transaction.get("merchant_name"),
+"pfc_primary":     pfc.get("primary"),
+"pfc_detailed":    pfc.get("detailed"),
+"pfc_confidence":  pfc.get("confidence_level"),
+```
+
+**Pipeline wiring** (`pipeline/runner.py`):
+```python
+models = build_models(settings.categorizer_mode)
+if settings.categorizer_mode == "cascade":
+    merchant_lookup = database.get_all_merchant_categories()
+    transactions = models.classifier.categorize(transactions, merchant_lookup)
+else:
+    transactions["category"] = models.classifier.categorize(transactions["description"])
+transactions = models.outlier_detector.score(transactions)
+```
+The cascade takes the full frame (it needs pfc_primary, merchant_name, description) plus merchant_lookup dict, and sets
+both `category` and `category_source`. The placeholder mode (backward-compat) keeps the pre-cascade signature
+(Series → Series on description alone). Outlier detector signature is unchanged.
+
+**API response** (`api/routers/data.py`):
+```python
+@router.patch("/transactions/{transaction_hash}/category", response_model=CategoryUpdateResponse)
+def update_transaction_category(...) -> CategoryUpdateResponse:
+    # Computes merchant_key via analytics/categorizer::merchant_key()
+    # Calls database.update_transaction_category(..., merchant_key)
+    # Returns CategoryUpdateResponse(backfilled_count=...)
+```
+Returns HTTP 200 with `{backfilled_count: int}` in the response body (not 204).
+
+**Frontend** (`web/src/lib/categories.ts`):
+```typescript
+export function formatCategory(raw: string | null | undefined): string {
+    // FOOD_AND_DRINK → Food and Drink, UNCATEGORIZED → Uncategorized
+    // Idempotent, handles already-formatted or mixed-case input
+}
+```
+`formatCategory()` is used in the ledger dropdown and every chart legend/axis. Raw values stay canonical in state/payloads;
+formatting applies only at render time. The backfill count from the PATCH response surfaces as a brief confirmation in
+the UI ("updated 41 COUCHE-TARD transactions").
+
+### The backfill limitation (exact-match, not cross-spelling)
+
+`update_transaction_category()` backfill matches on raw `COALESCE(merchant_name, description)` because `merchant_key` is
+computed at cascade time from those fields, not stored in transactions. Cross-spelling historical backfill (e.g., all
+spellings of Café du Parquet) only happens going forward when the next pipeline run recomputes merchant_key and looks it
+up in merchant_categories — this method's backfill is a same-run, exact-match convenience, not a substitute. Reimplementing
+the normalizer in SQL would split the source of truth between two places and introduce duplication risk. The tradeoff:
+immediate same-run backfill is exact-match only; cross-spelling convergence happens on the next pipeline run, which for
+a household's recurring merchants happens within days. This is documented and acceptable (see ADR 0004).
+
+### Verification
+
+1. **Probe passes (gate).** 100% PFC coverage, 17 primary values (same as Plaid's official taxonomy), and the concrete
+   Café du Parquet 3-way collision confirms `merchant_key()` normalization is needed.
+2. **All Python tests green:** `python -m unittest discover -s tests -v` (376 passing).
+3. **merchant_key test coverage:** Three and four spellings of Café du Parquet collapse to one key; two actually-different
+   merchants never collide.
+4. **Cascade precedence:** Merchant memory beats Plaid PFC beats UNCATEGORIZED; an inserted merchant_categories entry is
+   picked up on next classification.
+5. **Backfill never overwrites:** Two separate corrections on different rows from the same merchant both survive; existing
+   `user_category` values are never replaced.
+6. **Pipeline re-run safety:** `user_category`, `is_recurring`, `is_duplicate` survive upsert unchanged (not named in INSERT).
+7. **Web checks all pass:** `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`.
+8. **formatCategory test coverage:** `FOOD_AND_DRINK` → `Food and Drink`, handles null/undefined/already-formatted.
+9. **Scratch-DB run:** `python main.py` against empty database; `category_source` is `'plaid'` for Plaid-ingested rows,
+   `'none'` for seed data, zero case-split bugs.
+10. **Production run verified:** Budget tab shows real categories, category charts have multiple slices, ledger dropdown
+    shows formatted taxonomy, category correction propagates to other rows from same merchant within the run.
+11. **End-to-end correction loop:** Set category on one COUCHE-TARD row → backfilled count > 0 surfaces in UI → all other
+    COUCHE-TARD rows follow → next pipeline run preserves `user_category` on all of them.
+12. **API response shape:** PATCH returns HTTP 200 with `{backfilled_count: int}`, not 204.
+
+### Follow-ups (not in this phase)
+
+1. **Layer 3 (TF-IDF).** Defer pending evidence of a coverage gap. The probe showed 67% of rows at LOW confidence, but that
+   is Plaid's honest assessment, not a sign the cascade is failing. Monitor whether merchant memory converges (users stop
+   making corrections) or hits a ceiling; build layer 3 if the cascade is insufficient.
+2. **Detailed category (PFC_DETAILED).** Stored this phase (`pfc_detailed` column) but not wired to the cascade or UI.
+   Consider surfacing for drill-down (100+ categories, too granular for budgeting but useful for analytics) or as
+   training signal for layer 3.
+3. **category_source = 'user'.** Reserved this phase (set to 'merchant' when merchant memory applies) but not written.
+   If a future layer adds direct per-row corrections (distinct from merchant-memory backfill), this flag tracks it.
+4. **Pending in the UI.** `pending` and `pending_transaction_id` are stored (Phase 17) but not surfaced. Decide whether to
+   show pending authorizations in the ledger or hide them until posted.
+
+### References
+
+See `docs/adr/0004-transaction-categorization.md` for the detailed rationale (why the two BERT models were rejected on
+specific evidence, why Plaid's PFC taxonomy was adopted wholesale, why merchant memory outranks Plaid, the exact-match
+backfill limitation, and why layer 3 is deferred).
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working

@@ -7,9 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a Phase-1 build: the data path (ingest → process → persist → dashboard) is wired end-to-end first, ahead of
 the full feature set described in the original design brief. What this means concretely:
 
-- ML is stubbed — `pipeline/runner.py` uses `analytics/placeholders.py`, not the real `analytics/classifier.py` /
-  `analytics/outlier_detector.py` yet (see Architecture).
-- The dashboard implements all core views. Only ML is stubbed — the pipeline uses placeholders.
+- **Transaction categorization is live.** The pipeline runs a three-layer cascade (merchant memory → Plaid PFC → UNCATEGORIZED) via
+  `CascadeCategorizer` (Phase 18), wired via `analytics/models.py::build_models()` and gated by `CATEGORIZER_MODE`.
+  Outlier detection remains stubbed — `analytics/outlier_detector.py` is unused; only the classifier half of Phase 1's ML
+  stub is now real.
+- The dashboard implements all core views. Budget categories, category charts, and category drill-down all work.
 - Scheduled automation is not active yet — the GitHub Actions workflow is defined but does not run automatically (see
   Automation).
 
@@ -59,32 +61,43 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 - `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a _normalized_ DataFrame
   (`description`, `amount`, `account_name`, `source`, `date`, ...) and remains the interface seam for future
   sources; it is not delta-shaped, since a source with no pending/posted concept (a CSV import, manual entry)
-  has no `added`/`modified`/`removed` story to tell. `PlaidIngestor.sync_transactions()` (new, Phase 17) is a
+  has no `added`/`modified`/`removed` story to tell. `PlaidIngestor.sync_transactions()` (Phase 17) is a
   Plaid-specific addition alongside it, not a change to the seam. It returns a `SyncResult` with `added` and
-  `modified` DataFrames plus `removed_ids` (a list of Plaid transaction_ids to delete — the union of Plaid's
-  explicit `removed` array and any non-null `pending_transaction_id` carried by an `added`/`modified` row,
-  since a cold-start sync never populates `removed` but can still carry that lineage pointer). It replaces
-  `fetch_transactions` (`/transactions/get`) for live ingestion by calling `/transactions/sync` instead;
-  `fetch_transactions` is kept as a rollback fallback, not deleted. Each real account is claimed once per run:
-  both paths claim an account for the first token that
-  reveals it and skip it for later tokens, using the same identity tuple `canonicalize_account_keys` matches on.
+  `modified` DataFrames plus `removed_ids` (the union of Plaid's explicit `removed` array and any non-null `pending_transaction_id`
+  carried by an `added`/`modified` row). It replaces `fetch_transactions` for live ingestion; `fetch_transactions` is kept as
+  a rollback fallback. Phase 18 adds four normalized fields to `_normalize()`: `merchant_name` (Plaid-cleaned), and the three
+  personal_finance_category attributes (`pfc_primary`, `pfc_detailed`, `pfc_confidence`), all nullable (absent stays None, never
+  coerced to a default). Each real account is claimed once per run: both ingestion paths claim an account for the first token
+  that reveals it and skip it for later tokens, using the same identity tuple `canonicalize_account_keys` matches on.
   That is what keeps a co-owned account visible through two Plaid Items from delivering every transaction twice.
   `_post()`'s error logging is deliberately scrubbed: on a non-2xx response it logs only `status_code`/`error_type`/
   `error_code` parsed from Plaid's JSON body, never the raw `response.text` — the daily pipeline's stdout becomes
   the GitHub Actions run log, which is visible to anyone with repo read access, so nothing account- or
   transaction-identifying (e.g. an account mask) belongs in it. Keep new log statements in this file to that same
   standard.
-- `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
-  but the pipeline currently uses `analytics/placeholders.py` (`build_placeholder_models`), which stamps
-  `category="uncategorized"`, `outlier_score=0.0`, `is_outlier=False`. The data path is wired end-to-end before ML is
-  switched on (Phase 1). When changing "the classifier," check which module `runner.py` actually imports.
+- `analytics/` — `categorizer.py` (Phase 18) implements a three-layer cascade: merchant memory (user corrections from
+  `merchant_categories` table) → Plaid's `personal_finance_category` primary → `UNCATEGORIZED` fallback. `merchant_key()`
+  normalizes merchant identity (strips noise patterns: leading `Purchase /`, trailing city/province, trailing store numbers).
+  `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest) exist but are unused — `outlier_detector.py`
+  remains stubbed (Phase 1). `models.py::build_models(mode)` gates between `"cascade"` (default, production) and `"placeholder"`
+  (for tests/backward-compat). When changing the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and
+  `pipeline/runner.py`'s classification block.
 - `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
-  (currently 001–020) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
+  (currently 001–023) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
   (`DATABASE_URL`). `pipeline_runs` (migration 013) is where per-run detail lives — `pipeline/runner.py::main()`
   writes one row per run via `log_pipeline_run()` (counts on success; `error_class`/a truncated `error_message` on
   failure, never a raw exception that could embed transaction content) — instead of putting that detail in the
-  GitHub Actions log, which is visible to anyone with repo read access. Transaction identity, and the duplicate
-  handling built on it, is the subtlest part of this layer:
+  GitHub Actions log, which is visible to anyone with repo read access. Phase 18 adds three migrations (021–023) for
+  transaction categorization: `pfc_primary`, `pfc_detailed`, `pfc_confidence`, `merchant_name`, and `category_source`
+  columns on `transactions`; a new `merchant_categories` table (merchant_key → category, with source and updated_at);
+  and a seeding/normalization pass that fixes the live `'Uncategorized'`/`'uncategorized'` case-inconsistency bug.
+  `update_transaction_category(transaction_hash, category, merchant_key)` (Phase 18) takes a third `merchant_key` argument
+  and atomically: sets `user_category` on the target row, upserts merchant memory (so the cascade applies the correction to
+  future transactions from that merchant), and backfills `user_category` on other rows with the exact same raw merchant_name/description
+  (where `user_category IS NULL`, so existing corrections are never overwritten). Returns the backfill count, which surfaces in
+  the UI as the number of rows affected. See `docs/adr/0004-transaction-categorization.md` for the full rationale and the
+  exact-match-backfill limitation.
+  Transaction identity, and the duplicate handling built on it, is the subtlest part of this layer:
   - `build_transaction_hash` hashes Plaid's `transaction_id` when the row has one, and falls back to
     `account_key|date|description|amount` only for rows without one (seed data, future non-Plaid sources). Upserts are
     idempotent via `ON CONFLICT (transaction_hash) DO UPDATE`, and because the hash tracks the `transaction_id`, a
