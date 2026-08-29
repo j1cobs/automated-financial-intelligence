@@ -88,9 +88,7 @@ class CascadeCategorizer:
     layering rule).
     """
 
-    def categorize(
-        self, frame: pd.DataFrame, merchant_lookup: dict[str, str]
-    ) -> pd.DataFrame:
+    def categorize(self, frame: pd.DataFrame, merchant_lookup: dict[str, str]) -> pd.DataFrame:
         """Returns a copy of `frame` with `category` and `category_source` columns set.
 
         Resolution order per row, first hit wins:
@@ -137,9 +135,7 @@ class CascadeCategorizer:
 
         resolved = [
             _resolve(mn, desc, pfc)
-            for mn, desc, pfc in zip(
-                merchant_names, descriptions, pfc_primaries, strict=True
-            )
+            for mn, desc, pfc in zip(merchant_names, descriptions, pfc_primaries, strict=True)
         ]
 
         if resolved:
@@ -148,7 +144,5 @@ class CascadeCategorizer:
             categories, sources = (), ()
 
         result["category"] = pd.Series(categories, index=result.index, dtype="object")
-        result["category_source"] = pd.Series(
-            sources, index=result.index, dtype="object"
-        )
+        result["category_source"] = pd.Series(sources, index=result.index, dtype="object")
         return result

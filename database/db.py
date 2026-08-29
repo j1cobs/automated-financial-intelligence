@@ -801,9 +801,7 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
-    def reconcile_transactions(
-        self, frame: pd.DataFrame, start_date, end_date, *, full_refresh: bool
-    ) -> int:
+    def reconcile_transactions(self, frame: pd.DataFrame, start_date, end_date, *, full_refresh: bool) -> int:
         """Trim stored duplicate transactions using Plaid's own per-natural-key counts.
 
         `full_refresh` is a required keyword-only guard: this method may only run when the

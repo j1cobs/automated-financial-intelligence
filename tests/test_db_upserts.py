@@ -280,9 +280,7 @@ class LogPipelineRunTests(unittest.TestCase):
 
         sql, params = cursor.execute.call_args[0]
         self.assertIn("INSERT INTO pipeline_runs", sql)
-        self.assertEqual(
-            params, (started_at, "success", 3, 1, 2, None, None, None, None, None, "schedule")
-        )
+        self.assertEqual(params, (started_at, "success", 3, 1, 2, None, None, None, None, None, "schedule"))
 
     def test_failure_row_defaults_counts_to_none(self) -> None:
         import datetime as dt
@@ -583,9 +581,7 @@ class MerchantCategoriesAccessorTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_get_all_merchant_categories_returns_mapping(self) -> None:
-        connect, cursor = _mock_connect(
-            [("METRO", "FOOD_AND_DRINK"), ("SAQ", "FOOD_AND_DRINK")]
-        )
+        connect, cursor = _mock_connect([("METRO", "FOOD_AND_DRINK"), ("SAQ", "FOOD_AND_DRINK")])
         with patch("database.db.psycopg.connect", connect):
             result = DatabaseClient("postgresql://x").get_all_merchant_categories()
         self.assertEqual(result, {"METRO": "FOOD_AND_DRINK", "SAQ": "FOOD_AND_DRINK"})

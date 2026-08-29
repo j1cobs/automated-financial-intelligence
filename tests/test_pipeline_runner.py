@@ -213,9 +213,7 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = []
-        ingestor.sync_transactions.return_value = _sync_result(
-            added=self._added_frame(), full_refresh=False
-        )
+        ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame(), full_refresh=False)
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
@@ -235,9 +233,7 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = []
-        ingestor.sync_transactions.return_value = _sync_result(
-            added=self._added_frame(), full_refresh=True
-        )
+        ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame(), full_refresh=True)
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),

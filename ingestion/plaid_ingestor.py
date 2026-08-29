@@ -352,7 +352,9 @@ class PlaidIngestor(BaseIngestor):
                 except requests.HTTPError as error:
                     error_code = None
                     try:
-                        error_code = error.response.json().get("error_code") if error.response is not None else None
+                        error_code = (
+                            error.response.json().get("error_code") if error.response is not None else None
+                        )
                     except ValueError:
                         error_code = None
 

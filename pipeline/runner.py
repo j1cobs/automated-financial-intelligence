@@ -110,9 +110,7 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # a delta (see the IKEA-delta hazard in reconcile_transactions's docstring).
     removed = 0
     if result.full_refresh:
-        removed = database.reconcile_transactions(
-            transactions, start_date, end_date, full_refresh=True
-        )
+        removed = database.reconcile_transactions(transactions, start_date, end_date, full_refresh=True)
 
     # Step 7: advance each Item's cursor only after every write above (upsert, delete, and any
     # reconcile) has committed. Advancing earlier would mean a crash between here and the writes
