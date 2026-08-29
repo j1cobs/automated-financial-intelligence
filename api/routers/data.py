@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
+from analytics.categorizer import merchant_key
 from ..dataload import invalidate as invalidate_cache
 from ..dataload import load_frames
 from ..deps import CurrentUserDep, DbDep, RequireCsrfDep
@@ -475,6 +476,10 @@ class CategoryUpdate(BaseModel):
     category: str
 
 
+class CategoryUpdateResponse(BaseModel):
+    backfilled_count: int
+
+
 class RecurringUpdate(BaseModel):
     recurring: bool
 
@@ -514,17 +519,19 @@ def update_budget(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.patch("/transactions/{transaction_hash}/category", status_code=status.HTTP_204_NO_CONTENT)
+@router.patch("/transactions/{transaction_hash}/category", response_model=CategoryUpdateResponse)
 def update_transaction_category(
     transaction_hash: str,
     body: CategoryUpdate,
     current_user: CurrentUserDep,
     _csrf: RequireCsrfDep,
     db: DbDep,
-) -> Response:
-    db.update_transaction_category(transaction_hash, body.category)
+) -> CategoryUpdateResponse:
+    fields = db.get_transaction_merchant_fields(transaction_hash)
+    key = merchant_key(fields[0], fields[1]) if fields else None
+    backfilled_count = db.update_transaction_category(transaction_hash, body.category, key or None)
     invalidate_cache(db.database_url)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return CategoryUpdateResponse(backfilled_count=backfilled_count)
 
 
 @router.patch("/transactions/{transaction_hash}/recurring", status_code=status.HTTP_204_NO_CONTENT)
