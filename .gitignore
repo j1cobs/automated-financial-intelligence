@@ -231,3 +231,7 @@ __marimo__/
 *.crt
 
 help/
+
+*.stackdump
+
+node_modules

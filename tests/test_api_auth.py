@@ -36,6 +36,7 @@ def _settings(**overrides) -> Settings:
         labeled_dataset_path="labeled_transactions.csv",
         jwt_secret="test-secret",
         frontend_origin="https://example.vercel.app",
+        categorizer_mode="cascade",
     )
     base.update(overrides)
     return Settings(**base)

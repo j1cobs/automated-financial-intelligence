@@ -28,8 +28,11 @@ Commit both files together.
 ```bash
 python -m unittest discover -s tests -v      # tests
 python main.py                                # pipeline (needs Plaid + DB credentials)
-streamlit run streamlit_app.py                 # dashboard (needs DB + Google OAuth credentials)
+streamlit run streamlit_app.py                 # Streamlit dashboard (needs DB + Google OAuth credentials)
 python scripts/seed_sample_data.py             # demo data, no credentials needed beyond DATABASE_URL
+uvicorn api.main:app --reload                  # API for the React dashboard
+cd web && npm run dev                          # React dashboard (needs the API running)
+cd web && npm run test && npx tsc -b && npm run lint && npm run format:check  # web checks, all four must pass
 ```
 
 ## Linting and formatting

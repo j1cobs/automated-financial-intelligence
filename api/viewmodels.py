@@ -15,6 +15,17 @@ the Streamlit "enriched" frame). The ledger view model is the one exception: it 
 duplicate-flagged rows, same as `_section_ledger`, because the ledger's checkbox is
 the only way to un-flag a row. Adding query-param filtering later is additive to this
 shape, not breaking.
+
+**Unit contract (PLAN.md Phase 15, Fix 1).** Every ratio this module returns is a
+*fraction*, not percentage points: a 60% savings rate is `0.6`. `credit_utilization.pct`
+and `budget.pct` were already fractions while `savings_rate` was percentage points, and
+the frontend applied one `formatPercent` to both — so one was always wrong. Do not
+reintroduce a `* 100` here; formatting belongs to the UI.
+
+**Divergence from Streamlit is intentional (PLAN.md Phase 15).** `app/dashboard.py` is
+frozen, so it keeps the old percentage-point savings rate, the row-based rolling window,
+and the 3-day stale-balance threshold. The five expected divergences are tabulated at the
+end of Phase 15; anything else differing is a bug here.
 """
 
 from __future__ import annotations
@@ -23,16 +34,42 @@ import calendar
 from datetime import date
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from app.dashboard import (
-    _STALE_BALANCE_DAYS,
     _effective_credit_limit,
     _enrich_transactions,
     _label_subtype,
 )
 
 _IDENTITY_COLS = ["official_name", "account_subtype", "account_type", "mask"]
+
+# Deliberately *not* imported from `app.dashboard._STALE_BALANCE_DAYS` (= 3), which is
+# frozen. That constant conflated two different questions; Fix 5 splits them.
+#   SYNC_STALE_DAYS  — `accounts.updated_at` is the last *balance refresh*. A gap here
+#                      means the Plaid Item may be broken (see scripts/plaid_link.py
+#                      repair), not that the account is unused.
+#   DORMANT_DAYS     — no *transactions* in this long, i.e. an account you have probably
+#                      stopped using. Informational, never a warning.
+SYNC_STALE_DAYS = 7
+DORMANT_DAYS = 90
+
+# A month whose income is below this contributes no savings rate. Dividing a full month
+# of expenses by a near-zero income produces a number with no meaning (the frozen
+# Streamlit version clips income to $0.01 and reports -24,000,000%).
+MIN_MONTHLY_INCOME_FOR_RATE = 100.0
+
+# A calendar month needs at least this many days of observed coverage to count toward a
+# "typical month" average. Excludes the in-progress current month and ragged window edges.
+MIN_DAYS_FOR_COMPLETE_MONTH = 28
+
+_ROLLING_SPEND_WINDOW_DAYS = 30
+
+# Subscription detection's day-of-month regularity gate (see build_home). A real
+# subscription bills on a near-fixed day each month; this is how many days of slack are
+# allowed around that day before a series stops reading as "regular."
+DAY_OF_MONTH_TOLERANCE_DAYS = 4
 
 
 def exclude_duplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -60,21 +97,119 @@ def _clean(value: Any) -> Any:
     return None if pd.isna(value) else value
 
 
-def build_net_worth(acct_df: pd.DataFrame, lang: str = "en") -> dict[str, Any]:
+def complete_month_keys(df: pd.DataFrame) -> set[str]:
+    """The `YYYY-MM` keys this frame covers in full.
+
+    A "typical month" average must not mix whole months with fragments. The frame's
+    first and last months are usually partial (the window cuts them mid-month), and the
+    current calendar month is partial by definition — averaging a half-finished month in
+    alongside complete ones drags the result toward whichever end has less data. That is
+    Fix 3c: the reported "monthly expenses look off" symptom.
+
+    Coverage is measured against the frame's own observed span, so a month is complete
+    only when the data could have contained every one of its days.
+    """
+    if df.empty:
+        return set()
+
+    span_start = df["date"].min()
+    span_end = df["date"].max()
+    current_month = date.today().strftime("%Y-%m")
+
+    complete: set[str] = set()
+    for month_key in df["month"].unique():
+        if month_key == current_month:
+            continue
+        period = pd.Period(month_key, freq="M")
+        month_start = period.start_time
+        month_end = period.end_time.normalize()
+        observed_start = max(month_start, span_start)
+        observed_end = min(month_end, span_end)
+        covered_days = (observed_end - observed_start).days + 1
+        if covered_days >= MIN_DAYS_FOR_COMPLETE_MONTH:
+            complete.add(month_key)
+    return complete
+
+
+def _monthly_series(real: pd.DataFrame, tx_type: str, months: set[str]) -> pd.Series:
+    """Per-month signed totals for one tx_type, restricted to `months`."""
+    subset = real[(real["tx_type"] == tx_type) & (real["month"].isin(months))]
+    if subset.empty:
+        return pd.Series(dtype=float)
+    return subset.groupby("month")["adjusted_amount"].sum()
+
+
+SPARKLINE_MONTHS = 12
+
+
+def _build_metric(key: str, value: float, monthly: pd.Series) -> dict[str, Any]:
+    """Pair a headline figure with the baseline that makes it legible.
+
+    `value` is the figure for the selected period; `monthly` is the same quantity per
+    complete month across ALL history. A number on its own ($3,240 of expenses) answers
+    nothing — the question is always "is that normal for me?", so every headline metric
+    ships with the trailing average it should be read against, the gap between them, and
+    a short series for shape.
+
+    `delta_pct` divides by `abs(baseline)` so the sign means "above/below", not
+    "above/below in the direction the baseline happened to point" — net flow is routinely
+    negative and a naive divide would invert the comparison exactly when it matters.
+    Whether up is *good* is not decided here: that is polarity, and it lives in
+    `web/src/lib/polarity.ts` so the UI owns presentation.
+    """
+    ordered = monthly.sort_index()
+    baseline = float(ordered.mean()) if not ordered.empty else None
+    delta_pct = None
+    if baseline is not None and baseline != 0:
+        delta_pct = (value - baseline) / abs(baseline)
+    return {
+        "key": key,
+        "value": float(value),
+        "baseline": baseline,
+        "delta_pct": delta_pct,
+        "baseline_months": int(len(ordered)),
+        "sparkline": [float(v) for v in ordered.tail(SPARKLINE_MONTHS).tolist()],
+    }
+
+
+def _monthly_savings_rates(real: pd.DataFrame, months: set[str]) -> pd.Series:
+    """Savings rate per complete month, skipping months with no meaningful income —
+    same floor the trend chart uses, for the same reason (see Fix 2)."""
+    income = _monthly_series(real, "income", months)
+    expense = _monthly_series(real, "expense", months).abs()
+    rates = {}
+    for month_key in income.index:
+        month_income = float(income.get(month_key, 0.0))
+        if month_income < MIN_MONTHLY_INCOME_FOR_RATE:
+            continue
+        rates[month_key] = (month_income - float(expense.get(month_key, 0.0))) / month_income
+    return pd.Series(rates, dtype=float)
+
+
+def build_net_worth(
+    acct_df: pd.DataFrame, tx_df: pd.DataFrame | None = None, lang: str = "en"
+) -> dict[str, Any]:
     """Port of `_section_net_worth`'s data (not its widgets). No owner filtering —
     the Streamlit version's `selected_owners` came from the sidebar, which R2 has
-    no equivalent of yet."""
+    no equivalent of yet.
+
+    `tx_df` is the **unfiltered** enriched transaction frame, used only to date each
+    account's last activity for the dormant-account signal. It must stay unfiltered: a
+    short period filter would otherwise make every account look dormant.
+    """
+    empty = {
+        "net_worth": 0.0,
+        "total_assets": 0.0,
+        "total_liabilities": 0.0,
+        "asset_mix": [],
+        "owner_balances": [],
+        "credit_utilization": [],
+        "stale_accounts": [],
+        "dormant_accounts": [],
+        "forked_accounts": [],
+    }
     if acct_df.empty:
-        return {
-            "net_worth": 0.0,
-            "total_assets": 0.0,
-            "total_liabilities": 0.0,
-            "asset_mix": [],
-            "owner_balances": [],
-            "credit_utilization": [],
-            "stale_accounts": [],
-            "forked_accounts": [],
-        }
+        return empty
 
     assets_df = acct_df[acct_df["account_type"].isin(["depository", "investment"])].copy()
     credit_df = acct_df[acct_df["account_type"] == "credit"].copy()
@@ -83,17 +218,45 @@ def build_net_worth(acct_df: pd.DataFrame, lang: str = "en") -> dict[str, Any]:
     total_liabilities = float(credit_df["balance_current"].sum())
     net_worth = total_assets - total_liabilities
 
-    stale_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=_STALE_BALANCE_DAYS)
-    stale_df = acct_df[pd.to_datetime(acct_df["updated_at"], utc=True) < stale_cutoff]
+    now = pd.Timestamp.now(tz="UTC")
+
+    # --- Signal 1: sync health (last balance refresh), Fix 5 ------------------------
+    updated = pd.to_datetime(acct_df["updated_at"], utc=True)
+    stale_df = acct_df[updated < now - pd.Timedelta(days=SYNC_STALE_DAYS)]
     stale_accounts = [
         {
+            "account_key": row["account_key"],
             "account_name": row["account_name"],
-            "days_stale": int(
-                (pd.Timestamp.now(tz="UTC") - pd.to_datetime(row["updated_at"], utc=True)).days
-            ),
+            "days_stale": int((now - pd.to_datetime(row["updated_at"], utc=True)).days),
         }
         for _, row in stale_df.iterrows()
     ]
+
+    # --- Signal 2: dormancy (last transaction), Fix 5 -------------------------------
+    dormant_accounts: list[dict[str, Any]] = []
+    if tx_df is not None and not tx_df.empty:
+        last_activity = tx_df.groupby("account_key")["date"].max()
+        today = pd.Timestamp(date.today())
+        for _, row in acct_df.iterrows():
+            balance = float(row["balance_current"])
+            if balance == 0.0:
+                # A dormant account with nothing in it needs no attention.
+                continue
+            last_seen = last_activity.get(row["account_key"])
+            if pd.isna(last_seen):
+                continue
+            days_inactive = int((today - pd.Timestamp(last_seen).normalize()).days)
+            if days_inactive >= DORMANT_DAYS:
+                dormant_accounts.append(
+                    {
+                        "account_key": row["account_key"],
+                        "account_name": row["account_name"],
+                        "owner_name": _clean(row["owner_name"]),
+                        "days_inactive": days_inactive,
+                        "balance": balance,
+                    }
+                )
+        dormant_accounts.sort(key=lambda r: r["days_inactive"], reverse=True)
 
     identifiable = acct_df.dropna(subset=_IDENTITY_COLS)
     forked_accounts: list[str] = []
@@ -110,16 +273,63 @@ def build_net_worth(acct_df: pd.DataFrame, lang: str = "en") -> dict[str, Any]:
             for subtype_label, balance in assets_df.groupby("subtype_label")["balance_current"].sum().items()
         ]
 
-    owner_balances = []
+    # --- Owner balances: one row per OWNER, not per account (Fix 4) -----------------
+    # Emitting a row per account left Recharts drawing N bars whose x-axis label took
+    # only two distinct values, so "Alexie"/"Jacob" repeated at irregular intervals.
+    # Streamlit's equivalent is a stacked bar (x=owner, colour=account_type); this is
+    # that shape. Per-account detail moves into `accounts` for the tooltip.
+    owner_rows: dict[str, dict[str, Any]] = {}
     for _, row in acct_df.iterrows():
-        val = row["balance_current"] if row["account_type"] != "credit" else -row["balance_current"]
-        owner_balances.append(
+        owner = _clean(row["owner_name"]) or "Unknown"
+        account_type = row["account_type"]
+        raw = float(row["balance_current"])
+        # Credit balances are money owed: negate so liabilities sit below the zero line.
+        signed = -raw if account_type == "credit" else raw
+        bucket = account_type if account_type in ("depository", "investment", "credit") else "other"
+        entry = owner_rows.setdefault(
+            owner,
             {
-                "owner": _clean(row["owner_name"]) or "Unknown",
-                "value": float(val),
-                "type": row["account_type"],
+                "owner": owner,
+                "depository": 0.0,
+                "investment": 0.0,
+                "credit": 0.0,
+                "other": 0.0,
+                "net": 0.0,
+                "accounts": [],
+            },
+        )
+        entry[bucket] += signed
+        entry["net"] += signed
+        entry["accounts"].append(
+            {
+                "account_name": row["account_name"],
+                "type": account_type,
+                "value": signed,
+                "short_name": f"{_label_subtype(row['account_subtype'], lang)} {owner}",
+                "_mask": _clean(row["mask"]),
             }
         )
+    owner_balances = sorted(owner_rows.values(), key=lambda r: r["net"], reverse=True)
+
+    # --- Disambiguate short names within each owner (Item 4) ------------------------
+    # `short_name` above is "{subtype label} {owner}" (e.g. "TFSA Jacob") -- short in
+    # the common one-account-per-subtype case. When an owner has more than one account
+    # sharing the same subtype label (two credit cards, two TFSAs), that collides --
+    # append a mask suffix, the same "••••NNNN" convention `PlaidIngestor` already
+    # uses for `account_name`, to ONLY the colliding accounts so the common case
+    # stays short.
+    for entry in owner_balances:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for account in entry["accounts"]:
+            groups.setdefault(account["short_name"], []).append(account)
+        for accounts in groups.values():
+            if len(accounts) > 1:
+                for account in accounts:
+                    mask = account["_mask"]
+                    if mask:
+                        account["short_name"] = f"{account['short_name']} ••••{mask}"
+        for account in entry["accounts"]:
+            del account["_mask"]
 
     credit_utilization = []
     for _, row in credit_df.iterrows():
@@ -127,6 +337,7 @@ def build_net_worth(acct_df: pd.DataFrame, lang: str = "en") -> dict[str, Any]:
         limit, is_manual = _effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
         credit_utilization.append(
             {
+                "account_key": row["account_key"],
                 "account_name": row["account_name"],
                 "owner_name": _clean(row["owner_name"]),
                 "current": current,
@@ -144,13 +355,25 @@ def build_net_worth(acct_df: pd.DataFrame, lang: str = "en") -> dict[str, Any]:
         "owner_balances": owner_balances,
         "credit_utilization": credit_utilization,
         "stale_accounts": stale_accounts,
+        "dormant_accounts": dormant_accounts,
         "forked_accounts": forked_accounts,
     }
 
 
-def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
+def build_overview(
+    df: pd.DataFrame, acct_df: pd.DataFrame, all_time_df: pd.DataFrame | None = None
+) -> dict[str, Any]:
     """Port of `_section_overview`'s data. `df` must already be enriched
-    (`prepare_transactions`) and duplicate-excluded."""
+    (`prepare_transactions`) and duplicate-excluded.
+
+    `all_time_df` is the same frame with every filter EXCEPT the period applied — see
+    `api/filters.py`, invariant 1. Headline figures and the monthly/weekly averages read
+    the period-filtered `df`; trends, the 12-month category breakdowns, and the emergency
+    fund read `all_time_df`, so picking a 30-day window doesn't collapse a year-long trend
+    line to a single point. Defaults to `df` for callers with no period filter.
+    """
+    if all_time_df is None:
+        all_time_df = df
     empty_result = {
         "income": 0.0,
         "expenses": 0.0,
@@ -161,6 +384,18 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
         "avg_monthly_expense": 0.0,
         "avg_weekly_income": 0.0,
         "avg_monthly_income": 0.0,
+        "avg_monthly_net": 0.0,
+        "complete_months": 0,
+        # Same four keys as the populated path, so the UI never branches on presence.
+        "metrics": {
+            key: _build_metric(key, 0.0, pd.Series(dtype=float))
+            for key in (
+                "avg_monthly_income",
+                "avg_monthly_expense",
+                "avg_monthly_net",
+                "savings_rate",
+            )
+        },
         "top_categories": [],
         "month_over_month": [],
         "emergency_fund_months": None,
@@ -174,19 +409,43 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
     income = float(real[real["tx_type"] == "income"]["adjusted_amount"].sum())
     expenses = float(abs(real[real["tx_type"] == "expense"]["adjusted_amount"].sum()))
     net_flow = income - expenses
-    savings_rate = (net_flow / income * 100) if income > 0 else 0.0
+    # Fraction, not percentage points — see the unit contract in the module docstring.
+    savings_rate = (net_flow / income) if income > 0 else 0.0
     flagged_count = int(df["is_outlier"].sum())
 
+    # Weekly averages keep the zero-filled unstack: an inactive week is a real zero.
     weekly_totals = real.groupby(["week", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
-    monthly_totals = real.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0)
-
     avg_weekly_expense = float(weekly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0)
-    avg_monthly_expense = float(monthly_totals.get("expense", pd.Series(dtype=float)).abs().mean() or 0.0)
     avg_weekly_income = float(weekly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0)
-    avg_monthly_income = float(monthly_totals.get("income", pd.Series(dtype=float)).mean() or 0.0)
 
-    max_date = df["date"].max()
-    bounded_all_time = df[df["date"] >= max_date - pd.DateOffset(months=12)]
+    # Monthly averages count only months observed in full (Fix 3c).
+    months = complete_month_keys(df)
+    monthly_expense_series = _monthly_series(real, "expense", months)
+    monthly_income_series = _monthly_series(real, "income", months)
+    avg_monthly_expense = float(monthly_expense_series.abs().mean() or 0.0)
+    avg_monthly_income = float(monthly_income_series.mean() or 0.0)
+    # The tile beside these two used the ALL-TIME net_flow, so it was larger than its
+    # neighbours by however many months of history existed (Fix 3a).
+    avg_monthly_net = avg_monthly_income - avg_monthly_expense
+
+    # Baselines come from ALL history, not the selected period — comparing the period
+    # against itself would always report a delta of zero.
+    all_time_months = complete_month_keys(all_time_df)
+    all_time_real = all_time_df[all_time_df["tx_type"] != "transfer"]
+    at_income = _monthly_series(all_time_real, "income", all_time_months)
+    at_expense = _monthly_series(all_time_real, "expense", all_time_months).abs()
+    at_net = at_income.subtract(at_expense, fill_value=0.0)
+    metrics = {
+        "avg_monthly_income": _build_metric("avg_monthly_income", avg_monthly_income, at_income),
+        "avg_monthly_expense": _build_metric("avg_monthly_expense", avg_monthly_expense, at_expense),
+        "avg_monthly_net": _build_metric("avg_monthly_net", avg_monthly_net, at_net),
+        "savings_rate": _build_metric(
+            "savings_rate", savings_rate, _monthly_savings_rates(all_time_real, all_time_months)
+        ),
+    }
+
+    max_date = all_time_df["date"].max()
+    bounded_all_time = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=12)]
 
     top_cats_df = (
         bounded_all_time[bounded_all_time["tx_type"] == "expense"]
@@ -215,11 +474,16 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
             for _, row in mom_grp.iterrows()
         ]
 
-    liquid_assets = float(acct_df[acct_df["account_type"].isin(["depository"])]["balance_current"].sum())
-    monthly_expenses_series = df[df["tx_type"] == "expense"].groupby("month")["adjusted_amount"].sum().abs()
+    # An account frame can legitimately be empty (dashboard-only deploys, or a fresh
+    # database), in which case there is no liquid balance to divide by.
+    liquid_assets = 0.0
+    if not acct_df.empty and "account_type" in acct_df.columns:
+        liquid_assets = float(acct_df[acct_df["account_type"].isin(["depository"])]["balance_current"].sum())
+    # Coverage is a property of your life, not of the window you happen to be looking at,
+    # so this averages over all history rather than the selected period.
     emergency_fund_months = None
-    if not monthly_expenses_series.empty:
-        avg_monthly_expenses = monthly_expenses_series.mean()
+    if not at_expense.empty:
+        avg_monthly_expenses = float(at_expense.mean())
         if avg_monthly_expenses > 0:
             emergency_fund_months = float(liquid_assets / avg_monthly_expenses)
 
@@ -234,28 +498,38 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
         for _, row in income_src_df.iterrows()
     ]
 
+    # --- Savings-rate trend (Fix 2) -------------------------------------------------
+    # The frozen Streamlit version divides by `income.clip(lower=0.01)`, so a $0-income
+    # month reports millions of percent. A month with no meaningful income has no
+    # meaningful savings rate; say so with None and let the chart draw a gap.
     savings_rate_trend = []
-    monthly = (
-        df[df["tx_type"] != "transfer"]
-        .groupby("month")
-        .apply(
-            lambda g: pd.Series(
+    non_transfer = all_time_df[all_time_df["tx_type"] != "transfer"]
+    if not non_transfer.empty:
+        by_month = non_transfer.groupby(["month", "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0.0)
+        current_month = date.today().strftime("%Y-%m")
+        # Excludes only the in-progress current month, not the stricter 28-day-coverage
+        # rule complete_month_keys applies elsewhere (Fix 3c) — that rule is for
+        # averages, where a ragged edge month would skew the mean, but this is a trend
+        # line over full history, where a genuinely partial *historical* month (e.g. the
+        # very first month of data) is still real data worth showing. Only today's
+        # still-accumulating month has a ratio that visibly moves with every new
+        # transaction, which is what read as "random".
+        for month_key in sorted(k for k in by_month.index if k != current_month):
+            month_income = float(by_month.get("income", pd.Series(dtype=float)).get(month_key, 0.0))
+            month_expenses = abs(float(by_month.get("expense", pd.Series(dtype=float)).get(month_key, 0.0)))
+            rate = (
+                (month_income - month_expenses) / month_income
+                if month_income >= MIN_MONTHLY_INCOME_FOR_RATE
+                else None
+            )
+            savings_rate_trend.append(
                 {
-                    "income": g.loc[g["tx_type"] == "income", "adjusted_amount"].sum(),
-                    "expenses": abs(g.loc[g["tx_type"] == "expense", "adjusted_amount"].sum()),
+                    "month": month_key,
+                    "savings_rate": rate,
+                    "income": month_income,
+                    "expenses": month_expenses,
                 }
             )
-        )
-        .reset_index()
-    )
-    if not monthly.empty:
-        monthly["savings_rate"] = (
-            (monthly["income"] - monthly["expenses"]) / monthly["income"].clip(lower=0.01) * 100
-        )
-        savings_rate_trend = [
-            {"month": row["month"], "savings_rate": float(row["savings_rate"])}
-            for _, row in monthly.iterrows()
-        ]
 
     return {
         "income": income,
@@ -267,12 +541,40 @@ def build_overview(df: pd.DataFrame, acct_df: pd.DataFrame) -> dict[str, Any]:
         "avg_monthly_expense": avg_monthly_expense,
         "avg_weekly_income": avg_weekly_income,
         "avg_monthly_income": avg_monthly_income,
+        "avg_monthly_net": avg_monthly_net,
+        "complete_months": len(months),
+        "metrics": metrics,
         "top_categories": top_categories,
         "month_over_month": month_over_month,
         "emergency_fund_months": emergency_fund_months,
         "income_breakdown": income_breakdown,
         "savings_rate_trend": savings_rate_trend,
     }
+
+
+def _wide_flow_series(df: pd.DataFrame, key: str) -> list[dict[str, Any]]:
+    """Income/expense/net totals per period, in **wide** rows.
+
+    Long rows (`{period, tx_type, amount}`) forced the frontend to pivot by matching on
+    the `tx_type` string, and it matched on `"INCOME"`/`"EXPENSE"` while this module
+    emits lowercase — so both `<Bar>`s bound to `undefined` and the chart rendered axes
+    with no bars (Fix 6). Emitting wide rows removes the pivot, and with it the bug class.
+    """
+    non_transfer = df[df["tx_type"] != "transfer"]
+    if non_transfer.empty:
+        return []
+    grouped = non_transfer.groupby([key, "tx_type"])["adjusted_amount"].sum().unstack(fill_value=0.0)
+    income_col = grouped.get("income", pd.Series(0.0, index=grouped.index))
+    expense_col = grouped.get("expense", pd.Series(0.0, index=grouped.index)).abs()
+    return [
+        {
+            key: period,
+            "income": float(income_col.get(period, 0.0)),
+            "expenses": float(expense_col.get(period, 0.0)),
+            "net": float(income_col.get(period, 0.0) - expense_col.get(period, 0.0)),
+        }
+        for period in sorted(grouped.index)
+    ]
 
 
 def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
@@ -296,46 +598,44 @@ def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
 
     real = df[df["tx_type"] != "transfer"]
     income = float(real[real["tx_type"] == "income"]["adjusted_amount"].sum())
-    expenses = float(real[real["tx_type"] == "expense"]["adjusted_amount"].sum())
-    net_flow = income + expenses
+    # Positive magnitude, matching build_overview. This builder used to return a signed
+    # (negative) figure while build_overview returned a positive one, so the Cash Flow
+    # tab printed a negative number in red under "Total Expenses" (Fix 8).
+    expenses = float(abs(real[real["tx_type"] == "expense"]["adjusted_amount"].sum()))
+    net_flow = income - expenses
     transfer_count = int((df["tx_type"] == "transfer").sum())
     flagged_count = int(df["is_outlier"].sum())
-    savings_rate = (net_flow / income * 100) if income > 0 else 0.0
+    savings_rate = (net_flow / income) if income > 0 else 0.0
 
-    mom_summary = (
-        df[df["tx_type"] != "transfer"].groupby(["month", "tx_type"], as_index=False)["adjusted_amount"].sum()
-    )
-    mom_summary.loc[mom_summary["tx_type"] == "expense", "adjusted_amount"] = mom_summary.loc[
-        mom_summary["tx_type"] == "expense", "adjusted_amount"
-    ].abs()
-    month_over_month = [
-        {"month": row["month"], "tx_type": row["tx_type"], "amount": float(row["adjusted_amount"])}
-        for _, row in mom_summary.iterrows()
-    ]
+    month_over_month = _wide_flow_series(df, "month")
+    weekly_trend = _wide_flow_series(df, "week")
 
-    week_summary = (
-        df[df["tx_type"] != "transfer"].groupby(["week", "tx_type"], as_index=False)["adjusted_amount"].sum()
-    )
-    week_summary.loc[week_summary["tx_type"] == "expense", "adjusted_amount"] = week_summary.loc[
-        week_summary["tx_type"] == "expense", "adjusted_amount"
-    ].abs()
-    weekly_trend = [
-        {"week": row["week"], "tx_type": row["tx_type"], "amount": float(row["adjusted_amount"])}
-        for _, row in week_summary.iterrows()
-    ]
-
-    spend = (
-        real[real["tx_type"] == "expense"]
-        .groupby("date", as_index=False)["adjusted_amount"]
-        .sum()
-        .sort_values("date")
-    )
-    spend["abs_spend"] = spend["adjusted_amount"].abs()
-    spend["rolling_30d"] = spend["abs_spend"].rolling(30, min_periods=1).sum()
-    rolling_30d_spend = [
-        {"date": row["date"].date().isoformat(), "amount": float(row["rolling_30d"])}
-        for _, row in spend.iterrows()
-    ]
+    # --- Rolling 30-day spend (Fix 7) ----------------------------------------------
+    # `.rolling(30)` over a date-GROUPED frame counts 30 rows, not 30 days: with sparse
+    # days a nominal "30-day" window silently spans months. Reindex to a continuous
+    # daily index and use a time-based window so the label is true.
+    rolling_30d_spend: list[dict[str, Any]] = []
+    expense_rows = real[real["tx_type"] == "expense"]
+    if not expense_rows.empty:
+        daily = expense_rows.groupby("date")["adjusted_amount"].sum().abs().sort_index()
+        full_index = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+        daily = daily.reindex(full_index, fill_value=0.0)
+        rolling = daily.rolling(f"{_ROLLING_SPEND_WINDOW_DAYS}D").sum()
+        # Drop the ramp out of a partial window, which reads as a spending trend that
+        # isn't real. Keep everything when there is less than one full window of data —
+        # an empty chart is worse than a short one.
+        span_days = (daily.index.max() - daily.index.min()).days + 1
+        if span_days >= _ROLLING_SPEND_WINDOW_DAYS:
+            cutoff = daily.index.min() + pd.Timedelta(days=_ROLLING_SPEND_WINDOW_DAYS - 1)
+            rolling = rolling[rolling.index >= cutoff]
+        rolling_30d_spend = [
+            {
+                "date": stamp.date().isoformat(),
+                "amount": float(total),
+                "daily_avg": float(total) / _ROLLING_SPEND_WINDOW_DAYS,
+            }
+            for stamp, total in rolling.items()
+        ]
 
     split = real.groupby(["month", "owner_name"], as_index=False)["adjusted_amount"].sum()
     monthly_net_by_owner = [
@@ -417,6 +717,247 @@ def build_budget(df: pd.DataFrame, budget_rows: list[dict[str, Any]]) -> dict[st
         )
 
     return {"month": current_month_str, "items": items}
+
+
+def _is_day_of_month_regular(dates: pd.Series, tolerance_days: int) -> bool:
+    """True if every date in `dates` falls within `tolerance_days` of a common
+    day-of-month, handling month-end wraparound (day 30 and day 1-2 are "close"
+    across a month boundary; a plain numeric mean gets this wrong -- the mean of
+    [1, 2, 29, 30] is ~15.5, nowhere near the actual cluster). Uses a circular mean:
+    represent each day-of-month as an angle around a 30-day circle, average the unit
+    vectors, then check every date's angular distance from that mean is within
+    tolerance.
+    """
+    if len(dates) < 2:
+        return True
+    days = dates.dt.day.to_numpy(dtype=float)
+    angles = days / 30.0 * 2 * np.pi
+    mean_angle = np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))
+    diffs = np.abs((angles - mean_angle + np.pi) % (2 * np.pi) - np.pi)
+    max_day_diff = (diffs / (2 * np.pi) * 30.0).max()
+    return bool(max_day_diff <= tolerance_days)
+
+
+def build_home(all_time_df: pd.DataFrame, net_worth_history: list[dict[str, Any]]) -> dict[str, Any]:
+    """Insights for the Home tab: a daily-check-in status surface, versus the four
+    existing tabs which stay the "go deeper" analysis layer (PLAN.md's insight-first
+    dashboard work).
+
+    `all_time_df` must be enriched, duplicate-excluded, and UNFILTERED -- every insight
+    here compares against the user's own full history, the same reasoning `_build_metric`
+    baselines use. `net_worth_history` is `DatabaseClient.get_net_worth_history()`'s
+    return value; it is DB-sourced (from `account_balance_snapshots`), not derivable from
+    `all_time_df`.
+    """
+    net_worth_trend = [{"date": row["date"], "net_worth": row["net_worth"]} for row in net_worth_history]
+
+    # --- Month-over-month net worth delta (Home tab insight) ------------------------
+    # `net_worth_history`/`net_worth_trend` is sampled DAILY (one row per
+    # `account_balance_snapshots` calendar day), not monthly -- so `trend[-2]` would be
+    # yesterday, not a month ago. Walk back from the latest point to the closest sample
+    # that is at least a full calendar month older, using `DateOffset(months=1)` rather
+    # than a fixed day count so it lines up with an actual prior month, not ~30 days.
+    net_worth_mom_delta: float | None = None
+    if len(net_worth_trend) >= 2:
+        latest = net_worth_trend[-1]
+        latest_date = pd.to_datetime(latest["date"])
+        one_month_prior = latest_date - pd.DateOffset(months=1)
+        prior_candidates = [r for r in net_worth_trend if pd.to_datetime(r["date"]) <= one_month_prior]
+        if prior_candidates:
+            net_worth_mom_delta = latest["net_worth"] - prior_candidates[-1]["net_worth"]
+
+    if all_time_df.empty:
+        return {
+            "net_worth_trend": net_worth_trend,
+            "net_worth_mom_delta": net_worth_mom_delta,
+            "recurring_monthly_spend": 0.0,
+            "recurring_items": [],
+            "top_merchants": [],
+            "cash_flow_projection": None,
+            "category_drift": [],
+            "subscriptions": [],
+            "biggest_expense_this_month": None,
+            "upcoming_recurring": [],
+        }
+
+    real = all_time_df[all_time_df["tx_type"] != "transfer"]
+    months = complete_month_keys(all_time_df)
+    today = date.today()
+    current_month_str = today.strftime("%Y-%m")
+
+    # --- Recurring / committed monthly spend (Q4) -----------------------------------
+    # `is_recurring` is user-set and stored (see the transactions-tab checkbox) but was
+    # not surfaced anywhere before this. The monthly figure averages only complete
+    # months (Fix 3c's rule), same as every other "typical month" number in this module.
+    recurring = real[(real["tx_type"] == "expense") & real["is_recurring"].fillna(False)]
+    recurring_by_desc = (
+        recurring.groupby("description")["adjusted_amount"].sum().abs().sort_values(ascending=False)
+    )
+    recurring_items = [
+        {"description": desc, "amount": float(amount)} for desc, amount in recurring_by_desc.items()
+    ]
+    recurring_monthly_series = _monthly_series(recurring, "expense", months).abs()
+    recurring_monthly_spend = (
+        float(recurring_monthly_series.mean()) if not recurring_monthly_series.empty else 0.0
+    )
+
+    # --- Merchant-level breakdown (Q4) -----------------------------------------------
+    # `description` is unaggregated everywhere else in the app; this is the first place
+    # it's rolled up per merchant. Bounded to the trailing 12 months, same window
+    # `build_overview`'s top_categories uses, so a one-off purchase from years ago
+    # doesn't crowd out what's actually current.
+    max_date = all_time_df["date"].max()
+    trailing_12mo = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=12)]
+    merchant_df = (
+        trailing_12mo[trailing_12mo["tx_type"] == "expense"]
+        .groupby("description", as_index=False)["adjusted_amount"]
+        .sum()
+        .assign(abs_amount=lambda x: x["adjusted_amount"].abs())
+        .nlargest(10, "abs_amount")
+        .sort_values("abs_amount", ascending=False)
+    )
+    top_merchants = [
+        {"description": row["description"], "amount": float(row["abs_amount"])}
+        for _, row in merchant_df.iterrows()
+    ]
+
+    # --- Month-end cash-flow projection (Q4) ------------------------------------------
+    # Same day-elapsed/days-in-month projection formula `build_budget` uses for
+    # per-category projections, applied to the whole month's income/expenses instead.
+    cash_flow_projection: dict[str, Any] | None = None
+    # Biggest single expense this month (Home tab insight) -- reuses the same
+    # current-month frame the projection above already builds, rather than
+    # re-filtering `real` from scratch.
+    biggest_expense: dict[str, Any] | None = None
+    if current_month_str in all_time_df["month"].values:
+        month_df = real[real["month"] == current_month_str]
+        spent_so_far = float(month_df[month_df["tx_type"] == "expense"]["adjusted_amount"].abs().sum())
+        income_so_far = float(month_df[month_df["tx_type"] == "income"]["adjusted_amount"].sum())
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        days_elapsed = max(today.day, 1)
+        projection_factor = days_in_month / days_elapsed
+        cash_flow_projection = {
+            "month": current_month_str,
+            "spent_so_far": spent_so_far,
+            "income_so_far": income_so_far,
+            "projected_expenses": spent_so_far * projection_factor,
+            "projected_income": income_so_far * projection_factor,
+            "days_elapsed": days_elapsed,
+            "days_in_month": days_in_month,
+        }
+
+        month_expenses = month_df[month_df["tx_type"] == "expense"]
+        if not month_expenses.empty:
+            row = month_expenses.loc[month_expenses["adjusted_amount"].abs().idxmax()]
+            biggest_expense = {
+                "description": row["description"],
+                "amount": float(abs(row["adjusted_amount"])),
+                "date": row["date"].strftime("%Y-%m-%d")
+                if hasattr(row["date"], "strftime")
+                else str(row["date"]),
+            }
+
+    # --- Category drift vs. the user's own baseline (Q4) ------------------------------
+    # Baseline is the category's average spend across the user's own complete months,
+    # not a fixed budget -- "40% over your usual grocery spend," not "40% over budget."
+    category_drift: list[dict[str, Any]] = []
+    if current_month_str in all_time_df["month"].values:
+        this_month_expense = real[(real["month"] == current_month_str) & (real["tx_type"] == "expense")]
+        this_month_by_cat = this_month_expense.groupby("category")["adjusted_amount"].sum().abs()
+        history_expense = real[(real["tx_type"] == "expense") & real["month"].isin(months)]
+        monthly_by_cat = history_expense.groupby(["month", "category"])["adjusted_amount"].sum().abs()
+        baseline_by_cat = monthly_by_cat.groupby("category").mean()
+        for category in sorted(set(this_month_by_cat.index) | set(baseline_by_cat.index)):
+            baseline_amount = baseline_by_cat.get(category)
+            if baseline_amount is None or baseline_amount == 0:
+                # No baseline to compare against yet -- a brand-new category this
+                # month has no "usual" to drift from.
+                continue
+            current_amount = float(this_month_by_cat.get(category, 0.0))
+            category_drift.append(
+                {
+                    "category": category,
+                    "current": current_amount,
+                    "baseline": float(baseline_amount),
+                    "drift_pct": (current_amount - baseline_amount) / baseline_amount,
+                }
+            )
+        category_drift.sort(key=lambda row: abs(row["drift_pct"]), reverse=True)
+        category_drift = category_drift[:8]
+
+    # --- Subscription detection (Q4) --------------------------------------------------
+    # Independent of the user-set `is_recurring` flag above: a description that recurs
+    # in at least 3 of the trailing 6 months at a near-constant amount (within 15% of
+    # its own mean) is flagged automatically, catching subscriptions the user never
+    # went and hand-marked.
+    #
+    # Amount-stability alone is not enough: a restaurant the user visits often can have
+    # fairly consistent per-visit pricing and satisfy the same-amount/3-plus-months test
+    # (real case: "Cafe Du Parquet"). `category` can't discriminate this away -- per
+    # CLAUDE.md, the ML classifier is still a Phase-1 stub, so almost every real
+    # transaction is `category == "uncategorized"`. A real subscription bills on a
+    # near-fixed day each month; a casual repeat visit doesn't, so day-of-month
+    # regularity is the signal that's actually available. `DAY_OF_MONTH_TOLERANCE_DAYS`
+    # is a starting guess -- revisit it if real data starts mis-firing either way.
+    trailing_6mo = all_time_df[all_time_df["date"] >= max_date - pd.DateOffset(months=6)]
+    expense_6mo = trailing_6mo[trailing_6mo["tx_type"] == "expense"]
+    subscriptions: list[dict[str, Any]] = []
+    for description, group in expense_6mo.groupby("description"):
+        months_seen = group["month"].nunique()
+        if months_seen < 3:
+            continue
+        amounts = group["adjusted_amount"].abs()
+        mean_amount = float(amounts.mean())
+        if mean_amount <= 0:
+            continue
+        spread = float(amounts.max() - amounts.min()) / mean_amount
+        if spread > 0.15:
+            continue
+        if not _is_day_of_month_regular(group["date"], tolerance_days=DAY_OF_MONTH_TOLERANCE_DAYS):
+            continue
+        subscriptions.append(
+            {"description": description, "average_amount": mean_amount, "months_seen": int(months_seen)}
+        )
+    subscriptions.sort(key=lambda row: row["average_amount"], reverse=True)
+
+    # --- Upcoming recurring charges (Home tab insight) --------------------------------
+    # Projects each recurring description's next expected charge from its own history:
+    # the typical gap between occurrences, applied to the most recent one. Uses the
+    # MEDIAN interval rather than the mean -- one skipped or late month shouldn't skew
+    # the projection the way an outlier drags a mean.
+    upcoming_recurring: list[dict[str, Any]] = []
+    for description, group in recurring.groupby("description"):
+        occurrence_dates = group["date"].sort_values()
+        if len(occurrence_dates) < 2:
+            continue
+        intervals = occurrence_dates.diff().dropna().dt.days
+        typical_interval_days = float(intervals.median())
+        if typical_interval_days <= 0:
+            continue
+        last_date = occurrence_dates.iloc[-1]
+        next_expected = last_date + pd.Timedelta(days=typical_interval_days)
+        upcoming_recurring.append(
+            {
+                "description": description,
+                "amount": float(group["adjusted_amount"].abs().mean()),
+                "next_expected_date": next_expected.strftime("%Y-%m-%d"),
+                "typical_interval_days": round(typical_interval_days),
+            }
+        )
+    upcoming_recurring.sort(key=lambda row: row["next_expected_date"])
+
+    return {
+        "net_worth_trend": net_worth_trend,
+        "net_worth_mom_delta": net_worth_mom_delta,
+        "recurring_monthly_spend": recurring_monthly_spend,
+        "recurring_items": recurring_items,
+        "top_merchants": top_merchants,
+        "cash_flow_projection": cash_flow_projection,
+        "category_drift": category_drift,
+        "subscriptions": subscriptions[:10],
+        "biggest_expense_this_month": biggest_expense,
+        "upcoming_recurring": upcoming_recurring,
+    }
 
 
 def build_anomalies(df: pd.DataFrame) -> list[dict[str, Any]]:

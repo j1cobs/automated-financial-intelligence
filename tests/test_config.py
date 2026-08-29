@@ -137,6 +137,19 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.jwt_secret, "super-secret")
         self.assertEqual(settings.frontend_origin, "https://example.vercel.app")
 
+    def test_categorizer_mode_defaults_to_cascade(self) -> None:
+        settings = self._load({"DATABASE_URL": "postgresql://localhost/db"})
+        self.assertEqual(settings.categorizer_mode, "cascade")
+
+    def test_categorizer_mode_reads_env_var(self) -> None:
+        settings = self._load(
+            {
+                "DATABASE_URL": "postgresql://localhost/db",
+                "CATEGORIZER_MODE": "placeholder",
+            }
+        )
+        self.assertEqual(settings.categorizer_mode, "placeholder")
+
 
 class EnforceTlsTests(unittest.TestCase):
     def test_appends_sslmode_for_remote_host(self) -> None:

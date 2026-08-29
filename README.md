@@ -71,6 +71,28 @@ To reset the demo data, recreate the volume — the seed reassigns its sample id
 docker compose down -v && docker compose up -d && python scripts/seed_sample_data.py
 ```
 
+## React dashboard (`web/` + `api/`)
+
+There's a second dashboard: a React + TypeScript + FastAPI stack that's where new dashboard work
+goes. The Streamlit app above stays as a frozen reference implementation and fallback — it isn't
+getting new features, but it isn't going away either.
+
+To run it locally, in two terminals:
+
+```bash
+uvicorn api.main:app --reload    # the API, port 8000 by default
+cd web && npm run dev            # the React dashboard — needs the API running
+```
+
+Point the frontend at a non-default API with the `VITE_API_URL` env var.
+
+Five tabs: **Home** (the default landing tab — a daily-check-in surface with status tiles for net
+worth, committed monthly spend, and projected month-end spend, each clickable to jump to the tab
+with more detail on that metric; a net worth trend chart; and insight panels for top merchants,
+recurring/committed spend, category drift against your own baseline, and detected subscriptions),
+**Overview**, **Cash Flow**, **Budget**, and **Transactions** (its ledger table virtualizes
+automatically above 50 rows, for performance on large transaction histories).
+
 ## Configuration reference
 
 All configuration is read by `core/config.py::load_settings()`, in this order: environment variables → `.streamlit/secrets.toml` → default. See `.env.example` for a filled-in template.

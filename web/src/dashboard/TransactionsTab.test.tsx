@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   QueryClient,
@@ -7,8 +7,27 @@ import {
   type UseQueryResult,
   type UseMutationResult,
 } from '@tanstack/react-query';
+import React from 'react';
+
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => React.cloneElement(children, { width: 800, height: 400 }),
+  };
+});
+
 import { TransactionsTab } from './TransactionsTab';
-import type { LedgerResponse, AnomaliesResponse, CategoriesResponse } from '../lib/types';
+import type {
+  LedgerResponse,
+  AnomaliesResponse,
+  CategoriesResponse,
+  CategoryUpdateResponse,
+} from '../lib/types';
 
 // Mock the queries and mutations
 vi.mock('../lib/queries', () => ({
@@ -111,9 +130,10 @@ function mockQueryError<T>(): UseQueryResult<T, Error> {
   } as unknown as UseQueryResult<T, Error>;
 }
 
-function mockMutation<TVariables>(
-  mutateAsync: (vars: TVariables) => Promise<void>,
-): UseMutationResult<void, Error, TVariables> {
+function mockMutation<TData, TVariables, TContext = unknown>(
+  mutateAsync: (vars: TVariables) => Promise<TData>,
+  overrides: Partial<UseMutationResult<TData, Error, TVariables, TContext>> = {},
+): UseMutationResult<TData, Error, TVariables, TContext> {
   return {
     mutate: vi.fn(),
     mutateAsync,
@@ -128,7 +148,16 @@ function mockMutation<TVariables>(
     reset: vi.fn(),
     variables: undefined,
     context: undefined,
-  } as unknown as UseMutationResult<void, Error, TVariables>;
+    ...overrides,
+  } as unknown as UseMutationResult<TData, Error, TVariables, TContext>;
+}
+
+function setDefaultMutations() {
+  mockedUseUpdateCategory.mockReturnValue(
+    mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+  );
+  mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
 }
 
 describe('TransactionsTab', () => {
@@ -137,46 +166,60 @@ describe('TransactionsTab', () => {
   });
 
   describe('Ledger loading and error states', () => {
-    it('renders loading state for ledger', () => {
+    it('renders a skeleton for ledger while loading', () => {
       mockedUseLedger.mockReturnValue(mockQueryLoading<LedgerResponse>());
       mockedUseAnomalies.mockReturnValue(mockQueryLoading<AnomaliesResponse>());
       mockedUseCategories.mockReturnValue(mockQueryLoading<CategoriesResponse>());
+      setDefaultMutations();
 
       renderComponent();
 
-      expect(screen.getByText(/loading transactions/i)).toBeInTheDocument();
+      // Both sections render a skeleton while loading (PLAN.md Phase 15, Fix 14);
+      // this is at least one of them.
+      expect(screen.getAllByRole('status', { name: 'Loading…' }).length).toBeGreaterThan(0);
     });
 
-    it('renders error state for ledger', () => {
-      mockedUseLedger.mockReturnValue(mockQueryError<LedgerResponse>());
+    it('renders error state for ledger with a retry action wired to refetch', () => {
+      const ledgerResult = mockQueryError<LedgerResponse>();
+      mockedUseLedger.mockReturnValue(ledgerResult);
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
 
       renderComponent();
 
       expect(screen.getByText(/failed to load transactions/i)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      expect(ledgerResult.refetch).toHaveBeenCalled();
     });
   });
 
   describe('Anomalies loading and error states', () => {
-    it('renders loading state for anomalies', () => {
+    it('renders a skeleton for anomalies while loading', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
       mockedUseAnomalies.mockReturnValue(mockQueryLoading<AnomaliesResponse>());
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
 
       renderComponent();
 
-      expect(screen.getByText(/loading anomalies/i)).toBeInTheDocument();
+      expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
     });
 
-    it('renders error state for anomalies', () => {
+    it('renders error state for anomalies with a retry action wired to refetch', () => {
+      const anomaliesResult = mockQueryError<AnomaliesResponse>();
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQueryError<AnomaliesResponse>());
+      mockedUseAnomalies.mockReturnValue(anomaliesResult);
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
 
       renderComponent();
 
       expect(screen.getByText(/failed to load anomalies/i)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      expect(anomaliesResult.refetch).toHaveBeenCalled();
     });
   });
 
@@ -214,9 +257,7 @@ describe('TransactionsTab', () => {
       mockedUseCategories.mockReturnValue(
         mockQuerySuccess({ categories: ['Groceries', 'Gas', 'Utilities'] }),
       );
-      mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
-      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
-      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      setDefaultMutations();
 
       renderComponent();
 
@@ -224,6 +265,80 @@ describe('TransactionsTab', () => {
       expect(screen.getByText('Gas Station')).toBeInTheDocument();
       expect(screen.getByText('Groceries')).toBeInTheDocument();
       expect(screen.getByText('John Doe')).toBeInTheDocument();
+      expect(screen.getByText('2 transactions')).toBeInTheDocument();
+    });
+
+    it('stays on the plain (unvirtualized) table at 50 transactions', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: Array.from({ length: 50 }, (_, i) => ({
+          hash: `tx-${i}`,
+          date: '2024-01-15',
+          account_name: 'Checking',
+          owner_name: null,
+          description: `Transaction ${i}`,
+          amount: -10,
+          category: null,
+          is_recurring: false,
+          is_duplicate: false,
+        })),
+      };
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      const { container } = renderComponent();
+
+      // Every row mounted -- the plain path, not the fixed-height scroll container.
+      expect(screen.getAllByText(/^Transaction \d+$/)).toHaveLength(50);
+      expect(container.querySelector('.max-h-\\[70vh\\]')).not.toBeInTheDocument();
+    });
+
+    it('switches to the virtualized table above the threshold and does not mount every row', () => {
+      // jsdom never lays elements out, so `offsetHeight`/`offsetWidth` --
+      // what @tanstack/react-virtual actually measures the scroll container
+      // with -- are always 0, which would compute an empty visible window.
+      // Stub a viewport-sized box so it windows for real.
+      const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+      const originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, value: 500 });
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 800 });
+
+      try {
+        const mockLedgerData: LedgerResponse = {
+          transactions: Array.from({ length: 200 }, (_, i) => ({
+            hash: `tx-${i}`,
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: `Transaction ${i}`,
+            amount: -10,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          })),
+        };
+        mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+        mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+        mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+        setDefaultMutations();
+
+        const { container } = renderComponent();
+
+        expect(screen.getByText('200 transactions')).toBeInTheDocument();
+        expect(container.querySelector('.max-h-\\[70vh\\]')).toBeInTheDocument();
+        // The whole point: far fewer than 200 rows actually mounted in the DOM.
+        const renderedRows = screen.getAllByText(/^Transaction \d+$/);
+        expect(renderedRows.length).toBeGreaterThan(0);
+        expect(renderedRows.length).toBeLessThan(200);
+      } finally {
+        if (originalOffsetHeight) {
+          Object.defineProperty(HTMLElement.prototype, 'offsetHeight', originalOffsetHeight);
+        }
+        if (originalOffsetWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalOffsetWidth);
+        }
+      }
     });
 
     it('renders empty ledger message when no transactions', () => {
@@ -235,33 +350,151 @@ describe('TransactionsTab', () => {
 
       expect(screen.getByText(/no transactions found/i)).toBeInTheDocument();
     });
-  });
 
-  describe('Anomalies rendering', () => {
-    it('renders anomalies table with outlier transactions', () => {
-      const mockAnomaliesData: AnomaliesResponse = {
-        anomalies: [
-          {
-            date: '2024-01-20',
-            account_name: 'Savings',
-            owner_name: 'Jane Doe',
-            description: 'Large Withdrawal',
-            amount: -5000.0,
-            category: 'Withdrawal',
-            outlier_score: 0.95,
-          },
-        ],
-      };
-
+    it('shows the three explanatory captions', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess(mockAnomaliesData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
 
       renderComponent();
 
-      expect(screen.getByText('Large Withdrawal')).toBeInTheDocument();
-      expect(screen.getByText('Jane Doe')).toBeInTheDocument();
-      expect(screen.getByText('0.950')).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /Tick Duplicate to exclude a double-posted transaction from every total and chart\. Flagged rows stay listed here so you can untick them\./i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Edit categories inline — changes persist across pipeline re-runs\./i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /Positive amounts are income or credits\. Negative amounts are expenses or debits\./i,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it('sorts by amount when the Amount header is clicked', async () => {
+      const user = userEvent.setup();
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-small',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Small charge',
+            amount: -10,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          },
+          {
+            hash: 'tx-big',
+            date: '2024-01-14',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Big charge',
+            amount: -500,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      // Default sort is by date descending: "Small charge" (Jan 15) before "Big charge" (Jan 14).
+      let rows = screen.getAllByRole('row').slice(1); // drop header row
+      expect(rows[0]).toHaveTextContent('Small charge');
+      expect(rows[1]).toHaveTextContent('Big charge');
+
+      await user.click(screen.getByRole('button', { name: /sort by amount/i }));
+
+      // First click on a new sort column sorts descending: -10 (Small charge)
+      // before -500 (Big charge).
+      rows = screen.getAllByRole('row').slice(1);
+      expect(rows[0]).toHaveTextContent('Small charge');
+      expect(rows[1]).toHaveTextContent('Big charge');
+
+      await user.click(screen.getByRole('button', { name: /sort by amount/i }));
+
+      // Second click flips to ascending: -500 (Big charge) before -10 (Small charge).
+      rows = screen.getAllByRole('row').slice(1);
+      expect(rows[0]).toHaveTextContent('Big charge');
+      expect(rows[1]).toHaveTextContent('Small charge');
+    });
+
+    it('visually distinguishes duplicate-flagged rows', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-dup',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Duplicate Charge',
+            amount: -25,
+            category: null,
+            is_recurring: false,
+            is_duplicate: true,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      const row = screen.getByText('Duplicate Charge').closest('tr');
+      expect(row).not.toBeNull();
+      expect(row?.className).toMatch(/bg-surface-2/);
+      expect(screen.getByText('Excluded')).toBeInTheDocument();
+    });
+  });
+
+  describe('Anomalies rendering', () => {
+    const mockAnomaliesData: AnomaliesResponse = {
+      anomalies: [
+        {
+          date: '2024-01-20',
+          account_name: 'Savings',
+          owner_name: 'Jane Doe',
+          description: 'Large Withdrawal',
+          amount: -5000.0,
+          category: 'Withdrawal',
+          outlier_score: 0.95,
+        },
+        {
+          date: '2024-01-18',
+          account_name: 'Checking',
+          owner_name: 'Jane Doe',
+          description: 'Odd Refund',
+          amount: 300.0,
+          category: 'Refund',
+          outlier_score: 0.4,
+        },
+      ],
+    };
+
+    it('renders the anomaly scatter plot with a point per anomaly', () => {
+      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess(mockAnomaliesData));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+
+      const { container } = renderComponent();
+
+      const points = container.querySelectorAll('.recharts-scatter-symbol');
+      expect(points.length).toBe(mockAnomaliesData.anomalies.length);
+      expect(screen.getByText(/higher score = more unusual transaction/i)).toBeInTheDocument();
     });
 
     it('renders empty anomalies message when none detected', () => {
@@ -275,10 +508,44 @@ describe('TransactionsTab', () => {
     });
   });
 
+  describe('Failed ledger edits', () => {
+    it('shows an inline error banner when a category edit fails', () => {
+      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockRejectedValue(new Error('fail')), { isError: true }),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+
+      renderComponent();
+
+      expect(
+        screen.getByText('Failed to save your change. It has been reverted — please try again.'),
+      ).toBeInTheDocument();
+    });
+
+    it('shows no error banner when every mutation is in its default (non-error) state', () => {
+      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      expect(
+        screen.queryByText('Failed to save your change. It has been reverted — please try again.'),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   describe('Category editing', () => {
     it('calls useUpdateCategory mutation when category is changed', async () => {
       const user = userEvent.setup();
-      const mockMutateAsync = vi.fn().mockResolvedValue(undefined);
+      const mockMutateAsync = vi
+        .fn()
+        .mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse);
 
       const mockLedgerData: LedgerResponse = {
         transactions: [
@@ -348,7 +615,9 @@ describe('TransactionsTab', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-      mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
       mockedUseUpdateRecurring.mockReturnValue(mockMutation(mockMutateAsync));
       mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
 
@@ -392,7 +661,9 @@ describe('TransactionsTab', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
       mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-      mockedUseUpdateCategory.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
       mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
       mockedUseUpdateDuplicate.mockReturnValue(mockMutation(mockMutateAsync));
 

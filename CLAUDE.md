@@ -7,9 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a Phase-1 build: the data path (ingest → process → persist → dashboard) is wired end-to-end first, ahead of
 the full feature set described in the original design brief. What this means concretely:
 
-- ML is stubbed — `pipeline/runner.py` uses `analytics/placeholders.py`, not the real `analytics/classifier.py` /
-  `analytics/outlier_detector.py` yet (see Architecture).
-- The dashboard implements all core views. Only ML is stubbed — the pipeline uses placeholders.
+- **Transaction categorization is live.** The pipeline runs a three-layer cascade (merchant memory → Plaid PFC → UNCATEGORIZED) via
+  `CascadeCategorizer` (Phase 18), wired via `analytics/models.py::build_models()` and gated by `CATEGORIZER_MODE`.
+  Outlier detection remains stubbed — `analytics/outlier_detector.py` is unused; only the classifier half of Phase 1's ML
+  stub is now real.
+- The dashboard implements all core views. Budget categories, category charts, and category drill-down all work.
 - Scheduled automation is not active yet — the GitHub Actions workflow is defined but does not run automatically (see
   Automation).
 
@@ -33,7 +35,11 @@ When extending, prefer wiring the existing real modules onto the live path over 
 
 - Install deps: `pip install -r requirements.txt` (requirements.txt is authoritative; pyproject.toml is minimal/incomplete)
 - Run pipeline: `python main.py`
-- Run dashboard: `streamlit run streamlit_app.py`
+- Run the Streamlit dashboard (frozen reference implementation): `streamlit run streamlit_app.py`
+- Run the API for the React dashboard: `uvicorn api.main:app --reload` (defaults to port 8000)
+- Run the React dashboard: `cd web && npm run dev`. It needs the API running; point it at a
+  non-default API with `VITE_API_URL`.
+- Web checks (all four must pass): `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`
 - Run all tests: `python -m unittest discover -s tests -v`
 - Run a single test: `python -m unittest tests.test_db_hash -v` (or `tests.test_db_hash.TestClass.test_method`)
 - Mint/repair a Plaid access token: `python scripts/plaid_link.py create --append` (sandbox is headless; production
@@ -53,26 +59,45 @@ Layered, single-direction data flow orchestrated by `pipeline/runner.py::run_pip
 ingest → classify/score → persist. `main.py` is a thin entry point that calls it.
 
 - `ingestion/` — `BaseIngestor.fetch_transactions(start_date, end_date)` returns a _normalized_ DataFrame
-  (`description`, `amount`, `account_name`, `source`, `date`, ...). `PlaidIngestor` is the only implementation;
-  `BaseIngestor` remains as the interface seam for future sources. Each real account is ingested once per run:
-  `fetch_transactions` claims an account for the first token that reveals it and skips it for later tokens, using the
-  same identity tuple `canonicalize_account_keys` matches on. That is what keeps a co-owned account visible through
-  two Plaid Items from delivering every transaction twice. `_post()`'s error logging is deliberately scrubbed: on a
-  non-2xx response it logs only `status_code`/`error_type`/`error_code` parsed from Plaid's JSON body, never the raw
-  `response.text` — the daily pipeline's stdout becomes the GitHub Actions run log, which is visible to anyone with
-  repo read access, so nothing account- or transaction-identifying (e.g. an account mask) belongs in it. Keep new log
-  statements in this file to that same standard.
-- `analytics/` — real ML lives in `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest),
-  but the pipeline currently uses `analytics/placeholders.py` (`build_placeholder_models`), which stamps
-  `category="uncategorized"`, `outlier_score=0.0`, `is_outlier=False`. The data path is wired end-to-end before ML is
-  switched on (Phase 1). When changing "the classifier," check which module `runner.py` actually imports.
+  (`description`, `amount`, `account_name`, `source`, `date`, ...) and remains the interface seam for future
+  sources; it is not delta-shaped, since a source with no pending/posted concept (a CSV import, manual entry)
+  has no `added`/`modified`/`removed` story to tell. `PlaidIngestor.sync_transactions()` (Phase 17) is a
+  Plaid-specific addition alongside it, not a change to the seam. It returns a `SyncResult` with `added` and
+  `modified` DataFrames plus `removed_ids` (the union of Plaid's explicit `removed` array and any non-null `pending_transaction_id`
+  carried by an `added`/`modified` row). It replaces `fetch_transactions` for live ingestion; `fetch_transactions` is kept as
+  a rollback fallback. Phase 18 adds four normalized fields to `_normalize()`: `merchant_name` (Plaid-cleaned), and the three
+  personal_finance_category attributes (`pfc_primary`, `pfc_detailed`, `pfc_confidence`), all nullable (absent stays None, never
+  coerced to a default). Each real account is claimed once per run: both ingestion paths claim an account for the first token
+  that reveals it and skip it for later tokens, using the same identity tuple `canonicalize_account_keys` matches on.
+  That is what keeps a co-owned account visible through two Plaid Items from delivering every transaction twice.
+  `_post()`'s error logging is deliberately scrubbed: on a non-2xx response it logs only `status_code`/`error_type`/
+  `error_code` parsed from Plaid's JSON body, never the raw `response.text` — the daily pipeline's stdout becomes
+  the GitHub Actions run log, which is visible to anyone with repo read access, so nothing account- or
+  transaction-identifying (e.g. an account mask) belongs in it. Keep new log statements in this file to that same
+  standard.
+- `analytics/` — `categorizer.py` (Phase 18) implements a three-layer cascade: merchant memory (user corrections from
+  `merchant_categories` table) → Plaid's `personal_finance_category` primary → `UNCATEGORIZED` fallback. `merchant_key()`
+  normalizes merchant identity (strips noise patterns: leading `Purchase /`, trailing city/province, trailing store numbers).
+  `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest) exist but are unused — `outlier_detector.py`
+  remains stubbed (Phase 1). `models.py::build_models(mode)` gates between `"cascade"` (default, production) and `"placeholder"`
+  (for tests/backward-compat). When changing the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and
+  `pipeline/runner.py`'s classification block.
 - `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
-  (currently 001–013) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
+  (currently 001–023) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
   (`DATABASE_URL`). `pipeline_runs` (migration 013) is where per-run detail lives — `pipeline/runner.py::main()`
   writes one row per run via `log_pipeline_run()` (counts on success; `error_class`/a truncated `error_message` on
   failure, never a raw exception that could embed transaction content) — instead of putting that detail in the
-  GitHub Actions log, which is visible to anyone with repo read access. Transaction identity, and the duplicate
-  handling built on it, is the subtlest part of this layer:
+  GitHub Actions log, which is visible to anyone with repo read access. Phase 18 adds three migrations (021–023) for
+  transaction categorization: `pfc_primary`, `pfc_detailed`, `pfc_confidence`, `merchant_name`, and `category_source`
+  columns on `transactions`; a new `merchant_categories` table (merchant_key → category, with source and updated_at);
+  and a seeding/normalization pass that fixes the live `'Uncategorized'`/`'uncategorized'` case-inconsistency bug.
+  `update_transaction_category(transaction_hash, category, merchant_key)` (Phase 18) takes a third `merchant_key` argument
+  and atomically: sets `user_category` on the target row, upserts merchant memory (so the cascade applies the correction to
+  future transactions from that merchant), and backfills `user_category` on other rows with the exact same raw merchant_name/description
+  (where `user_category IS NULL`, so existing corrections are never overwritten). Returns the backfill count, which surfaces in
+  the UI as the number of rows affected. See `docs/adr/0004-transaction-categorization.md` for the full rationale and the
+  exact-match-backfill limitation.
+  Transaction identity, and the duplicate handling built on it, is the subtlest part of this layer:
   - `build_transaction_hash` hashes Plaid's `transaction_id` when the row has one, and falls back to
     `account_key|date|description|amount` only for rows without one (seed data, future non-Plaid sources). Upserts are
     idempotent via `ON CONFLICT (transaction_hash) DO UPDATE`, and because the hash tracks the `transaction_id`, a
@@ -83,22 +108,68 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
     such an index; 010 dropped it and 005 is now an intentional no-op. Do not recreate it.
   - `transactions_external_id` (migration 009) is a partial UNIQUE index on `external_id`, catching the same Plaid
     transaction stored under two accounts.
-  - `reconcile_transactions` runs after every upsert in `pipeline/runner.py`. Persistence is otherwise append-only, so
-    the same real transaction returning under a *new* `transaction_id` (Item re-link, or one account exposed through
-    two Items) lands as a second row. Reconciliation trims stored copies per natural key down to the number Plaid
-    currently returns. A natural key Plaid returns **zero** of is skipped and never touched — that is real history aged
-    out of Plaid's rolling window, not a duplicate. This guard is load-bearing; do not relax it.
+  - `reconcile_transactions` runs only on a full-refresh sync (Phase 17: it requires a keyword-only `full_refresh: bool`
+    parameter and raises `ValueError` immediately if False). Persistence is otherwise append-only, so the same real
+    transaction returning under a *new* `transaction_id` (Item re-link, or one account exposed through two Items)
+    lands as a second row. Reconciliation trims stored copies per natural key down to the number Plaid currently
+    returns. A natural key Plaid returns **zero** of is skipped and never touched — that is real history aged out of
+    Plaid's rolling window, not a duplicate. This guard is load-bearing; do not relax it. Under `/transactions/sync`,
+    after the first run, the fetched frame is normally only a delta — if a natural key present in that delta has one
+    stored row touched, the method would compute excess copies and delete genuine repeats Plaid never mentioned, which
+    is worse than the bug this method fixes. See `docs/adr/0003-transactions-sync-and-superseded-authorizations.md`
+    for the full story.
   - `is_duplicate` (migration 012) is a user-set flag for copies no rule can identify. Flagged rows are excluded from
     analytics but never deleted, so the call is reversible. Like `user_category` and `is_recurring`, it survives
     pipeline re-runs only because `upsert_transactions` never names that column — keep it out of the INSERT.
   - Account identity is `(official_name, account_subtype, account_type, mask)`, matched by `canonicalize_account_keys`
     (after `persistent_account_id`). `owner_name` is excluded: it records which token revealed the account, not who
     owns it.
+  - Cursor state (Phase 17) now lives in `plaid_sync_state` (migration 018), keyed by `sha256(access_token)`
+    fingerprint — the raw token is never stored. `get_sync_cursors()`/`set_sync_cursor()` read/write it.
+  - `transactions.pending`/`pending_transaction_id` (migration 019) are new columns, round-tripped by
+    `upsert_transactions`. `pending` is nullable on purpose: NULL means "ingested before this phase, status unknown"
+    and must never be treated as FALSE.
+  - `delete_transactions_by_external_ids()` (Phase 17) is the handler for Plaid's authoritative `removed` — safe to
+    call on a delta, unlike `reconcile_transactions`, because deletion is keyed on Plaid transaction_ids it
+    explicitly states are gone.
 - `core/` — shared, UI-agnostic helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`,
   `google_oauth.py`.
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
   sign-out) and `dashboard.py` (DB reads + Plotly rendering). The transactions table is where the user sets
   `is_duplicate`; a "Possible duplicates only" sidebar filter surfaces the candidates.
+  **Frozen as of PLAN.md Phase 15** — it stays as a reference implementation and fallback, but new
+  dashboard work goes into `web/`. Do not add features here; do not refactor it. Its *pure* helpers
+  (`_enrich_transactions`, `_classify_tx_type`, `_effective_credit_limit`, `_label_subtype`) are
+  deliberately still imported by `api/viewmodels.py` — the freeze forbids editing this module, not
+  reusing it.
+- `api/` — FastAPI backend for the React dashboard. `routers/auth.py` (Google OAuth + JWT session
+  cookie + CSRF) and `routers/data.py` (read endpoints returning pre-shaped view models, plus the 5
+  write paths). `viewmodels.py` builds those view models by reusing `app/dashboard.py`'s pure
+  functions rather than reimplementing them, so the business logic stays covered by the existing
+  dashboard tests. Two conventions matter here:
+  - **Every ratio the API returns is a fraction**, not percentage points — a 60% savings rate is
+    `0.6`. `pct` fields were already fractions while `savings_rate` was percentage points, and the
+    frontend applied one formatter to both, so one was always wrong. Never reintroduce a `* 100`;
+    formatting belongs to the UI.
+  - **Series are returned wide, not long.** `{month, income, expenses, net}`, not
+    `{month, tx_type, amount}`. The long shape forced the frontend to pivot on a `tx_type` string and
+    it matched the wrong case, so a chart rendered axes and no bars. Keep the pivot server-side.
+  - **Reads go through `dataload.load_frames()`, a 60-second TTL cache**, because
+    `load_financial_data` is an unbounded `SELECT` and every read endpoint used to run it plus a full
+    re-enrichment per request. The cached frames are shared across requests, so **treat them as
+    read-only** — copy before mutating (every builder already does). **Every write endpoint must call
+    `dataload.invalidate(db.database_url)`**; without it an edit returns 204, the frontend refetches,
+    and the API serves the pre-edit rows back for up to a minute, so the edit looks like it silently
+    failed. `tests/test_api_dataload.py` enforces both rules.
+  - `filters.py` is a hand-written **port** of `app/dashboard.py::_build_sidebar_filters`, not a shared
+    module — the freeze forbids extracting it. It carries three load-bearing invariants (two frames,
+    enrich-before-filter, whole-month periods) documented in its docstring and pinned by
+    `tests/test_api_filters.py`. Read that docstring before touching it.
+- `web/` — React + TypeScript dashboard (Vite, Tailwind v4, TanStack Query, Recharts). `lib/api.ts`
+  owns the cross-origin cookie + CSRF concerns; `lib/types.ts` mirrors the Pydantic response models
+  field-for-field and must be updated in the same change as `api/routers/data.py`, or `tsc -b` is the
+  only thing standing between you and a runtime shape mismatch. There is deliberately **no sign-out
+  button** (stateless JWTs, no server-side revocation — see the comment in `src/App.tsx`).
 - `scripts/` — `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
   underlying `PlaidLinkClient`), `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
   no ingestion, no credentials), and `purge_sample_data.py` (deletes it again). Seeding is intentionally

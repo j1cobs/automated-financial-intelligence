@@ -16,6 +16,12 @@
   rows with split transaction history, because the identity key failed to recognise them as the
   same Account across a re-link.
 
+- **Under-merge** — the opposite failure to an Account fork: two genuinely *different* Accounts
+  end up represented by a single `accounts` row, because their identity keys
+  `(official_name, account_subtype, account_type, mask)` happen to coincide. The account-fork
+  warning the dashboard shows (see Account fork, above) cannot detect this case — it only catches
+  the reverse, too many rows for one identity, never too few.
+
 - **Canonical row / Orphan row** — within an Account fork, the *canonical row* is the account key
   Plaid is still actively syncing; the *orphan row* is the account key Plaid no longer issues.
   Merging always reassigns history onto the canonical row and deletes the orphan.

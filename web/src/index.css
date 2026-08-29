@@ -1,1 +1,320 @@
 @import 'tailwindcss';
+
+/* ===========================================================================
+   Design tokens (PLAN.md Phase 15, Fix 11)
+   ---------------------------------------------------------------------------
+   Derived with the `dataviz` skill and validated with its
+   `scripts/validate_palette.js`. Do NOT hand-pick a new colour here: add it to
+   the candidate list, re-run the validator for BOTH modes, and only then commit
+   it. Recorded results (surfaces #fcfcfb light / #1a1a19 dark):
+
+     categorical, light  -> lightness PASS, chroma PASS, CVD adj ΔE 9.1 PASS,
+                            normal-vision adj ΔE 19.6 PASS, contrast WARN
+                            (aqua 2.74, yellow 2.11, magenta 2.62 -- below 3:1,
+                            so those three slots REQUIRE a relief channel:
+                            visible direct labels or the table view)
+     categorical, dark   -> all five checks PASS (CVD adj ΔE 8.4, normal 19.3)
+     sequential bins     -> `--ordinal` PASS in both modes (monotone L,
+                            adjacent ΔL >= 0.06, light end >= 2:1 on surface)
+
+   Structure follows the three-scope rule, so an explicit toggle wins both ways:
+     1. the COMPLETE light palette on bare `:root`
+     2. dark values under `@media (prefers-color-scheme: dark)`, guarded with
+        `:root:not([data-theme='light'])`
+     3. dark values again under `:root[data-theme='dark']`
+   No colour is ever defined ONLY inside a media or [data-theme] block.
+
+   Tailwind v4 consumes these through `@theme inline` at the bottom of the file
+   (`inline` is what keeps the utility resolving to `var(--token)` at runtime,
+   so a theme swap needs no rebuild and no per-component branch).
+   =========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* --- surfaces ---------------------------------------------------------- */
+  --surface-page: #f9f9f7; /* app background plane */
+  --surface-1: #fcfcfb; /* cards, chart surface -- the validator's surface */
+  --surface-2: #f0efec; /* inset rows, table stripes, tooltip body */
+  --surface-3: #e6e5e0; /* hover / pressed */
+
+  /* --- borders ----------------------------------------------------------- */
+  --border-hairline: rgb(11 11 11 / 0.1);
+  --border-strong: #c3c2b7;
+
+  /* --- text -------------------------------------------------------------- */
+  --text-primary: #0b0b0b; /* 19.17:1 on surface-1 */
+  --text-secondary: #52514e; /* 7.73:1 -- axis ticks live here, see below */
+  --text-muted: #898781; /* 3.50:1 -- large/decorative text only */
+  --text-on-dark-fill: #ffffff; /* label set inside a saturated fill */
+  --text-on-light-fill: #0b0b0b;
+  --text-on-emphasis: var(--text-on-dark-fill); /* label on a bg-ink button; ink is dark here */
+
+  /* --- chart chrome ------------------------------------------------------ */
+  --chart-surface: #fcfcfb;
+  --chart-grid: #e1e0d9; /* hairline, solid -- never dashed */
+  --chart-axis: #c3c2b7;
+  --chart-axis-label: #52514e; /* secondary, not muted: ticks are small text */
+
+  /* --- categorical: series IDENTITY only --------------------------------- */
+  /* Fixed order. Assigned in sequence, NEVER cycled. There is no slot 9 --
+     a 9th category folds into "Other" or the view facets. */
+  --cat-1: #2a78d6; /* blue */
+  --cat-2: #eb6834; /* orange */
+  --cat-3: #1baf7a; /* aqua      -- sub-3:1 light, needs label/table relief */
+  --cat-4: #eda100; /* yellow    -- sub-3:1 light, needs label/table relief */
+  --cat-5: #e87ba4; /* magenta   -- sub-3:1 light, needs label/table relief */
+  --cat-6: #008300; /* green */
+  --cat-7: #4a3aa7; /* violet */
+  --cat-8: #e34948; /* red */
+
+  /* Cash-flow roles are IDENTITY, not polarity. This is the conflation Fix 11
+     exists to kill: income/expense are two series, so they take categorical
+     slots. Whether a number is good or bad is `--pos-*`/`--neg-*` below, and
+     the two vocabularies never touch. */
+  --flow-income: #2a78d6; /* = cat-1 */
+  --flow-expense: #eb6834; /* = cat-2 */
+
+  /* --- sequential: MAGNITUDE (category x month heatmap, intensity) ------- */
+  /* One hue, ordered near-zero -> max. In dark mode the anchor flips so that
+     "near zero" always recedes toward the surface; sequentialColor(t) therefore
+     needs no mode branch. */
+  --seq-1: #cde2fb;
+  --seq-2: #9ec5f4;
+  --seq-3: #6da7ec;
+  --seq-4: #3987e5;
+  --seq-5: #256abf;
+  --seq-6: #184f95;
+  --seq-7: #0d366b;
+
+  /* Discrete bins for a binned/ordinal encoding (validated with --ordinal;
+     the light end clears 2:1 on the surface, unlike --seq-1). */
+  --seq-bin-1: #86b6ef;
+  --seq-bin-2: #5598e7;
+  --seq-bin-3: #2a78d6;
+  --seq-bin-4: #1c5cab;
+  --seq-bin-5: #104281;
+
+  /* --- diverging: POLARITY around a baseline ----------------------------- */
+  /* blue <-> red with a NEUTRAL GRAY midpoint. Deliberately not green<->red:
+     a red/green ramp is the classic CVD failure, and money polarity is carried
+     by the semantic tokens + an icon/label, never by a continuous ramp. */
+  --div-neg: #d03b3b;
+  --div-mid: #f0efec;
+  --div-pos: #2a78d6;
+
+  /* --- semantic: STATE, strictly disjoint from the categorical slots ------
+     Reserved meaning. Never used as "series 4"; a categorical hue is never
+     used to say good/bad. These steps sit close in hue to cat-6/cat-8 by
+     necessity (eight categorical hues cover the wheel), so a semantic colour
+     ALWAYS ships with an icon + label -- hue never carries it alone. */
+  --pos: #0ca30c; /* fill/mark: 3.27:1 light, 5.19:1 dark */
+  --pos-text: #006300; /* 7.35:1 light -- passes small-text 4.5:1 */
+  --neg: #d03b3b; /* fill/mark: 4.68:1 light, 3.62:1 dark */
+  --neg-text: #d03b3b; /* 4.68:1 light */
+  --warn: #fab219;
+  --warn-text: #8a6100; /* 5.40:1 light */
+  --serious: #ec835a;
+  --serious-text: #a34a22; /* 5.75:1 light */
+  --neutral: #898781;
+  --neutral-text: #52514e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --surface-page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --surface-3: #2c2c2a;
+
+    --border-hairline: rgb(255 255 255 / 0.1);
+    --border-strong: #383835;
+
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --text-on-dark-fill: #ffffff;
+    --text-on-light-fill: #0b0b0b;
+    --text-on-emphasis: var(--text-on-light-fill); /* ink is light here */
+
+    --chart-surface: #1a1a19;
+    --chart-grid: #2c2c2a;
+    --chart-axis: #383835;
+    --chart-axis-label: #c3c2b7;
+
+    --cat-1: #3987e5;
+    --cat-2: #d95926;
+    --cat-3: #199e70;
+    --cat-4: #c98500;
+    --cat-5: #d55181;
+    --cat-6: #008300;
+    --cat-7: #9085e9;
+    --cat-8: #e66767;
+
+    --flow-income: #3987e5;
+    --flow-expense: #d95926;
+
+    --seq-1: #0d366b;
+    --seq-2: #184f95;
+    --seq-3: #256abf;
+    --seq-4: #3987e5;
+    --seq-5: #6da7ec;
+    --seq-6: #9ec5f4;
+    --seq-7: #cde2fb;
+
+    --seq-bin-1: #184f95;
+    --seq-bin-2: #256abf;
+    --seq-bin-3: #3987e5;
+    --seq-bin-4: #86b6ef;
+    --seq-bin-5: #b7d3f6;
+
+    --div-neg: #d03b3b;
+    --div-mid: #383835;
+    --div-pos: #3987e5;
+
+    --pos: #0ca30c;
+    --pos-text: #0ca30c; /* 5.19:1 dark */
+    --neg: #d03b3b;
+    --neg-text: #e05656; /* 4.67:1 dark -- #d03b3b is only 3.62 */
+    --warn: #fab219;
+    --warn-text: #fab219; /* 9.49:1 dark */
+    --serious: #ec835a;
+    --serious-text: #ec835a; /* 6.60:1 dark */
+    --neutral: #898781;
+    --neutral-text: #c3c2b7;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface-page: #0d0d0d;
+  --surface-1: #1a1a19;
+  --surface-2: #232322;
+  --surface-3: #2c2c2a;
+
+  --border-hairline: rgb(255 255 255 / 0.1);
+  --border-strong: #383835;
+
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --text-on-dark-fill: #ffffff;
+  --text-on-light-fill: #0b0b0b;
+  --text-on-emphasis: var(--text-on-light-fill); /* ink is light here */
+
+  --chart-surface: #1a1a19;
+  --chart-grid: #2c2c2a;
+  --chart-axis: #383835;
+  --chart-axis-label: #c3c2b7;
+
+  --cat-1: #3987e5;
+  --cat-2: #d95926;
+  --cat-3: #199e70;
+  --cat-4: #c98500;
+  --cat-5: #d55181;
+  --cat-6: #008300;
+  --cat-7: #9085e9;
+  --cat-8: #e66767;
+
+  --flow-income: #3987e5;
+  --flow-expense: #d95926;
+
+  --seq-1: #0d366b;
+  --seq-2: #184f95;
+  --seq-3: #256abf;
+  --seq-4: #3987e5;
+  --seq-5: #6da7ec;
+  --seq-6: #9ec5f4;
+  --seq-7: #cde2fb;
+
+  --seq-bin-1: #184f95;
+  --seq-bin-2: #256abf;
+  --seq-bin-3: #3987e5;
+  --seq-bin-4: #86b6ef;
+  --seq-bin-5: #b7d3f6;
+
+  --div-neg: #d03b3b;
+  --div-mid: #383835;
+  --div-pos: #3987e5;
+
+  --pos: #0ca30c;
+  --pos-text: #0ca30c;
+  --neg: #d03b3b;
+  --neg-text: #e05656;
+  --warn: #fab219;
+  --warn-text: #fab219;
+  --serious: #ec835a;
+  --serious-text: #ec835a;
+  --neutral: #898781;
+  --neutral-text: #c3c2b7;
+}
+
+/* ---------------------------------------------------------------------------
+   Tailwind v4 bridge. `@theme inline` (not plain `@theme`) is what lets the
+   generated utilities keep pointing at the live custom property, so the whole
+   dark mode is a token swap rather than a `dark:` variant on every element.
+   --------------------------------------------------------------------------- */
+@theme inline {
+  --color-surface-page: var(--surface-page);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-hairline: var(--border-hairline);
+  --color-strong: var(--border-strong);
+
+  --color-ink: var(--text-primary);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-muted: var(--text-muted);
+  --color-on-emphasis: var(--text-on-emphasis);
+
+  --color-cat-1: var(--cat-1);
+  --color-cat-2: var(--cat-2);
+  --color-cat-3: var(--cat-3);
+  --color-cat-4: var(--cat-4);
+  --color-cat-5: var(--cat-5);
+  --color-cat-6: var(--cat-6);
+  --color-cat-7: var(--cat-7);
+  --color-cat-8: var(--cat-8);
+
+  --color-flow-income: var(--flow-income);
+  --color-flow-expense: var(--flow-expense);
+
+  --color-pos: var(--pos);
+  --color-pos-text: var(--pos-text);
+  --color-neg: var(--neg);
+  --color-neg-text: var(--neg-text);
+  --color-warn: var(--warn);
+  --color-warn-text: var(--warn-text);
+  --color-serious: var(--serious);
+  --color-serious-text: var(--serious-text);
+  --color-neutral: var(--neutral);
+  --color-neutral-text: var(--neutral-text);
+}
+
+/* The page plane must be painted explicitly -- a transparent body borrows the
+   host background and breaks the dark mode. */
+body {
+  background-color: var(--surface-page);
+  color: var(--text-primary);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+/* Theme swap is a token change, not a DOM change, so without this every colour
+   on the page snaps instantly on toggle. Scoped to the properties the token
+   layer actually drives; skipped entirely under reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  * {
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+  }
+}

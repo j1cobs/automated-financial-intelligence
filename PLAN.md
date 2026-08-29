@@ -3677,6 +3677,994 @@ on both failure paths. Full suite: 179 tests green, `ruff check` clean. Live-run
 
 ---
 
+## Phase 15 — React dashboard: metric correctness, feature parity, and a real UX — IMPLEMENTED (2026-08-24), live verification outstanding
+
+> **Status (2026-08-24):** Fixes 1-15 are implemented on `dev` across six commits. Automated
+> verification is green — **283 Python tests** (`python -m unittest discover -s tests`, ruff check +
+> format clean) and **216 web tests** (`npm run test`, `tsc -b`, `npm run lint` at 0 errors,
+> `format:check`, `npm run build`). The Streamlit freeze held: `app/dashboard.py`,
+> `tests/test_dashboard_classify.py` and `tests/test_dashboard_helpers.py` are untouched across
+> every Phase 15 commit (`git log 2411582..HEAD -- app/` is empty).
+>
+> **What remains is the end-to-end pass in "Verification" below**, which needs a signed-in session
+> against the live database and cannot be done from tests: the nine on-screen checks, the
+> keyboard-only tooltip pass at a narrow viewport, the dark-mode sweep, and the side-by-side diff
+> against `streamlit run streamlit_app.py` confirming **only** the five tabulated divergences.
+>
+> Two items were deliberately not built, both recorded at their fix below: **ledger virtualization**
+> (needs a new dependency — `@tanstack/react-virtual` is the recommendation) and **metric
+> drill-down** (designed for via `MetricTile`'s unused `onDrillDown` prop, so it is additive). Both
+> were subsequently implemented in Phase 16 (items 8 and 9) — see that phase for what shipped.
+>
+> Two plan items changed during implementation and are documented where they landed:
+> **(a)** Fix 7's dual-axis rolling-spend chart was collapsed to a single axis — `daily_avg` is
+> `amount / 30`, so the second series drew the identical curve at 1/30 scale against an invented
+> scale; the per-day figure moved into the tooltip. **(b)** Fix 15's "push the date window into SQL"
+> was not possible without editing the frozen `load_financial_data`, so it shipped as the 60-second
+> TTL cache in `api/dataload.py` only. If read latency ever justifies more, relocate
+> `load_financial_data` into `database/` rather than duplicating the query.
+>
+> Original plan follows unchanged, for the reasoning behind each fix.
+
+> **Status:** planned, not yet implemented. Triggered by a review of the React frontend added in
+> `a7140d8` / `3412535`, which found the Streamlit → React port both incomplete (eight already-computed
+> API fields never rendered, all 10 sidebar filters dropped) and numerically wrong in six places that
+> are visible on screen. Phase 15 is **frontend + API view-model only** — it does not touch the
+> pipeline, the database schema, or `app/dashboard.py`.
+
+### Scope decision: Streamlit is frozen
+
+`app/dashboard.py` is **not modified by this phase**. It stays as a reference implementation and
+fallback; React diverges freely from it. Two consequences shape every fix below:
+
+1. **Port, don't extract.** The obvious move for Fix 9 (filters) is to extract the mask logic from
+   `_build_sidebar_filters` (`app/dashboard.py:782-812`) into a function both Streamlit and the API
+   call. Frozen forbids that, so the API gets its own faithful copy in a new `api/filters.py`. The
+   masks are ~20 lines of boolean pandas; a line-by-line port is cheaper than refactoring a file we
+   have agreed not to touch, at the cost of a real drift risk that the tests below are written to catch.
+2. **New constants live in the API.** `_STALE_BALANCE_DAYS = 3` (`app/dashboard.py:503`) stays at 3
+   for Streamlit. `api/viewmodels.py` defines its own `SYNC_STALE_DAYS = 7` / `DORMANT_DAYS = 90`
+   and stops importing that constant. The other imports from `app.dashboard` —
+   `_enrich_transactions`, `_classify_tx_type`, `_effective_credit_limit`, `_label_subtype` — are
+   pure, already covered by `tests/test_dashboard_classify.py` / `tests/test_dashboard_helpers.py`,
+   and **continue to be reused as-is**. That reuse is the whole reason `api/viewmodels.py` exists
+   (see its module docstring) and Phase 15 does not weaken it.
+
+**Accepted consequence:** after Fixes 1–8, Streamlit and React *deliberately disagree* on every
+metric fixed. Streamlit keeps showing a 6000% savings rate and a row-based rolling window. Streamlit
+therefore stops being a blanket source of truth; the divergence table under "Verification" below
+enumerates exactly which differences are intended, and anything not on that list is a React bug.
+
+### What the audit found
+
+Eight fields the API already computes, and `web/src/lib/types.ts` already types, are **never
+rendered by any component**: `credit_utilization`, `forked_accounts`, `income_breakdown`,
+`month_over_month` (overview), `weekly_trend`, `monthly_net_by_owner`, `category_distribution`,
+`avg_weekly_income`. `useSetCreditLimit()` is defined at `web/src/lib/mutations.ts:18` and has no
+caller. Roughly 40% of the port is unbuilt, and almost none of the remaining work needs new backend
+computation.
+
+Separately, `api/viewmodels.py:11-17` documents the filter omission as a deliberate R2 scope cut
+("these builders take no period/owner/category filter params ... they compute over the full
+history"). That cut is the root cause of the "monthly figures look too high" symptom: every number
+on the page is an all-time figure.
+
+---
+
+### Fix 1 — savings rate is rendered 100x too large
+
+`api/viewmodels.py:177` and `:303` return **percentage points** (`net_flow / income * 100`).
+`web/src/dashboard/OverviewTab.tsx:31` and `CashFlowTab.tsx:89` then apply
+`formatPercent = (v) => (v * 100).toFixed(1) + '%'`. A 60% savings rate renders as `6000.0%`.
+
+This is also the whole explanation for the reported "savings rate trend domain of 6000% to -1000%".
+`OverviewTab.tsx:119` sets `domain={[0, 1]}`, but Recharts expands a domain to fit data unless
+`allowDataOverflow` is set, so real values of `+60` and `-10` produce exactly that axis. The axis is
+not broken; it is faithfully rendering doubly-scaled numbers.
+
+The underlying defect is an inconsistent contract: `credit_utilization.pct`
+(`api/viewmodels.py:134`) and `budget.pct` (`:406`) are already **fractions**, while `savings_rate`
+is percentage points. One `formatPercent` serves both, so one of them is always wrong.
+
+**Fix:** every ratio in the API becomes a fraction. Drop `* 100` at `api/viewmodels.py:177`, `:253`,
+`:303`. `formatPercent` is then correct everywhere with no frontend change. Document the unit on
+`Overview.savings_rate`, `CashFlowResponse.savings_rate`, and `SavingsRateTrendItem.savings_rate` in
+`api/routers/data.py`, and update the test assertions that pin the old percentage-point values.
+
+### Fix 2 — savings-rate trend is nonsense in low-income months
+
+`api/viewmodels.py:253` guards the division with `.clip(lower=0.01)`. A month with $0 income becomes
+`(0 - 2400) / 0.01` — **-24,000,000%**. The clip prevents a `ZeroDivisionError` and substitutes
+garbage.
+
+**Fix:**
+- Return `savings_rate: None` for any month whose income falls below a `$100` floor, and add an
+  `income: float` field per point so the frontend can explain the gap rather than silently hiding it.
+- Frontend renders nulls as a line break (`connectNulls={false}`) with a footnote naming the skipped
+  months ("3 months hidden — no recorded income").
+- Clamp the Y domain to `[-1, 1]` with `allowDataOverflow={true}`; mark any month outside it with a
+  capped dot whose tooltip carries the true value.
+- Restore the **20% target reference line** Streamlit draws (`app/dashboard.py:961-988`) — it is what
+  makes the chart readable at a glance.
+
+### Fix 3 — "monthly" income/expenses are inflated and mutually inconsistent
+
+Three independent causes:
+
+**(a) A mislabelled tile.** `OverviewTab.tsx:108` renders `ov.net_flow` under the label **"Net
+Monthly Flow"**. `net_flow` is the **all-time** figure (`api/viewmodels.py:176`), sitting between two
+genuinely monthly tiles (`avg_monthly_income`, `avg_monthly_expense`). It is larger than its
+neighbours by a factor of however many months of history exist. Compute it as
+`avg_monthly_income - avg_monthly_expense`.
+
+**(b) No period filter at all.** Fix 9 addresses this at the root.
+
+**(c) Partial months skew the average.** `api/viewmodels.py:181-186` averages over every month
+present, including the in-progress current month and a possibly-partial first month, with
+`unstack(fill_value=0)` zero-filling gaps. Exclude incomplete months from the "typical month"
+average: drop the current calendar month, and drop any boundary month with under 28 days of
+coverage. Return `complete_months: int` alongside so the tile can label itself "avg of 3 complete
+months" — a number that explains its own window is not a number the user has to trust blindly.
+
+### Fix 4 — owner-balance axis repeats the same two names at random intervals
+
+`api/viewmodels.py:113-122` emits **one row per account**, each labelled with its owner. Recharts is
+handed ~12 rows whose `owner` key takes only two distinct values, draws 12 bars, and prints the owner
+name under each — hence "Alexie" and "Jacob" recurring at irregular spacing.
+
+Streamlit's equivalent (`app/dashboard.py:579-602`) is a **stacked** bar: `x=owner`,
+`y=balance_current`, `color=account_type`, `barmode="relative"`, with a dashed zero line.
+
+**Fix:** aggregate server-side to one row per owner, one column per account type, credit negated so
+liabilities sit below the axis:
+
+```python
+# {"owner": "Jacob", "depository": 8200.0, "investment": 15400.0, "credit": -1250.0,
+#  "net": 22350.0, "accounts": [{"account_name": ..., "type": ..., "value": ...}, ...]}
+```
+
+Render as a stacked `BarChart` with `ReferenceLine y={0}` and one `Bar` per account type. The
+per-account detail lost to aggregation is recovered in a custom tooltip listing the accounts behind
+the hovered segment — on hover, where it is useful, rather than dumped onto the axis, where it is not.
+
+### Fix 5 — the stale-accounts banner is enormous and mislabelled
+
+`_STALE_BALANCE_DAYS = 3` (`app/dashboard.py:503`) flags any account whose balance has not refreshed
+in three days. `OverviewTab.tsx:215` then renders each as **"{n} days without activity"** — but
+`accounts.updated_at` records the **last balance refresh**, not the last transaction. The label
+describes account dormancy while the data measures pipeline health, and at a 3-day threshold nearly
+everything qualifies.
+
+The signal is worth keeping rather than deleting: the pipeline runs daily against live production
+Plaid tokens, `scripts/plaid_link.py repair` exists precisely because Items break in the real world
+(Phase 11), and a silently dead Item is invisible otherwise. What is wrong is the threshold, the
+label, and the visual weight.
+
+**Fix — split one conflated warning into two honest signals:**
+
+| Signal | Source | Threshold | Presentation |
+|---|---|---|---|
+| **Sync health** | `accounts.updated_at` | `SYNC_STALE_DAYS = 7` | Small amber badge on the affected account row in the net-worth section. Tooltip: "Balance last refreshed 9 days ago — the Plaid connection may need repair." No page-wide banner. |
+| **Dormant** | `MAX(transaction_date)` per account | `DORMANT_DAYS = 90`, non-zero balance | Collapsed accordion — "3 accounts with no activity in 90+ days" — framed as informational, not a warning. |
+
+The dormant signal needs a computation that does not exist yet: nothing currently derives a
+per-account last-transaction date. Add it in `build_net_worth` from the transaction frame `_load()`
+already has in hand — no new query, no schema change.
+
+**Deliberately out of scope:** an `accounts.is_archived` column to silence dormant accounts
+permanently. It needs a migration, and the tiering above may make it unnecessary. Revisit only if the
+dormant list proves to be permanent noise.
+
+### Fix 6 — the Income vs. Expenses chart renders nothing
+
+`CashFlowTab.tsx:165-166` binds `dataKey="INCOME"` and `dataKey="EXPENSE"` — **uppercase**. The API
+emits lowercase `income` / `expense` (`api/viewmodels.py:312`, values originating in
+`_classify_tx_type`). Both `<Bar>` elements resolve to `undefined` for every row, so the axes, grid,
+and legend render and the bars do not.
+
+**Fix:** remove the reshaping rather than correcting the string. Return **wide** rows from the API so
+there is no case-sensitive client-side pivot left to get wrong:
+
+```python
+# month_over_month: [{"month": "2026-07", "income": 6200.0, "expenses": 4310.0, "net": 1890.0}]
+```
+
+This also deletes the hand-rolled `reduce` at `CashFlowTab.tsx:58-69`. Overlay a `net` line on the
+grouped bars while we are here — it is the most useful thing this chart can show and comes free from
+the new shape.
+
+### Fix 7 — "30-Day Rolling Spend" is labelled "Daily Spend" and is not a 30-day window
+
+Two defects, one cosmetic and one real:
+
+**(a) The label lies.** `CashFlowTab.tsx:196` sets `name="Daily Spend"` on a series that is a 30-day
+rolling **total** (`api/viewmodels.py:334`). The reported ~$7,500 is about $250/day over 30 days,
+which is plausible — the number is probably right and the label is misdescribing it.
+
+**(b) The window is not 30 days.** `.rolling(30, min_periods=1)` operates on a date-**grouped** frame,
+so it counts **30 rows**, not 30 calendar days. Days with no transactions produce no row, so on
+sparse data a nominal "30-day" window can silently span two or three months. `min_periods=1`
+additionally makes the first 29 points a ramp out of a partial window, which reads as a spending
+trend that does not exist.
+
+**Fix:**
+- Reindex to a continuous daily `DatetimeIndex`, filling absent days with `0.0`.
+- Use a time-based window: `.rolling("30D")`.
+- Drop the leading partial window so the series starts at a full 30 days.
+- Rename to "Rolling 30-day spend", subtitle "total spent in the 30 days ending on each date", and
+  add a companion daily-average series (`rolling_total / 30`) — the number the old label promised.
+- Delete `CashFlowTab.tsx:72`'s `.slice(-30)`, which takes the last 30 *points* of a sparse series
+  (an arbitrary window); drive the range from the period filter instead.
+
+### Fix 8 — two smaller correctness issues found while tracing the above
+
+- **Sign inconsistency.** `build_cash_flow` returns `expenses` **negative** (`api/viewmodels.py:299`)
+  while `build_overview` returns it **positive** (`:175`), so the Cash Flow tab prints a negative
+  number in red under "Total Expenses". Normalize both to a positive magnitude and let the UI own the
+  sign.
+- **Zero renders as "No data".** `OverviewTab.tsx:83` guards with `!data?.net_worth`; a legitimately
+  zero net worth is falsy and blanks the entire tab. Use an explicit `== null` check.
+
+---
+
+### Fix 9 — restore all 10 filters, as global URL-synced state
+
+All 10 Streamlit filters (`app/dashboard.py:710-812`) return as **one global filter state** shared by
+every tab and synced to the URL, so a filtered view is linkable and survives a refresh.
+
+**Default period: last 3 months** (Streamlit defaults to last 30 days). With a 30-day window every
+"average monthly" tile averages exactly one month — the very metric Fix 3 exists to make honest — and
+category breakdowns are too thin to read. Three months makes the averages genuinely averages and
+gives the Fix 12 baselines something to compare against, with a "This month" preset one click away.
+
+**Server** — new `api/filters.py`, a faithful port (not an extraction; Streamlit is frozen) of the
+mask logic at `app/dashboard.py:782-812`, plus a shared query-param dependency consumed by
+`/overview`, `/cash-flow`, `/budget`, `/ledger`, `/anomalies`:
+
+```python
+class DashboardFilters(BaseModel):
+    period: Literal["last_30_days","current_month","last_3_months",
+                    "last_6_months","ytd","all_time","custom"] = "last_3_months"
+    months: list[str] | None = None      # custom period, ["2026-07", ...]
+    owners: list[str] | None = None      # None = all
+    categories: list[str] | None = None
+    accounts: list[str] | None = None
+    amount_min: float | None = None
+    amount_max: float | None = None
+    search: str | None = None
+    outliers_only: bool = False
+    duplicates_only: bool = False
+```
+
+**Three invariants the port must preserve — all load-bearing, all easy to break silently:**
+
+1. **The two-frame split** (`app/dashboard.py:808-812`). The sidebar returns `filtered` (date +
+   non-date masks) *and* `all_time_filtered` (non-date masks only). Trend charts and the
+   emergency-fund metric deliberately use the all-time frame so a short period filter does not
+   collapse a 12-month trend line to a single point. `build_overview` keeps taking both frames.
+2. **Enrich before filtering** (`app/dashboard.py:1357-1361`). Enrichment runs once over the complete
+   dataset so internal-transfer pair matching sees both legs of a transfer even when one leg's
+   account is filtered out. `prepare_transactions` stays strictly upstream of all filtering.
+3. **`duplicates_only` groups on `account_key`, not `account_name`** (`app/dashboard.py:776-792`), so
+   two distinct accounts sharing a display name are not collapsed. Likewise the amount range
+   tolerates inverted min/max rather than returning zero rows (`:768`).
+
+**Client:**
+- `web/src/lib/filters.ts` — filter type, URL serialize/deserialize, defaults.
+- `web/src/lib/FilterContext.tsx` — provider syncing to `window.history.replaceState`. No router
+  dependency, consistent with the no-router decision recorded at `web/src/dashboard/Dashboard.tsx:19-22`.
+- Query keys become filter-aware (`['overview', filters]`). **Required, not optional** — today's keys
+  are constants (`web/src/lib/queries.ts:18-23`) and would serve stale data for a new filter set.
+- `web/src/dashboard/FilterBar.tsx` — sticky under the tab nav: period preset and owner multi-select
+  always visible; the other eight in a "More filters" popover; active non-default filters as
+  removable chips with "Clear all"; collapsing to a `Filters (3)` button opening a bottom sheet on
+  mobile. Search input debounced 300 ms so typing does not fire a request per keystroke.
+
+### Fix 10 — feature parity with Streamlit
+
+Everything below exists in Streamlit and is missing or degraded in React. Except where noted, the
+data is **already in the API response and already typed** — this is rendering work, not backend work.
+
+**Overview tab**
+
+| Feature | Status | Data source |
+|---|---|---|
+| Assets vs. liabilities by holder (stacked, zero line) | Broken → Fix 4 | `owner_balances` |
+| Credit utilisation — per-card bars, `$current / $limit (n% used)`, manual-limit marker | Missing | `credit_utilization` |
+| Credit limit editor | Missing | `useSetCreditLimit()` already exists, unused |
+| Duplicate-account warning | Missing | `forked_accounts` |
+| Income sources donut (top 8 by payee) | Missing | `income_breakdown` |
+| Month-over-month by category (grouped bar) | Missing | `month_over_month` |
+| Emergency fund — progress toward 6-month goal + caption | Tile only | `emergency_fund_months` |
+| Top categories — horizontal, sorted | Vertical, unsorted | `top_categories` |
+| `avg_weekly_income` tile | Missing | already returned |
+
+**Cash Flow tab**
+
+| Feature | Status | Data source |
+|---|---|---|
+| Income vs. expenses by month | Broken → Fix 6 | `month_over_month` |
+| Income vs. expenses by week | Missing | `weekly_trend` |
+| Monthly net cash flow by holder (grouped, zero line) | Missing | `monthly_net_by_owner` |
+| Monthly expense breakdown by category (stacked) | Missing | `category_distribution` |
+| 30-day rolling spend | Mislabelled → Fix 7 | `rolling_30d_spend` |
+| Caption: transfers excluded from totals | Missing | — |
+
+**Transactions tab** — anomaly scatter (score vs. date, bubble size = amount, colour = category) is
+missing entirely; only the table was ported. Ledger explanatory captions (what the Duplicate tick
+does, that edits survive pipeline re-runs) are missing. The ledger renders every row unvirtualized.
+
+**Budget tab** — closest to parity. Audit against `app/dashboard.py:1110-1188`, specifically whether
+the editor lists **all** categories from `get_categories()` or only those with spend or an existing
+limit. Streamlit lists all. Verify-then-fix, not assumed-broken.
+
+### Fix 11 — a design system (there is currently none)
+
+Colours are hardcoded per file: `COLORS` at `OverviewTab.tsx:19`, unrelated inline hexes at
+`CashFlowTab.tsx:165-166,193`. Green/red encode income/expense in one place and good/bad in another,
+so a large expense and a healthy surplus can render the same colour.
+
+Target look: **bold and data-dense, light + dark**. Derive, via the `dataviz` skill:
+- A categorical palette for category series, a sequential ramp for magnitude encoding, and a
+  **semantic** positive/negative pair kept strictly disjoint from the categorical palette.
+- Direction-aware semantics — expenses up = bad, income up = good, savings rate up = good — encoded
+  once in a shared `<DeltaBadge direction polarity>` rather than re-decided per tile.
+- Tokens as CSS custom properties in `web/src/index.css`, with `[data-theme]` +
+  `prefers-color-scheme`, so **dark mode is a token swap**, not a per-component branch. Both palettes
+  contrast-validated; a dense dark dashboard is where weak palettes fail.
+- Axis/tooltip/legend/margin specs extracted to `web/src/dashboard/chartTheme.ts`, mirroring what
+  `_style_chart()` (`app/dashboard.py:306-324`) does for Plotly.
+
+### Fix 12 — density and context: is this number good?
+
+Every headline metric gains a baseline comparison:
+
+```python
+class Metric(BaseModel):
+    value: float
+    baseline: float | None        # trailing average over complete months
+    delta_pct: float | None       # (value - baseline) / baseline
+    baseline_months: int          # how many months the baseline averages
+    polarity: Literal["normal", "inverse"]   # inverse => up is bad
+    sparkline: list[float]        # last 12 months
+```
+
+Rendered as `$3,240` plus "up 12% vs your 3-month average" in the polarity-correct colour, with an
+inline sparkline in every tile — the cheapest possible "is this normal?" signal, and something
+`st.metric` structurally cannot do.
+
+Density additions beyond parity: a **category x month heatmap** (one compact grid replacing several
+bar charts, highest information-per-pixel element on the page); a compact KPI grid carrying value +
+delta + sparkline instead of a bare number; per-category small-multiple trend lines in the budget
+list; and a **committed monthly spend** figure derived from `is_recurring` — a user-set column that
+is stored today and surfaced nowhere.
+
+### Fix 13 — hover descriptions for every metric
+
+One registry, `web/src/dashboard/metricInfo.ts`, keyed by metric id:
+
+```ts
+{ savingsRate: {
+    label: 'Savings Rate',
+    definition: 'The share of income you did not spend.',
+    formula: '(income - expenses) / income',
+    window: 'Selected period',
+    excludes: ['Internal transfers between your own accounts',
+               'Transactions you flagged as duplicates'] } }
+```
+
+A single `<MetricTile>` reads both label and tooltip from this registry, so a label can never drift
+from its explanation. The affordance must be **keyboard-focusable and tap-friendly** — a popover, not
+a CSS `:hover` title — or it does not exist on mobile, an explicitly supported target (Phase 9).
+
+The `excludes` line does real work: "transfers and duplicate-flagged rows are excluded" answers most
+"why doesn't this match my bank?" questions and is currently written nowhere in the UI.
+
+**i18n-ready, English-only for now.** This registry and all other user-facing copy live behind a
+single `web/src/lib/strings.ts` from day one. Streamlit keeps its `_STRINGS` en/fr toggle
+(`app/dashboard.py:1335`); React ships English, and adding French later is a translation pass rather
+than a refactor.
+
+**Drill-down: designed for, deliberately deferred.** `<MetricTile>` takes an optional `onDrillDown`
+prop, and each metric id in the registry carries the filter predicate that would produce its
+underlying rows. Nothing renders it yet. Adding it later means one side-sheet component and one
+filtered-transactions endpoint, with no change to any existing tile.
+
+### Fix 14 — interactivity
+
+- **Cross-filtering** — clicking a category bar anywhere makes it an active filter chip across all
+  tabs. The single largest thing React buys over Streamlit's rerun model.
+- **Brush/zoom** on the rolling-spend and savings-rate time series.
+- **Optimistic ledger edits.** `useUpdateCategory` currently invalidates *every* query
+  (`web/src/lib/mutations.ts`), so one category change refetches all six endpoints — each of which
+  re-reads and re-enriches the entire transaction table (Fix 15). Apply optimistically to the ledger
+  cache and debounce the analytics invalidation.
+- **Skeleton loaders** replacing the `Loading cash flow data...` text (`CashFlowTab.tsx:29`).
+- **Error states with a next action** — the current error card (`CashFlowTab.tsx:40`) offers no retry.
+
+### Fix 15 — read-path performance (this bites once filters land)
+
+`api/routers/data.py:36-38` — every endpoint calls `_load(db)`, which runs `load_financial_data()` (a
+full unbounded `SELECT ... ORDER BY transaction_date DESC`, no LIMIT, `app/dashboard.py:328-347`) and
+then re-enriches the whole frame, **per request**. One dashboard load hits five of these; every
+ledger edit re-triggers all five.
+
+1. Push the date window into SQL — stop loading all history to render three months. The two-frame
+   split means the all-time frame still needs full history, so bound the query to the widest window
+   either frame requires, not the narrower one.
+2. Add a 60-second TTL cache around `load_financial_data` + `prepare_transactions`, keyed by database
+   URL. The data refreshes once daily from the pipeline; a 60-second cache is free correctness.
+
+Considered and **not** adopted initially: collapsing the five endpoints into a single `/dashboard`
+call. It trades a real latency win for a coarser cache and a larger invalidation blast radius.
+
+---
+
+### Tests
+
+**Backend** — new cases in `tests/`, existing fixture style:
+- Savings rate returns a fraction, not percentage points (Fix 1); the assertions currently pinning
+  the old values are updated, not deleted.
+- A zero-income month yields `None`, not a clipped extreme (Fix 2).
+- `rolling("30D")` over a deliberately sparse series spanning a multi-week gap gives a true
+  calendar-day window (Fix 7).
+- Owner-balance aggregation collapses N accounts to one row per owner with correct per-type sums and
+  credit negation (Fix 4).
+- Partial months are excluded from the "typical month" averages (Fix 3c).
+- Filter tests (Fix 9): each param narrows results; the all-time frame ignores the date filter;
+  transfer pair-matching still classifies both legs when one leg's account is filtered out;
+  `duplicates_only` groups on `account_key`; an inverted amount range returns rows rather than none.
+
+**Streamlit's own tests must be untouched and still green** — `tests/test_dashboard_classify.py` and
+`tests/test_dashboard_helpers.py` are the check that "frozen" actually held.
+
+Per the standing rule, **none of these may load the real `.env`**: `load_settings()` backfills
+production secrets from `.env` even after `os.environ.pop()`. Use isolated env or mocks.
+
+**Frontend** — `web/src/dashboard/*.test.tsx` updated for the new shapes, plus a new assertion that
+Income vs. Expenses renders **actual bars**. The current suite passes against a chart displaying
+nothing, which is exactly why Fix 6 shipped unnoticed; that gap is the more important thing to close
+than the one-line dataKey bug itself.
+
+### Delegation
+
+Model tier chosen per task by the judgment each actually needs, not by size.
+
+- **Opus** — Fixes 1–8 (arithmetic and semantics in shared code, where a plausible-looking wrong fix
+  is worse than none); the Fix 9 server-side port (the three invariants above are load-bearing,
+  under-documented, and precisely what a cheaper model breaks silently — and the port must be
+  faithful to a file we are not allowed to change); the Fix 11 token/palette/polarity system that
+  everything downstream applies mechanically; Fix 15 cache keys and invalidation; final review.
+- **Sonnet** — Fix 10 parity components (one agent per tab, parallel, built to the spec tables
+  above); the Fix 9 client-side filter UI; Fix 12/14 components (`MetricTile`, `DeltaBadge`,
+  sparkline, heatmap, cross-filter wiring); component test updates for each.
+- **Haiku** — mirroring Pydantic changes into `web/src/lib/types.ts`; transcribing `metricInfo.ts` /
+  `strings.ts` from the definition table written in the Opus pass; replacing hardcoded hexes with
+  design tokens against a supplied mapping; updating test fixtures for the fraction change; running
+  `npm run lint` / `format:check` / `tsc -b` and reporting failures; file-gathering for the Budget
+  parity audit.
+
+### Ordering within Phase 15
+
+Fixes 1–8 gate everything: they change the same `api/viewmodels.py` builder signatures Fix 9 then
+re-parameterizes, so the two must not run concurrently. Fix 11 (design tokens) can run in parallel
+with Fix 9's server half, since they share no files. Fix 10's four tab agents parallelize cleanly
+once both land. Fixes 12–14 build on 10 and 11. Fix 15 comes last, when the query shapes have
+stopped moving.
+
+**All committing is done by the repo owner.** Work stops at each of six commit points — plan, metric
+correctness, filters + design tokens, feature parity, context/tooltips/interactivity, performance +
+cleanup — reporting what changed and what was verified, and waits. This phase opens no PR and creates
+no branches on its own.
+
+### Verification — expected divergence from Streamlit
+
+Streamlit is frozen, so it remains a valid reference for everything Phase 15 does *not* change: net
+worth, assets/liabilities, category totals, budget spend, anomaly lists, ledger contents. Run
+`streamlit run streamlit_app.py` beside the React app with matching filters and diff those tab by tab.
+
+The following **must** differ, and each difference is a fix working as intended:
+
+| Metric | Streamlit (frozen) | React (Phase 15) |
+|---|---|---|
+| Savings rate | percentage points, multiplied by 100 again in the UI | fraction, formatted once |
+| Savings-rate trend, zero-income months | plus/minus millions via `clip(0.01)` | `None`, rendered as a gap |
+| Rolling 30-day spend | 30-row window | 30-calendar-day window |
+| Avg monthly income/expense | includes partial months | complete months only |
+| Stale accounts | 3-day balance threshold | 7-day sync + 90-day dormant |
+
+Any divergence **not** on this list is a React bug.
+
+---
+
+## Phase 16 — Dashboard UX pass: dark mode, filters, Home tab, ledger virtualization, drill-down — DONE (2026-08-24)
+
+> **Status (2026-08-24):** All 10 items below are implemented on `dev`, uncommitted at the time of
+> writing (the repo owner commits everything themselves). **302 Python tests** green
+> (`python -m unittest discover -s tests`) and **242 web tests** green (`npm run test -- --run`).
+> `npx tsc -b` produces no output, `npm run lint` is 0 errors / 3 pre-existing warnings (an
+> `AuthContext.tsx` fast-refresh warning pair and a `TransactionsTab.tsx` React Compiler
+> incompatible-library warning on `useVirtualizer`, both unrelated to this phase's changes), and
+> `npm run format:check` is clean. `git diff --stat bf1a53f` (last commit before this session) shows
+> 36 files touched, none of them under `app/` — the Streamlit freeze held.
+
+This phase originated from a `/grilling` interview session after direct user feedback on the live
+Phase 15 dashboard: dark mode was "horrendous," the filters were "ugly," and — pointing at the wider
+goal, not any single screen — the dashboard "needs a lot of love" and should give the user "an idea
+about all my money" at a glance rather than requiring a tour through four tabs to answer that.
+
+### Decisions locked (2026-08-24 grilling session)
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | Theme toggle **stays in the header**, three-state (Auto/Light/Dark) | Deviates from an initial recommendation to relocate it; kept per explicit user preference during the interview. |
+| 2 | Replace native `<select multiple>` with a **checkbox popover**, not a third-party combobox library | `lib/filters.ts` / `lib/FilterContext.tsx` already hold correct state logic; a popover is a pure presentation swap that reuses it unchanged, versus a library rewrite that would touch state too. |
+| 3 | New **Home tab**, set as the default landing tab | The user's complaint was about a first impression, not any one existing tab; a fifth, denser "check-in" surface addresses that without diluting the other four. |
+| 4 | Home tab ships **all five** proposed insights, not the recommended two or three | User explicitly asked for "as much data as possible" over a pared-down surface — a deliberate density choice consistent with Phase 15's "don't reduce density" precedent. |
+| 5 | Ledger virtualization via **padding-row technique**, not `transform: translateY()` absolute positioning | The translateY approach creates an anonymous table box disconnected from the outer `<table>`'s `<colgroup>`, breaking column-width alignment under `table-layout: fixed`. |
+| 6 | Metric drill-down region is `role="button"`, **not a real `<button>`** | `MetricTile` already nests an interactive info-popover `<button>`; a `<button>` cannot validly nest another `<button>`. |
+| 7 | Fork-under-merge hardening (item 10) **deferred, not implemented** | Never implicated in any actual reported bug — the TFSA report that raised it turned out to be an unrelated Plaid Link scope issue (item 3). Documented as a known limitation instead of built. |
+
+### Item 1 — Dark mode fix
+
+`Dashboard.tsx`, `SignIn.tsx`, `LoadingScreen.tsx`, and `FilterBar.tsx` were the only files under
+`web/src` still using raw Tailwind color utilities (10, 8, 3, and 2 occurrences respectively) against
+an otherwise-complete design token system introduced in Phase 15's Fix 11. Every raw color class in
+those four files was replaced with the corresponding token, and a ~150ms color-transition was added
+so the Auto/Light/Dark toggle doesn't snap. `web/src/test/noRawColors.test.ts` is new: it scans
+`web/src` for raw color utility classes and fails the build if one reappears anywhere, closing the
+gap that let these four files drift from the token system unnoticed in Phase 15. The header-based
+three-state toggle itself is unchanged (see decision 1).
+
+### Item 2 — Filter rebuild
+
+The native `<select multiple>` controls in `FilterBar.tsx` (owners, months, category, account) are
+replaced by `web/src/dashboard/MultiSelectPopover.tsx` — a checkbox popover with search and
+select-all/clear. The existing `lib/filters.ts` / `lib/FilterContext.tsx` state layer is reused
+completely unchanged (decision 2); this was a presentation-only swap.
+
+### Item 3 — TFSA/BNC balance investigation (no code change)
+
+A user report that a TFSA balance was wrong ("$5 vs $5000+ in reality") was investigated by querying
+both the `accounts` table and Plaid's `/accounts/get` directly for the affected Item. The originally
+suspected cause — a bug in `canonicalize_account_keys` (`database/db.py`) incorrectly
+merging/overwriting balances — was **ruled out**: live data showed no such collision. The actual
+cause was operational: the user has an investment account at National Bank of Canada (BNC) that was
+added to their BNC banking relationship *after* the corresponding Plaid Item was originally linked,
+and Plaid only syncs accounts selected at link time (or the most recent Link update-mode session), so
+the new account was invisible to that Item — expected Plaid behavior, not data corruption. Fixed
+operationally: the user ran `python scripts/plaid_link.py repair --token-suffix fa17bf` (Link update
+mode, re-selecting accounts) and confirmed the new account then appeared with the correct balance.
+
+### Item 4 — Savings-rate-trend bug fix
+
+`api/viewmodels.py`'s `savings_rate_trend` computation (originally around lines 471-490) was the only
+savings-rate computation in that file that did not apply the `complete_month_keys` filter used
+everywhere else (e.g. ~lines 169-180, ~388) to exclude the current, still-in-progress calendar month.
+The trend chart's newest point was therefore always a partial month whose ratio swung with every new
+transaction — it looked "random" to the user, but was fully deterministic. Fixed by applying the same
+filter; a regression test was added asserting the trend excludes the current month, and mutation-
+tested (fix removed, test confirmed failing, fix restored, test confirmed passing).
+
+### Item 5 — Balance snapshots
+
+New migration `database/migrations/017_account_balance_snapshots.sql` adds an
+`account_balance_snapshots` table. There was previously no balance history at all —
+`accounts.balance_current` is overwritten on every pipeline run, so net worth over time was
+structurally impossible to compute from stored data before this. `record_balance_snapshots()` and
+`get_net_worth_history()` are new in `database/db.py`; `pipeline/runner.py` now calls
+`record_balance_snapshots(accounts)` on every run. History starts accumulating the day this shipped —
+no backfill was possible.
+
+### Item 6 — Home tab
+
+A new fifth dashboard tab, `web/src/dashboard/HomeTab.tsx`, is now the default landing tab in
+`Dashboard.tsx` (decision 3) — a daily check-in surface, with the existing four tabs (Overview, Cash
+Flow, Budget, Transactions) unchanged and serving as its "go deeper" drill-down layer. It ships all
+five insights the user asked for (decision 4): recurring/committed monthly spend (surfacing the
+already-stored but previously-unsurfaced `is_recurring` flag), merchant-level spend breakdown,
+month-end cash-flow projection, category drift against the user's own historical baseline, and
+subscription detection — plus a net-worth trend line chart once snapshot history (item 5) has
+accumulated enough points. Backend: a new `/home` endpoint in `api/routers/data.py` and
+`build_home()` in `api/viewmodels.py`. Frontend: `useHome()` in `web/src/lib/queries.ts`, and
+`HomeResponse` plus related types in `web/src/lib/types.ts`.
+
+### Item 7 — Visual sharpening pass
+
+Type scale, spacing rhythm, and card/chart treatment were sharpened across `OverviewTab.tsx`,
+`CashFlowTab.tsx`, and `BudgetTab.tsx`, driven by concrete, audited class-string mismatches found
+across the tabs (card padding, heading scale, a per-state heading bug in `BudgetTab`). Density was
+deliberately preserved, not reduced — the user wants the bold, data-dense direction Phase 15 shipped
+kept; "sharpened" meant visual craft, not less information.
+
+### Item 8 — Ledger virtualization
+
+`web/src/dashboard/TransactionsTab.tsx` gains `@tanstack/react-virtual` as a new dependency
+(`web/package.json`). Ledgers with 50 or fewer transactions still render the original, unchanged
+plain `<table>`. Above that threshold, a dual-path render switches to a fixed-height
+(`max-h-[70vh]`) scroll container with a sticky header, using a leading/trailing padding-row (spacer
+`<tr>`) virtualization technique — chosen over the more common `transform: translateY()` absolute-
+positioning approach specifically because of decision 5. `LedgerRow` / `LedgerTheadRow` were
+extracted so both the plain and virtualized paths render from identical markup and can't drift apart.
+Verified live against the real 592-transaction ledger: only 36 `<tr>` elements were actually mounted
+in the DOM at once (`document.querySelectorAll('tbody tr').length` via Chrome DevTools), with smooth
+scrolling and a stable sticky header/columns in both light and dark mode.
+
+### Item 9 — Metric drill-down
+
+`MetricTile.tsx` (`web/src/dashboard/`) had an `onDrillDown` prop scaffolded but rendering no UI —
+flagged in Phase 15 as "designed for, deliberately deferred." It's now wired: when `onDrillDown` is
+passed, the whole tile becomes a `role="button"` region (decision 6), activating on click/Enter/Space,
+with `stopPropagation` isolating the nested info-popover button so opening the tooltip never also
+triggers the drill-down. New `web/src/dashboard/tabs.ts` holds a shared `TabId` type, avoiding an
+import cycle between `Dashboard.tsx` and `HomeTab.tsx`. `Dashboard.tsx` now passes
+`onNavigate={setActiveTab}` into `HomeTab`, which wires it to its three status-row tiles: **Net
+Worth → Overview tab**, **Committed Monthly Spend → Transactions tab**, **Projected Month-End
+Spend → Budget tab** — each landing on the existing tab with the fuller picture for that metric.
+Live-verified in Chrome: all three tiles correctly switch tabs on click; clicking a tile's "?" info
+badge opens its tooltip and does not trigger navigation.
+
+### Item 10 — Deferred by explicit decision: fork-banner under-merge hardening
+
+The existing account-fork warning banner (`_section_net_worth` in `app/dashboard.py:538-543`,
+mirrored via the `_IDENTITY_COLS` fork-size check in `api/viewmodels.py:255-260`) groups `accounts`
+rows by identity `(official_name, account_subtype, account_type, mask)` and flags any group where
+**more than one** `account_key` row shares that identity — an over-fork, the same real Account
+represented twice. It is structurally unable to detect the opposite failure: two genuinely different
+Accounts collapsing onto **one** `account_key` row (an under-merge), because an under-merge, by
+definition, destroys the very multi-row signal the check looks for — there is nothing left to count.
+
+Hardening this was discussed during the grilling session and explicitly **not implemented**
+(decision 7): it was never implicated in any actual reported bug (the TFSA report that prompted the
+discussion turned out to be the BNC Plaid-Link scope issue in item 3, unrelated to account-identity
+merging at all), so per the user's decision it is left as a documented, known limitation rather than
+built speculatively. See `docs/adr/0001-heuristic-account-identity.md`, whose Consequences section
+now cross-references this phase.
+
+### Verification
+
+- Python: `python -m unittest discover -s tests` — 302 tests, all passing.
+- Web: `npm run test -- --run` — 242 tests across 18 files, all passing.
+- `npx tsc -b` — clean, no output.
+- `npm run lint` — 0 errors, 3 pre-existing warnings (unrelated to this phase; see status block above).
+- `npm run format:check` — clean.
+- `git diff --stat bf1a53f` — 36 files changed, all under `web/`, `api/`, `database/`, `pipeline/`,
+  and `tests/`; `app/` untouched, confirming the Streamlit freeze held.
+- Manual, live-browser verification (Chrome DevTools, signed-in session): ledger virtualization DOM
+  node count (item 8) and drill-down navigation + tooltip isolation (item 9), both described above.
+
+---
+
+## Phase 17 — Migrate Plaid ingestion to `/transactions/sync` — IMPLEMENTED (2026-08-25), test coverage pending
+
+A hotel stay at Le Germain produced **five stored rows** where the bank shows **one charge**. The user
+booked the room, put down a deposit to secure the stay, and ate at the restaurant; the card issuer
+authorized each separately and then settled everything as a single `-723.01` charge. Four of the five
+stored rows sum to ~724 — close to the settled total but not equal, which is the normal signature of
+released holds and tip adjustments rather than a clean partition.
+
+**Root cause:** `ingestion/plaid_ingestor.py` uses `/transactions/get`, fetching and immediately
+discarding both `pending` and `pending_transaction_id`. In Plaid's model a pending authorization that
+posts becomes a **brand-new transaction with a new `transaction_id`**, and the pending one simply **stops
+appearing** in `/transactions/get`. There is no removal signal. `build_transaction_hash` keys on
+`transaction_id`, so the settled `-723.01` lands as a new row while the four superseded authorizations
+persist forever. `reconcile_transactions` cannot close this: it buckets by natural key `(account_key,
+transaction_date, description, amount)`; each stale authorization has a distinct amount, so Plaid
+returns **zero** of that key and the guard deliberately skips it. That guard protects real history aging
+out of Plaid's rolling window and is correct — it is simply blind to this case.
+
+**Intended outcome:** Move to `/transactions/sync`, whose `removed` array reports superseded and
+reversed transactions explicitly. Pending→posted stops being inference. Going forward a stay like this
+settles into one row without user intervention.
+
+### Decisions locked
+
+| Question | Decision |
+|---|---|
+| Verify before building | **Yes** — read-only probe against live Plaid first |
+| Delete or flag superseded rows | **Delete** on exact Plaid lineage (`removed`); flag only on heuristic |
+| The 4 stale Germain rows already stored | **Manual** — user flags them with the existing `is_duplicate` checkbox |
+| Scope | Migrate to `/transactions/sync` |
+| `reconcile_transactions` | **Keep, but run only on a full-refresh sync** |
+| Initial-sync history depth | **Accept full history** (not capped to 90 days) |
+| `BaseIngestor` seam | **Keep `fetch_transactions`**; add a parallel `sync_transactions()` |
+| Old `/transactions/get` path | Keep as rollback insurance; delete in a follow-up |
+| Store Plaid's `pending` flag | **Yes**, ingest and store; do not surface in the UI yet |
+
+### The hazard this phase must close
+
+`reconcile_transactions` assumes the fetched frame is *everything Plaid currently returns for the
+window*. Under `/transactions/sync`, after the first run the frame is only the delta. The zero-count
+guard protects untouched keys, but a key present in the delta is **not** protected: the user really
+made four separate `IKEA $250.00` charges on 2026-07-02. If Plaid `modified` one of them, the delta
+carries **one** row for that natural key, the DB holds **four**, `excess = 3`, and the reconciliation
+logic deletes **three genuine transactions**. Therefore reconcile must be **structurally** prevented from
+running on a delta — gated by a `full_refresh` flag threaded from the ingestor, not by convention or
+comment.
+
+### Probe result (2026-08-25, all 3 production institutions): Gate passed
+
+Sync returned 200 on all 3 tokens (204/331/187 transactions, history back to March–April 2026). A Le
+Germain match was found: exactly one live row (the settled `$723.01` charge, `pending=False`,
+`pending_transaction_id=bNvnqEP3...Ee13EE`), and the DB holds 5 Germain rows with the same
+`pending_transaction_id` matching stored `external_id` on one of them (`id=18969`, `$524.81`) exactly.
+The other three stored rows (`$0.00`, `$198.20`, `$1.39`) have no lineage evidence in the current
+snapshot — expected, since a cold-start sync (`cursor=null`) has no prior baseline for `removed` to
+reference; they remain the manual cleanup case. **The union rule is confirmed:** this first sync
+`removed` was empty, but `pending_transaction_id` on the settled row carries the lineage pointer,
+so the effective deletion signal must be the union of Plaid's explicit `removed` array **and** every
+non-null `pending_transaction_id` on `added`/`modified` rows.
+
+### Shipped contracts
+
+**`SyncResult` dataclass** (`ingestion/plaid_ingestor.py`):
+```python
+@dataclass
+class SyncResult:
+    added: pd.DataFrame                    # same normalized columns as IngestResult produces
+    modified: pd.DataFrame                 # same shape
+    removed_ids: list[str]                 # Plaid transaction_ids — union of removed[] + pending lineage
+    duplicate_accounts_skipped: int
+    full_refresh: bool                     # True iff EVERY token started from a null cursor
+    cursors: dict[str, str]                # token_fingerprint (sha256) -> next_cursor
+```
+
+**Ingestor method:** `sync_transactions(self, stored_cursors: dict[str, str]) -> SyncResult` — fetches
+all deltas since the last sync. `stored_cursors` is keyed by `token_fingerprint = sha256(access_token).hexdigest()`;
+the raw token is never stored or logged, only its fingerprint.
+
+**DB methods:**
+- `get_sync_cursors() -> dict[str, str]` — returns `{token_fingerprint: cursor}` for every Item with a prior sync
+- `set_sync_cursor(fingerprint, cursor)` — persists the next cursor for one Item. Must only be called after every
+  write (upsert, delete, reconcile) has committed — advancing the cursor first means a crash mid-write loses
+  that delta permanently.
+- `delete_transactions_by_external_ids(external_ids: list[str]) -> int` — deletes rows by Plaid's authoritative
+  `removed` lineage. Safe to call on a delta. Returns the number of rows deleted.
+- `reconcile_transactions(..., *, full_refresh: bool)` — now requires keyword-only `full_refresh: bool`, raises
+  `ValueError` if False. Reconciliation is only sound when the fetched frame is the full current window, not a
+  delta; the guard prevents the IKEA-delta hazard.
+
+**Migrations:**
+- `018_plaid_sync_state.sql`: Creates `plaid_sync_state` table with `token_fingerprint` (TEXT PRIMARY KEY),
+  `cursor` (TEXT NOT NULL), `updated_at` (TIMESTAMPTZ DEFAULT NOW())
+- `019_transaction_pending.sql`: Adds `pending` (BOOLEAN, nullable on purpose) and `pending_transaction_id` (TEXT)
+  columns to `transactions`. NULL means "ingested before this phase, status unknown" and must never be confused with FALSE.
+- `020_pipeline_runs_sync.sql`: Adds `removed_count` (INTEGER) and `full_refresh` (BOOLEAN) columns to `pipeline_runs`
+
+**Pipeline orchestration** (`pipeline/runner.py::run_pipeline`):
+1. `sync_transactions()` — fetch added/modified/removed
+2. Canonicalize account keys, upsert accounts, snapshot balances
+3. Classify + score `added ∪ modified`
+4. `upsert_transactions(added ∪ modified)`
+5. `delete_transactions_by_external_ids(removed_ids)`
+6. `reconcile_transactions(..., full_refresh=True)` **only if** `result.full_refresh`
+7. `set_sync_cursor()` for each token — **last**, after every write above has committed
+
+Step 7's position is load-bearing: advancing the cursor before rows are durable means sync never
+replays that delta and those transactions are lost permanently.
+
+### Verification
+
+- All existing Python tests green (`python -m unittest discover -s tests -v`).
+- Initial sync with a null cursor sets `full_refresh=True`; a second run with a stored cursor sets it `False`.
+- A `removed` id deletes exactly that row and nothing else.
+- **The IKEA regression test:** four stored `IKEA $250.00` rows on one date; a delta modifying one of them;
+  assert `reconcile_transactions` is not called and all four rows survive.
+- `reconcile_transactions(full_refresh=False)` raises `ValueError`.
+- Cursor is not persisted when the upsert raises.
+- `pending` / `pending_transaction_id` round-trip through sync runs; `user_category` / `is_recurring` / `is_duplicate`
+  survive and are unmodified.
+- `token_fingerprint` is a sha256 hex digest, never the raw token.
+
+### Follow-ups (not in this phase)
+
+1. Delete the old `fetch_transactions`/`/transactions/get` path once sync has run clean in production
+   for approximately 2 weeks, confirming cursor state is stable and no crashes are eating deltas.
+2. Decide whether to surface `pending` in the ledger UI — currently stored but unsurfaced.
+
+### References
+
+See `docs/adr/0003-transactions-sync-and-superseded-authorizations.md` for the detailed rationale behind
+this phase (the Germain case as motivating example, why `/transactions/get` structurally cannot solve it,
+why reconcile is kept but gated, and why `removed` justifies deletion where `is_duplicate` justifies
+only flagging).
+
+---
+
+## Phase 18 — Transaction categorization: Plaid PFC + merchant memory — IMPLEMENTED (2026-08-26), all tests green
+
+Every transaction was stamped `category = 'Uncategorized'` by a placeholder. A live bug split the category into two case
+variants (`'Uncategorized'` / `'uncategorized'`), with the lowercase one missing from the canonical `categories` table.
+The goal is to make categories real via a three-layer cascade and retire the placeholder.
+
+**Measurement at decision time (2026-08-26, live database):** **0** budget rows, **0** user corrections, and two case-split
+category strings (754 + 62 rows). Zero budgets and corrections meant nothing downstream breaks if the taxonomy changes —
+the cheapest possible moment to switch.
+
+**Why not a BERT model.** Two HuggingFace models were investigated and rejected:
+- `fahadkamraan/transaction-categorizer` (DistilBERT, 17 labels, US-English-only, 99.88% accuracy that suspiciously
+  suggests exact-string dedup missing near-duplicates like `METRO #4521` vs. `METRO #7832`, 14 monthly downloads)
+- `kuro-08/bert-transaction-categorization` (BERT-base, 25 labels, consumer-lifestyle taxonomy with no Income/Fees/Insurance,
+  no disclosed metrics, no public training set)
+
+Both are English-only. The accounts are Quebec-based (Desjardins, BNC), where merchants read `HYDRO-QUEBEC`, `COUCHE-TARD`,
+`PROVIGO`, `METRO`, `LE GERMAIN CHARLEVOIX BAIE`. A US-English transformer has never seen those tokens. For a single
+household with ~150 distinct merchants (top ~30 repeat monthly), **the merchant name is the label** — a lookup, not an
+inference. Merchant memory (user corrections, remembered and applied going forward) is a better fit.
+
+### Decisions locked
+
+| Question | Decision |
+|---|---|
+| Categorization strategy | **Three-layer cascade:** merchant memory (user corrections) → Plaid PFC primary → UNCATEGORIZED fallback |
+| Taxonomy | **Adopt Plaid's PFC primary wholesale** — 17 observed values with 100% coverage; no ambiguity |
+| Layer 3 (TF-IDF) | **Deferred** — no evidence of a coverage gap yet; build when the cascade is insufficient |
+| Correction scope | **Per-merchant, not per-row** — one correction applies to every future transaction from that merchant, with exact-match backfill |
+| Storage format | **Raw `SCREAMING_SNAKE_CASE`** (e.g. `FOOD_AND_DRINK`); frontend formats for display (same rule as savings_rate) |
+
+### Step 0 probe (read-only, before production code)
+
+Throwaway `scripts/_probe_categories.py` probe (deleted after use) against live Plaid, 2026-08-26, all 3 tokens.
+**Gate passed.** Results (729 transactions):
+
+| Measurement | Value | Meaning |
+|---|---|---|
+| PFC coverage | **100%** (729/729) | Every transaction carries a `personal_finance_category` |
+| Distinct PFC primary values | **17** (exactly Plaid's taxonomy: FOOD_AND_DRINK, GENERAL_MERCHANDISE, INCOME, ..., OTHER, plus UNCATEGORIZED for non-Plaid) | Seeding "what was observed" and "Plaid's official set" are identical |
+| Confidence distribution | 67% LOW (491), 25% HIGH (179), 8% VERY_HIGH (58), <1% MEDIUM | Plaid's best guess is often not high-confidence; merchant memory carries weight beyond coverage alone |
+| Top merchant gap | Café du Parquet under 3 spellings: `Cafe Du Parquet` (35), `CAFE DU PARQUET MONTREAL QC` (25), `Purchase /CAFE DU PARQUET` (5) — **65 from one merchant** | Concrete bug: naive key (uppercase + trim) would split into 3; the `merchant_key()` normalizer must strip city/province tails and Purchase prefixes |
+| merchant_name coverage | **71.2%** (519/729) — the other ~29% requires normalized-description fallback | The description fallback is regular traffic, not an edge case; both key paths needed in the normalizer |
+| Case-split bug in live DB | `'Uncategorized'` (754 rows) / `'uncategorized'` (62 rows) as separate strings, lowercase not in canonical table | Migration 023 collapses both onto `UNCATEGORIZED` in one pass |
+
+### Shipped contracts
+
+**`CascadeCategorizer.categorize(frame, merchant_lookup) → DataFrame`** (`analytics/categorizer.py`):
+```python
+def categorize(self, frame: pd.DataFrame, merchant_lookup: dict[str, str]) -> pd.DataFrame:
+    """Returns a copy of frame with `category` and `category_source` columns set.
+    
+    Resolution per row, first hit wins:
+    1. Merchant memory — merchant_lookup[merchant_key(merchant_name, description)]
+       → category_source = "merchant"
+    2. Plaid PFC primary — row["pfc_primary"] when present
+       → category_source = "plaid"
+    3. Fallback → category = "UNCATEGORIZED", category_source = "none"
+    """
+```
+
+**`merchant_key(merchant_name: str | None, description: str) → str`** (`analytics/categorizer.py`):
+Normalizes merchant identity — prefers `merchant_name` (Plaid-cleaned) when present, falls back to `description`.
+Uppercases, strips leading `Purchase /`, strips trailing `<city> <2-letter province>`, strips trailing store numbers,
+collapses whitespace. Bias: under-merge (two keys for one merchant costs one correction) over over-merge (one key for two
+merchants silently corrupts a category).
+
+**`build_models(mode: str) → PlaceholderModelBundle`** (`analytics/models.py`):
+```python
+def build_models(mode: str) -> PlaceholderModelBundle:
+    """Select model bundle for mode: "cascade" (production) or "placeholder" (tests)."""
+```
+Wired via `core/config.py::CATEGORIZER_MODE` (env var, default `"cascade"`). The seam allows toggling between
+`CascadeCategorizer` (Phase 18) and the pre-Phase-18 placeholder, keeping tests backward-compatible. Outlier detection
+is always the placeholder (unchanged this phase).
+
+**`update_transaction_category(transaction_hash, category, merchant_key) → int`** (`database/db.py`, updated signature):
+```python
+def update_transaction_category(
+    self, transaction_hash: str, category: str, merchant_key: str | None
+) -> int:
+    """Set user_category on target row; upsert merchant_categories[merchant_key] = category;
+    backfill user_category on rows with matching COALESCE(merchant_name, description)
+    where user_category IS NULL. Returns backfilled count (not counting target row)."""
+```
+Takes merchant_key as third argument (computed by caller from `analytics/categorizer.py::merchant_key()` via
+`database/db.py::get_transaction_merchant_fields()`). Atomically: sets `user_category` on target, remembers correction
+in merchant_categories (so cascade applies it on next pipeline run), and backfills other rows (exact-string match on
+raw merchant_name/description, never overwriting different corrections). The API endpoint returns
+`CategoryUpdateResponse(backfilled_count: int)`.
+
+**Migrations:**
+- `021_transaction_pfc.sql`: Add `pfc_primary`, `pfc_detailed`, `pfc_confidence`, `merchant_name`, `category_source` to `transactions`
+- `022_merchant_categories.sql`: Create `merchant_categories(merchant_key TEXT PRIMARY KEY, category TEXT, source TEXT, updated_at TIMESTAMPTZ)`
+- `023_pfc_taxonomy.sql`: Normalize case bug (all `'Uncategorized'`/`'uncategorized'` → `'UNCATEGORIZED'`), delete old case variants from `categories` table, insert Plaid's 17 primary labels + `UNCATEGORIZED`
+
+**Ingestion (`ingestion/plaid_ingestor.py::_normalize()`):**
+Add four fields, all nullable (absent → None, never coerced):
+```python
+pfc = transaction.get("personal_finance_category") or {}
+"merchant_name":   transaction.get("merchant_name"),
+"pfc_primary":     pfc.get("primary"),
+"pfc_detailed":    pfc.get("detailed"),
+"pfc_confidence":  pfc.get("confidence_level"),
+```
+
+**Pipeline wiring** (`pipeline/runner.py`):
+```python
+models = build_models(settings.categorizer_mode)
+if settings.categorizer_mode == "cascade":
+    merchant_lookup = database.get_all_merchant_categories()
+    transactions = models.classifier.categorize(transactions, merchant_lookup)
+else:
+    transactions["category"] = models.classifier.categorize(transactions["description"])
+transactions = models.outlier_detector.score(transactions)
+```
+The cascade takes the full frame (it needs pfc_primary, merchant_name, description) plus merchant_lookup dict, and sets
+both `category` and `category_source`. The placeholder mode (backward-compat) keeps the pre-cascade signature
+(Series → Series on description alone). Outlier detector signature is unchanged.
+
+**API response** (`api/routers/data.py`):
+```python
+@router.patch("/transactions/{transaction_hash}/category", response_model=CategoryUpdateResponse)
+def update_transaction_category(...) -> CategoryUpdateResponse:
+    # Computes merchant_key via analytics/categorizer::merchant_key()
+    # Calls database.update_transaction_category(..., merchant_key)
+    # Returns CategoryUpdateResponse(backfilled_count=...)
+```
+Returns HTTP 200 with `{backfilled_count: int}` in the response body (not 204).
+
+**Frontend** (`web/src/lib/categories.ts`):
+```typescript
+export function formatCategory(raw: string | null | undefined): string {
+    // FOOD_AND_DRINK → Food and Drink, UNCATEGORIZED → Uncategorized
+    // Idempotent, handles already-formatted or mixed-case input
+}
+```
+`formatCategory()` is used in the ledger dropdown and every chart legend/axis. Raw values stay canonical in state/payloads;
+formatting applies only at render time. The backfill count from the PATCH response surfaces as a brief confirmation in
+the UI ("updated 41 COUCHE-TARD transactions").
+
+### The backfill limitation (exact-match, not cross-spelling)
+
+`update_transaction_category()` backfill matches on raw `COALESCE(merchant_name, description)` because `merchant_key` is
+computed at cascade time from those fields, not stored in transactions. Cross-spelling historical backfill (e.g., all
+spellings of Café du Parquet) only happens going forward when the next pipeline run recomputes merchant_key and looks it
+up in merchant_categories — this method's backfill is a same-run, exact-match convenience, not a substitute. Reimplementing
+the normalizer in SQL would split the source of truth between two places and introduce duplication risk. The tradeoff:
+immediate same-run backfill is exact-match only; cross-spelling convergence happens on the next pipeline run, which for
+a household's recurring merchants happens within days. This is documented and acceptable (see ADR 0004).
+
+### Verification
+
+1. **Probe passes (gate).** 100% PFC coverage, 17 primary values (same as Plaid's official taxonomy), and the concrete
+   Café du Parquet 3-way collision confirms `merchant_key()` normalization is needed.
+2. **All Python tests green:** `python -m unittest discover -s tests -v` (376 passing).
+3. **merchant_key test coverage:** Three and four spellings of Café du Parquet collapse to one key; two actually-different
+   merchants never collide.
+4. **Cascade precedence:** Merchant memory beats Plaid PFC beats UNCATEGORIZED; an inserted merchant_categories entry is
+   picked up on next classification.
+5. **Backfill never overwrites:** Two separate corrections on different rows from the same merchant both survive; existing
+   `user_category` values are never replaced.
+6. **Pipeline re-run safety:** `user_category`, `is_recurring`, `is_duplicate` survive upsert unchanged (not named in INSERT).
+7. **Web checks all pass:** `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`.
+8. **formatCategory test coverage:** `FOOD_AND_DRINK` → `Food and Drink`, handles null/undefined/already-formatted.
+9. **Scratch-DB run:** `python main.py` against empty database; `category_source` is `'plaid'` for Plaid-ingested rows,
+   `'none'` for seed data, zero case-split bugs.
+10. **Production run verified:** Budget tab shows real categories, category charts have multiple slices, ledger dropdown
+    shows formatted taxonomy, category correction propagates to other rows from same merchant within the run.
+11. **End-to-end correction loop:** Set category on one COUCHE-TARD row → backfilled count > 0 surfaces in UI → all other
+    COUCHE-TARD rows follow → next pipeline run preserves `user_category` on all of them.
+12. **API response shape:** PATCH returns HTTP 200 with `{backfilled_count: int}`, not 204.
+
+### Follow-ups (not in this phase)
+
+1. **Layer 3 (TF-IDF).** Defer pending evidence of a coverage gap. The probe showed 67% of rows at LOW confidence, but that
+   is Plaid's honest assessment, not a sign the cascade is failing. Monitor whether merchant memory converges (users stop
+   making corrections) or hits a ceiling; build layer 3 if the cascade is insufficient.
+2. **Detailed category (PFC_DETAILED).** Stored this phase (`pfc_detailed` column) but not wired to the cascade or UI.
+   Consider surfacing for drill-down (100+ categories, too granular for budgeting but useful for analytics) or as
+   training signal for layer 3.
+3. **category_source = 'user'.** Reserved this phase (set to 'merchant' when merchant memory applies) but not written.
+   If a future layer adds direct per-row corrections (distinct from merchant-memory backfill), this flag tracks it.
+4. **Pending in the UI.** `pending` and `pending_transaction_id` are stored (Phase 17) but not surfaced. Decide whether to
+   show pending authorizations in the ledger or hide them until posted.
+
+### References
+
+See `docs/adr/0004-transaction-categorization.md` for the detailed rationale (why the two BERT models were rejected on
+specific evidence, why Plaid's PFC taxonomy was adopted wholesale, why merchant memory outranks Plaid, the exact-match
+backfill limitation, and why layer 3 is deferred).
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
@@ -3802,6 +4790,16 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
     merge is what activates the Actions cron (constraint 11). One merge satisfies both.
 22. Phase 9 (mobile) is best done **before** Phase 10's deploy is shared around, since mobile sign-in is the
     main reason the public HTTPS URL exists — but it is not a technical blocker, and 10 can ship first.
+23. Phase 15 freezes `app/dashboard.py`. Nothing in Phase 15 may edit it, and
+    `tests/test_dashboard_classify.py` / `tests/test_dashboard_helpers.py` must stay untouched and green —
+    that pair is the check that the freeze held. The API keeps *reusing* that module's pure helpers
+    (`_enrich_transactions`, `_classify_tx_type`, `_effective_credit_limit`, `_label_subtype`); the freeze
+    forbids modifying it, not importing from it. The one import Phase 15 drops is `_STALE_BALANCE_DAYS`,
+    which the API replaces with its own `SYNC_STALE_DAYS` / `DORMANT_DAYS`.
+24. Appendix A's interactivity items were written against Streamlit's `st.data_editor`. With Streamlit
+    frozen as of Phase 15, any of them that get built should target the React dashboard instead, reusing
+    the existing write endpoints in `api/routers/data.py` rather than adding Streamlit widgets. The
+    "pipeline never writes it" rule they depend on is unaffected.
 
 ---
 
@@ -3828,3 +4826,8 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
 19. (When Appendix A items are built) each new user-edit column is pipeline-immune: edit a note/status/reviewed flag, then run `python main.py` (or re-`upsert` the same rows) → the edit is retained.
 20. (When Phase 9 is built) the dashboard renders with no horizontal page scroll at 390px, 360px, and 768px
     viewport widths, in **both** `en` and `fr`, across all four tabs.
+21. (When Phase 15 is built) `cd web && npm run test && npm run build && npm run lint` all pass; the React
+    dashboard renders bars in Income vs. Expenses, a savings-rate axis inside plus/minus 100%, exactly one
+    x-axis label per account holder, and a reachable keyboard-only tooltip on every KPI tile. Diffing it
+    against `streamlit run streamlit_app.py` at matching filters shows **only** the five intended
+    divergences tabulated at the end of Phase 15.

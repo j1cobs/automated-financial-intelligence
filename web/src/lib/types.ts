@@ -14,13 +14,25 @@ export interface AssetMixItem {
   balance: number;
 }
 
+export interface OwnerAccountItem {
+  account_name: string;
+  type: string;
+  value: number;
+  short_name: string;
+}
+
 export interface OwnerBalanceItem {
   owner: string;
-  value: number;
-  type: string;
+  depository: number;
+  investment: number;
+  credit: number;
+  other: number;
+  net: number;
+  accounts: OwnerAccountItem[];
 }
 
 export interface CreditUtilizationItem {
+  account_key: string;
   account_name: string;
   owner_name: string | null;
   current: number;
@@ -30,8 +42,17 @@ export interface CreditUtilizationItem {
 }
 
 export interface StaleAccountItem {
+  account_key: string;
   account_name: string;
   days_stale: number;
+}
+
+export interface DormantAccountItem {
+  account_key: string;
+  account_name: string;
+  owner_name: string | null;
+  days_inactive: number;
+  balance: number;
 }
 
 export interface NetWorth {
@@ -42,6 +63,7 @@ export interface NetWorth {
   owner_balances: OwnerBalanceItem[];
   credit_utilization: CreditUtilizationItem[];
   stale_accounts: StaleAccountItem[];
+  dormant_accounts: DormantAccountItem[];
   forked_accounts: string[];
 }
 
@@ -63,7 +85,23 @@ export interface IncomeBreakdownItem {
 
 export interface SavingsRateTrendItem {
   month: string;
-  savings_rate: number;
+  savings_rate: number | null;
+  income: number;
+  expenses: number;
+}
+
+export interface MetricSummary {
+  key: string;
+  value: number;
+  /** The same quantity averaged over every complete month of history. `null`
+   * when there is not a single complete month to average. */
+  baseline: number | null;
+  /** Fraction: `(value - baseline) / abs(baseline)`. `null` when `baseline`
+   * is absent or zero. */
+  delta_pct: number | null;
+  baseline_months: number;
+  /** Up to the last 12 complete months of the underlying monthly series. */
+  sparkline: number[];
 }
 
 export interface Overview {
@@ -76,6 +114,10 @@ export interface Overview {
   avg_monthly_expense: number;
   avg_weekly_income: number;
   avg_monthly_income: number;
+  avg_monthly_net: number;
+  complete_months: number;
+  /** Baseline/sparkline context, keyed by the field name it annotates. */
+  metrics: Record<string, MetricSummary>;
   top_categories: TopCategoryItem[];
   month_over_month: MonthOverMonthItem[];
   emergency_fund_months: number | null;
@@ -94,19 +136,22 @@ export interface OverviewResponse {
 
 export interface CashFlowSeriesItem {
   month: string;
-  tx_type: string;
-  amount: number;
+  income: number;
+  expenses: number;
+  net: number;
 }
 
 export interface WeeklyTrendItem {
   week: string;
-  tx_type: string;
-  amount: number;
+  income: number;
+  expenses: number;
+  net: number;
 }
 
 export interface RollingSpendItem {
   date: string;
   amount: number;
+  daily_avg: number;
 }
 
 export interface MonthlyNetByOwnerItem {
@@ -155,6 +200,80 @@ export interface BudgetResponse {
 }
 
 // ---------------------------------------------------------------------------
+// GET /home
+// ---------------------------------------------------------------------------
+
+export interface NetWorthTrendItem {
+  date: string;
+  net_worth: number;
+}
+
+export interface RecurringItem {
+  description: string;
+  amount: number;
+}
+
+export interface MerchantItem {
+  description: string;
+  amount: number;
+}
+
+export interface CashFlowProjection {
+  month: string;
+  spent_so_far: number;
+  income_so_far: number;
+  projected_expenses: number;
+  projected_income: number;
+  days_elapsed: number;
+  days_in_month: number;
+}
+
+export interface CategoryDriftItem {
+  category: string;
+  current: number;
+  /** The category's own historical average over complete months, not a budget. */
+  baseline: number;
+  /** Fraction: `(current - baseline) / baseline`. Positive = spending more than usual. */
+  drift_pct: number;
+}
+
+export interface SubscriptionItem {
+  description: string;
+  average_amount: number;
+  /** Out of the trailing 6 months. */
+  months_seen: number;
+}
+
+export interface BiggestExpenseItem {
+  description: string;
+  amount: number;
+  date: string;
+}
+
+export interface UpcomingRecurringItem {
+  description: string;
+  amount: number;
+  /** A median-interval projection, not a confirmed billing date. */
+  next_expected_date: string;
+  typical_interval_days: number;
+}
+
+export interface HomeResponse {
+  net_worth_trend: NetWorthTrendItem[];
+  /** Latest net worth minus the closest sample at least one calendar month prior.
+   *  `null` when there isn't a full month of history yet. */
+  net_worth_mom_delta: number | null;
+  recurring_monthly_spend: number;
+  recurring_items: RecurringItem[];
+  top_merchants: MerchantItem[];
+  cash_flow_projection: CashFlowProjection | null;
+  category_drift: CategoryDriftItem[];
+  subscriptions: SubscriptionItem[];
+  biggest_expense_this_month: BiggestExpenseItem | null;
+  upcoming_recurring: UpcomingRecurringItem[];
+}
+
+// ---------------------------------------------------------------------------
 // GET /ledger
 // ---------------------------------------------------------------------------
 
@@ -172,6 +291,14 @@ export interface LedgerItem {
 
 export interface LedgerResponse {
   transactions: LedgerItem[];
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /transactions/{hash}/category
+// ---------------------------------------------------------------------------
+
+export interface CategoryUpdateResponse {
+  backfilled_count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,4 +325,23 @@ export interface AnomaliesResponse {
 
 export interface CategoriesResponse {
   categories: string[];
+}
+
+// ---------------------------------------------------------------------------
+// GET /filter-options
+// ---------------------------------------------------------------------------
+
+export interface MonthOption {
+  key: string;
+  /** Human-readable, e.g. "July 2026". */
+  label: string;
+}
+
+export interface FilterOptions {
+  owners: string[];
+  categories: string[];
+  accounts: string[];
+  months: MonthOption[];
+  amount_min: number;
+  amount_max: number;
 }

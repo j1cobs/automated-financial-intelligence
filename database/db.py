@@ -119,6 +119,8 @@ class DatabaseClient:
         transactions_updated: int | None = None,
         stale_duplicates_removed: int | None = None,
         duplicate_accounts_skipped: int | None = None,
+        removed_count: int | None = None,
+        full_refresh: bool | None = None,
         error_class: str | None = None,
         error_message: str | None = None,
         trigger_type: str | None = None,
@@ -127,13 +129,18 @@ class DatabaseClient:
         (counts, errors) lives instead of the GitHub Actions log, which is visible to anyone with
         repo read access. `trigger_type` ("schedule" / "workflow_dispatch" / "local") distinguishes
         the daily cron from a manual run, so two same-day rows are self-explanatory rather than
-        looking like a duplicate-write bug."""
+        looking like a duplicate-write bug.
+
+        `removed_count` / `full_refresh` (migration 020, Phase 17) record the
+        /transactions/sync outcome: how many rows Plaid's `removed` lineage caused to be
+        deleted, and whether this run's sync was a full refresh (the only case
+        reconcile_transactions is allowed to run) versus an incremental delta."""
         sql = """
         INSERT INTO pipeline_runs (
             started_at, status, transactions_inserted, transactions_updated,
-            stale_duplicates_removed, duplicate_accounts_skipped, error_class, error_message,
-            trigger_type
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            stale_duplicates_removed, duplicate_accounts_skipped, removed_count, full_refresh,
+            error_class, error_message, trigger_type
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with psycopg.connect(self.database_url) as connection:
             with connection.cursor() as cursor:
@@ -146,6 +153,8 @@ class DatabaseClient:
                         transactions_updated,
                         stale_duplicates_removed,
                         duplicate_accounts_skipped,
+                        removed_count,
+                        full_refresh,
                         error_class,
                         error_message,
                         trigger_type,
@@ -249,6 +258,63 @@ class DatabaseClient:
         ]
         if rows:
             self._execute_many(sql, rows)
+
+    def record_balance_snapshots(
+        self, accounts: list[dict[str, Any]], snapshot_date: dt.date | None = None
+    ) -> None:
+        """One row per account per calendar day, capturing the balance just written by
+        `upsert_plaid_accounts`. `accounts.balance_current` is overwritten in place on every
+        run, so this is the only place net-worth-over-time can be reconstructed from. A
+        same-day re-run (the daily schedule plus a manual workflow_dispatch, or a local run,
+        can both legitimately hit the same day) overwrites that day's row rather than creating
+        a second one -- only the latest balance observed that day is meaningful."""
+        snapshot_date = snapshot_date or dt.date.today()
+        sql = """
+        INSERT INTO account_balance_snapshots (
+            account_key, snapshot_date, balance_current, balance_available
+        ) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (account_key, snapshot_date) DO UPDATE
+        SET balance_current   = EXCLUDED.balance_current,
+            balance_available = EXCLUDED.balance_available,
+            updated_at        = NOW()
+        """
+        rows = [
+            (a["account_key"], snapshot_date, a.get("balance_current"), a.get("balance_available"))
+            for a in accounts
+        ]
+        if rows:
+            self._execute_many(sql, rows)
+
+    def get_net_worth_history(self) -> list[dict[str, Any]]:
+        """Daily net worth from `account_balance_snapshots`, joined against the accounts
+        table's CURRENT type (an account's type is treated as effectively static --
+        Plaid doesn't change it after linking, so joining on today's `accounts` row is
+        fine even for a historical snapshot). Signed the same way
+        `api/viewmodels.py::build_net_worth` signs the live figure: depository and
+        investment balances are assets, credit balances are a liability subtracted off.
+        """
+        sql = """
+        SELECT
+            s.snapshot_date,
+            SUM(CASE WHEN a.account_type IN ('depository', 'investment') THEN s.balance_current ELSE 0 END)
+                AS assets,
+            SUM(CASE WHEN a.account_type = 'credit' THEN s.balance_current ELSE 0 END) AS liabilities
+        FROM account_balance_snapshots s
+        JOIN accounts a ON a.account_key = s.account_key
+        GROUP BY s.snapshot_date
+        ORDER BY s.snapshot_date
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [
+            {
+                "date": snapshot_date.isoformat(),
+                "net_worth": float((assets or 0) - (liabilities or 0)),
+            }
+            for snapshot_date, assets, liabilities in rows
+        ]
 
     def count_by_source(self) -> dict[str, dict[str, int]]:
         """{source: {"accounts": n, "transactions": m}} for every source present in `accounts`."""
@@ -453,9 +519,88 @@ class DatabaseClient:
         sql = "UPDATE accounts SET manual_credit_limit = %s WHERE account_key = %s"
         self._execute_many(sql, [(limit, account_key)])
 
-    def update_transaction_category(self, transaction_hash: str, category: str) -> None:
-        """Set user_category for a transaction (survives pipeline re-runs).
+    def get_merchant_category(self, merchant_key: str) -> str | None:
+        """Return the remembered category for merchant_key, or None if no correction has been
+        recorded for it yet."""
+        sql = "SELECT category FROM merchant_categories WHERE merchant_key = %s"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (merchant_key,))
+                row = cur.fetchone()
+        return row[0] if row else None
+
+    def get_all_merchant_categories(self) -> dict[str, str]:
+        """{merchant_key: category} for every remembered merchant correction. Used by the
+        cascade (analytics/categorizer.py::CascadeCategorizer) to resolve layer 2 in bulk for
+        a whole pipeline run, rather than one round-trip per row."""
+        sql = "SELECT merchant_key, category FROM merchant_categories"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {merchant_key: category for merchant_key, category in rows}
+
+    def set_merchant_category(self, merchant_key: str, category: str, source: str = "user") -> None:
+        """Insert or update merchant memory for merchant_key. This is what lets the cascade
+        (analytics/categorizer.py) apply a single correction to every future transaction from
+        the same merchant."""
+        sql = """
+        INSERT INTO merchant_categories (merchant_key, category, source)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (merchant_key) DO UPDATE
+        SET category   = EXCLUDED.category,
+            source     = EXCLUDED.source,
+            updated_at = NOW()
+        """
+        self._execute_many(sql, [(merchant_key, category, source)])
+
+    def get_transaction_merchant_fields(self, transaction_hash: str) -> tuple[str | None, str] | None:
+        """(merchant_name, description) for one transaction, or None if transaction_hash isn't
+        found. Lets a caller (api/routers/data.py's category-correction handler) compute
+        merchant_key before calling update_transaction_category, which requires it."""
+        sql = "SELECT merchant_name, description FROM transactions WHERE transaction_hash = %s"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (transaction_hash,))
+                row = cur.fetchone()
+        return (row[0], row[1]) if row else None
+
+    def update_transaction_category(
+        self, transaction_hash: str, category: str, merchant_key: str | None
+    ) -> int:
+        """Set user_category for one transaction (survives pipeline re-runs) and, when
+        merchant_key is known, remember the correction so the cascade applies it to every future
+        transaction from the same merchant — and backfill it onto matching rows already stored.
+
+        All of the following runs as ONE database transaction:
+          a. (caller's responsibility, not this method) compute merchant_key via the shared
+             normalizer in analytics/categorizer.py — never reimplemented here, so there is a
+             single source of truth for what counts as "the same merchant."
+          b. Set user_category on the target row (unchanged from the pre-Phase-18 behavior).
+          c. Upsert merchant_categories[merchant_key] = category, source='user', so the cascade
+             (analytics/categorizer.py::CascadeCategorizer) applies this correction to every
+             transaction from this merchant on the *next* pipeline run, including ones not yet
+             ingested.
+          d. Backfill user_category on transactions already stored, matching on the RAW
+             COALESCE(merchant_name, description) of the target row rather than merchant_key —
+             `transactions` has no merchant_key column (it's computed at read/cascade time, not
+             stored), so this exact-string match cannot merge spelling variants of one merchant
+             (e.g. "Cafe Du Parquet" vs "CAFE DU PARQUET MONTREAL QC") the way merchant_key does.
+             That cross-spelling backfill only happens going forward, when the cascade recomputes
+             merchant_key from merchant_name/description at pipeline-run time and looks it up in
+             merchant_categories — this method's backfill is a same-run, exact-match convenience
+             on top of that, not a substitute for it. Rows that already carry a *different*
+             explicit user_category are never touched (WHERE user_category IS NULL), so one
+             correction can never silently clobber another.
+
+        If merchant_key is None (caller couldn't compute one — e.g. no merchant_name and no
+        description), steps c/d are skipped entirely: only the target row's user_category is set,
+        and this returns 0.
+
         Also inserts the category into the categories table so it appears in future dropdowns.
+
+        Returns the number of OTHER rows updated by the exact-match backfill (not counting the
+        target row itself).
         """
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
@@ -467,7 +612,40 @@ class DatabaseClient:
                     "WHERE transaction_hash = %s",
                     (category, transaction_hash),
                 )
+
+                if merchant_key is None:
+                    conn.commit()
+                    return 0
+
+                cur.execute(
+                    """
+                    INSERT INTO merchant_categories (merchant_key, category, source)
+                    VALUES (%s, %s, 'user')
+                    ON CONFLICT (merchant_key) DO UPDATE
+                    SET category   = EXCLUDED.category,
+                        source     = EXCLUDED.source,
+                        updated_at = NOW()
+                    """,
+                    (merchant_key, category),
+                )
+
+                cur.execute(
+                    """
+                    UPDATE transactions AS t
+                    SET user_category = %s, updated_at = NOW()
+                    WHERE t.transaction_hash != %s
+                      AND t.user_category IS NULL
+                      AND COALESCE(t.merchant_name, t.description) = (
+                          SELECT COALESCE(merchant_name, description)
+                          FROM transactions
+                          WHERE transaction_hash = %s
+                      )
+                    """,
+                    (category, transaction_hash, transaction_hash),
+                )
+                backfilled = cur.rowcount
             conn.commit()
+        return backfilled
 
     def update_transaction_recurring(self, transaction_hash: str, is_recurring: bool) -> None:
         """Set is_recurring for a transaction (survives pipeline re-runs)."""
@@ -572,6 +750,47 @@ class DatabaseClient:
             conn.commit()
         return rehashed, deleted + external_id_deleted
 
+    def get_sync_cursors(self) -> dict[str, str]:
+        """{token_fingerprint: cursor} for every Plaid Item that has completed at least one
+        /transactions/sync call. token_fingerprint is sha256(access_token) — the raw token is
+        never stored (see migration 018)."""
+        sql = "SELECT token_fingerprint, cursor FROM plaid_sync_state"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {fingerprint: cursor for fingerprint, cursor in rows}
+
+    def set_sync_cursor(self, token_fingerprint: str, cursor: str) -> None:
+        """Persist the next /transactions/sync cursor for one Item, keyed by its
+        sha256(access_token) fingerprint. Must only be called after every write from that
+        sync page has committed — advancing the cursor first means a crash mid-write loses
+        that delta permanently, since sync never replays a delta once its cursor is passed."""
+        sql = """
+        INSERT INTO plaid_sync_state (token_fingerprint, cursor)
+        VALUES (%s, %s)
+        ON CONFLICT (token_fingerprint) DO UPDATE
+        SET cursor     = EXCLUDED.cursor,
+            updated_at = NOW()
+        """
+        self._execute_many(sql, [(token_fingerprint, cursor)])
+
+    def delete_transactions_by_external_ids(self, external_ids: list[str]) -> int:
+        """Delete transactions by Plaid's authoritative `removed` lineage (plus superseded
+        `pending_transaction_id`s folded in by the caller) — see the ingestion/ sync section
+        of CLAUDE.md. Unlike reconcile_transactions, which infers duplication from counts,
+        this deletes only ids Plaid has explicitly stated are gone, so it's safe to run on a
+        delta and not just a full refresh. Returns the number of rows deleted."""
+        if not external_ids:
+            return 0
+        sql = "DELETE FROM transactions WHERE external_id = ANY(%s)"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (external_ids,))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted
+
     def upsert_categories(self, categories: Iterable[str]) -> None:
         sql = """
         INSERT INTO categories (name)
@@ -582,8 +801,20 @@ class DatabaseClient:
         if rows:
             self._execute_many(sql, rows)
 
-    def reconcile_transactions(self, frame: pd.DataFrame, start_date, end_date) -> int:
+    def reconcile_transactions(self, frame: pd.DataFrame, start_date, end_date, *, full_refresh: bool) -> int:
         """Trim stored duplicate transactions using Plaid's own per-natural-key counts.
+
+        `full_refresh` is a required keyword-only guard: this method may only run when the
+        caller has confirmed `frame` is everything Plaid currently returns for the window, not
+        a delta. Under /transactions/sync (Phase 17), `frame` is normally only the delta since
+        the last cursor — most calls, after the first one, are NOT a full refresh. If a natural
+        key has one stored copy touched by a delta, this method would see fetched_count=1
+        against, say, four stored genuine IKEA-style repeats, compute excess=3, and delete three
+        real transactions that Plaid never said anything about. That is strictly worse than the
+        bug this method exists to fix. Callers must pass full_refresh=True only when they know
+        every token involved started its sync from a null cursor (see SyncResult.full_refresh in
+        ingestion/plaid_ingestor.py); passing False raises immediately below rather than silently
+        running unsafely.
 
         Why this exists: persistence is append-only, and the same real transaction can arrive
         again carrying a *new* Plaid transaction_id — after an Item re-link, or when one real
@@ -620,6 +851,12 @@ class DatabaseClient:
 
         Returns the number of rows deleted.
         """
+        if not full_refresh:
+            raise ValueError(
+                "reconcile_transactions must only run on a full-refresh sync — see "
+                "database/migrations, and the IKEA-delta hazard in this docstring"
+            )
+
         fetched_counts: Counter[tuple[str, str, str, str]] = Counter()
         for record in frame.to_dict("records"):
             fetched_counts[
@@ -722,6 +959,20 @@ class DatabaseClient:
         Columns the user owns — user_category, is_recurring, is_duplicate — are deliberately
         absent from both the INSERT list and the conflict-update list, so a pipeline run can
         never clear a manual edit. Keep them out when adding columns here.
+
+        `pending` / `pending_transaction_id` (migration 019) round-trip Plaid's pending-
+        authorization lineage. `pending` is left as None/NULL when the source record doesn't
+        carry it at all (e.g. the seed-data / non-Plaid fallback path) rather than defaulted to
+        False — NULL means "status unknown," which is not the same claim as "confirmed posted."
+
+        `pfc_primary` / `pfc_detailed` / `pfc_confidence` / `merchant_name` / `category_source`
+        (migration 021, Phase 18) round-trip Plaid's `personal_finance_category` plus its
+        enriched merchant name, and record which cascade layer (analytics/categorizer.py) set
+        `category` on this row. Like `pending`, each is left as None/NULL when the source
+        record doesn't carry it (non-Plaid rows) rather than defaulted to a placeholder string.
+        `category` itself is NOT computed here — the cascade sets `transactions["category"]` on
+        the DataFrame before it reaches this function, exactly like the placeholder classifier
+        does today; this function only persists whatever the caller already computed.
         """
         # No relocation pass is needed: build_transaction_hash keys on the transaction_id, so a
         # transaction Plaid has revised (pending -> posted) or re-attributed to another account
@@ -739,8 +990,15 @@ class DatabaseClient:
             balance,
             category,
             outlier_score,
-            is_outlier
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            is_outlier,
+            pending,
+            pending_transaction_id,
+            pfc_primary,
+            pfc_detailed,
+            pfc_confidence,
+            merchant_name,
+            category_source
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (transaction_hash) DO UPDATE
         SET external_id = EXCLUDED.external_id,
             account_key = EXCLUDED.account_key,
@@ -750,6 +1008,13 @@ class DatabaseClient:
             category = EXCLUDED.category,
             outlier_score = EXCLUDED.outlier_score,
             is_outlier = EXCLUDED.is_outlier,
+            pending = EXCLUDED.pending,
+            pending_transaction_id = EXCLUDED.pending_transaction_id,
+            pfc_primary = EXCLUDED.pfc_primary,
+            pfc_detailed = EXCLUDED.pfc_detailed,
+            pfc_confidence = EXCLUDED.pfc_confidence,
+            merchant_name = EXCLUDED.merchant_name,
+            category_source = EXCLUDED.category_source,
             updated_at = NOW()
         """
         rows = []
@@ -779,6 +1044,13 @@ class DatabaseClient:
                     record.get("category"),
                     float(record.get("outlier_score", 0.0)),
                     bool(record.get("is_outlier", False)),
+                    record.get("pending"),
+                    record.get("pending_transaction_id"),
+                    record.get("pfc_primary"),
+                    record.get("pfc_detailed"),
+                    record.get("pfc_confidence"),
+                    record.get("merchant_name"),
+                    record.get("category_source"),
                 )
             )
 
