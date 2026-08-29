@@ -372,7 +372,6 @@ function LedgerRow({
             onBlur={onStopEdit}
             className="min-h-9 w-full rounded border border-hairline bg-surface-1 px-2 py-1 text-xs text-ink sm:text-sm"
           >
-            <option value="">{UNCATEGORIZED_LABEL}</option>
             {categories?.map((cat) => (
               <option key={cat} value={cat}>
                 {formatCategory(cat)}
@@ -381,7 +380,7 @@ function LedgerRow({
           </select>
         ) : (
           <button
-            onClick={() => onStartEdit(tx.hash, tx.category || '')}
+            onClick={() => onStartEdit(tx.hash, tx.category || 'UNCATEGORIZED')}
             className="flex min-h-9 w-full items-center rounded px-2 py-1 text-left text-ink hover:bg-surface-3"
           >
             {tx.category ? formatCategory(tx.category) : <span className="text-ink-muted">—</span>}

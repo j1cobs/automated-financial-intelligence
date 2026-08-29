@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   QueryClient,
@@ -586,6 +586,56 @@ describe('TransactionsTab', () => {
         expect(mockMutateAsync).toHaveBeenCalledWith({
           hash: 'tx-1',
           category: 'Groceries',
+        });
+      });
+    });
+
+    it('renders exactly one "Uncategorized" option and submits the real category value, not an empty string', async () => {
+      const user = userEvent.setup();
+      const mockMutateAsync = vi
+        .fn()
+        .mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse);
+
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Grocery Store',
+            amount: -50.25,
+            category: null,
+            is_recurring: false,
+            is_duplicate: false,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(
+        mockQuerySuccess({ categories: ['FOOD_AND_DRINK', 'UNCATEGORIZED'] }),
+      );
+      mockedUseUpdateCategory.mockReturnValue(mockMutation(mockMutateAsync));
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+
+      renderComponent();
+
+      const categoryButton = screen.getByRole('button', { name: /—/i });
+      await user.click(categoryButton);
+
+      const select = screen.getByRole('combobox');
+      const uncategorizedOptions = within(select).getAllByText('Uncategorized');
+      expect(uncategorizedOptions).toHaveLength(1);
+
+      await user.selectOptions(select, 'Uncategorized');
+
+      await waitFor(() => {
+        expect(mockMutateAsync).toHaveBeenCalledWith({
+          hash: 'tx-1',
+          category: 'UNCATEGORIZED',
         });
       });
     });
