@@ -17,6 +17,7 @@ from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
 from analytics.categorizer import merchant_key
+
 from ..dataload import invalidate as invalidate_cache
 from ..dataload import load_frames
 from ..deps import CurrentUserDep, DbDep, RequireCsrfDep
