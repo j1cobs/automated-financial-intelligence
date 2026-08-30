@@ -348,8 +348,8 @@ class GetNetWorthHistoryTests(unittest.TestCase):
 
         connect, cursor = _mock_connect(
             [
-                (dt.date(2026, 8, 23), 5000.0, 1000.0),
-                (dt.date(2026, 8, 24), 5200.0, 900.0),
+                (dt.date(2026, 8, 23), 5000.0, 1000.0, 3000.0),
+                (dt.date(2026, 8, 24), 5200.0, 900.0, 3100.0),
             ]
         )
         with patch("database.db.psycopg.connect", connect):
@@ -358,8 +358,20 @@ class GetNetWorthHistoryTests(unittest.TestCase):
         self.assertEqual(
             result,
             [
-                {"date": "2026-08-23", "net_worth": 4000.0},
-                {"date": "2026-08-24", "net_worth": 4300.0},
+                {
+                    "date": "2026-08-23",
+                    "net_worth": 4000.0,
+                    "assets": 5000.0,
+                    "liabilities": 1000.0,
+                    "liquid_cash": 3000.0,
+                },
+                {
+                    "date": "2026-08-24",
+                    "net_worth": 4300.0,
+                    "assets": 5200.0,
+                    "liabilities": 900.0,
+                    "liquid_cash": 3100.0,
+                },
             ],
         )
         sql = cursor.execute.call_args[0][0]
@@ -369,11 +381,22 @@ class GetNetWorthHistoryTests(unittest.TestCase):
     def test_null_sums_do_not_raise(self) -> None:
         import datetime as dt
 
-        connect, cursor = _mock_connect([(dt.date(2026, 8, 24), None, None)])
+        connect, cursor = _mock_connect([(dt.date(2026, 8, 24), None, None, None)])
         with patch("database.db.psycopg.connect", connect):
             result = DatabaseClient("postgresql://x").get_net_worth_history()
 
-        self.assertEqual(result, [{"date": "2026-08-24", "net_worth": 0.0}])
+        self.assertEqual(
+            result,
+            [
+                {
+                    "date": "2026-08-24",
+                    "net_worth": 0.0,
+                    "assets": 0.0,
+                    "liabilities": 0.0,
+                    "liquid_cash": 0.0,
+                }
+            ],
+        )
 
     def test_empty_history(self) -> None:
         connect, cursor = _mock_connect([])

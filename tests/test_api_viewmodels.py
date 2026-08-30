@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import unittest
 from datetime import date, timedelta
+from typing import Any
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
 
@@ -25,7 +26,6 @@ from api.viewmodels import (  # noqa: E402
     SYNC_STALE_DAYS,
     _build_metric,
     build_cash_flow,
-    build_home,
     build_net_worth,
     build_overview,
     complete_month_keys,
@@ -485,25 +485,48 @@ def _month_start(months_ago: int):
     return period.start_time.date()
 
 
-class HomeInsightsTests(unittest.TestCase):
-    """Fix/feature: the Home tab's insights (PLAN.md §4 Q4) -- recurring spend,
-    merchant breakdown, cash-flow projection, category drift, subscription detection.
+def _history_point(day_offset_iso: str, net_worth: float) -> dict[str, Any]:
+    """A `get_net_worth_history()`-shaped row. `net_worth_trend_monthly`'s resampling
+    loop reads `liabilities`/`liquid_cash` off every snapshot even when a given test
+    only cares about `net_worth`/`date`, so every fixture needs the full shape or it
+    raises a KeyError deep inside `build_overview`."""
+    return {
+        "date": day_offset_iso,
+        "net_worth": net_worth,
+        "assets": net_worth,
+        "liabilities": 0.0,
+        "liquid_cash": net_worth,
+    }
+
+
+class OverviewHomeInsightsTests(unittest.TestCase):
+    """Phase 23 -- the retired Home tab's insights (recurring spend, merchant
+    breakdown, cash-flow projection, net-worth trend/mom-delta, category drift) were
+    folded into `build_overview`. Category drift is no longer its own list -- it now
+    lives on `month_over_month`'s `usual`/`this_month_drift_pct`/`last_month_drift_pct`
+    fields (one row per category, wide). The standalone `recurring_monthly_spend` tile
+    and subscription detection were dropped as product features entirely, not
+    renamed/reshaped -- there is no replacement coverage for either below.
     """
 
-    def test_empty_frame_still_passes_through_net_worth_history(self) -> None:
+    def test_empty_df_returns_the_static_empty_result_even_with_net_worth_history(self) -> None:
+        # Discrepancy vs. the old build_home: build_overview's `df.empty` guard
+        # short-circuits to a hardcoded empty dict BEFORE `net_worth_history` is
+        # consulted at all, so a caller whose *period-filtered* frame happens to be
+        # empty loses the net-worth trend even when real snapshot history exists.
+        # build_home never had this coupling (its two params were independent). Pinning
+        # the actual behaviour here since this is what the shipped code now does.
         empty = pd.DataFrame(
             [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
         )
-        history = [{"date": "2026-08-20", "net_worth": 1000.0}]
-        result = build_home(empty, history)
-        self.assertEqual(result["net_worth_trend"], [{"date": "2026-08-20", "net_worth": 1000.0}])
+        history = [_history_point("2026-08-20", 1000.0)]
+        result = build_overview(empty, pd.DataFrame([]), empty, history)
+        self.assertEqual(result["net_worth_trend_daily"], [])
         self.assertEqual(result["recurring_items"], [])
         self.assertEqual(result["top_merchants"], [])
         self.assertIsNone(result["cash_flow_projection"])
-        self.assertEqual(result["category_drift"], [])
-        self.assertEqual(result["subscriptions"], [])
 
-    def test_recurring_monthly_spend_averages_only_complete_months_and_flag_matters(self) -> None:
+    def test_recurring_items_lists_only_flagged_expenses(self) -> None:
         baseline = _month_start(2)
         # Spread across the month (day 1 and day 28) so its observed span covers the
         # whole month and `complete_month_keys` counts it -- a single-day span
@@ -527,9 +550,10 @@ class HomeInsightsTests(unittest.TestCase):
                 ),
             ]
         )
-        result = build_home(df, [])
-        self.assertAlmostEqual(result["recurring_monthly_spend"], 50.0)
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertEqual(result["recurring_items"], [{"description": "Gym Membership", "amount": 50.0}])
+        # `recurring_monthly_spend` (a single float) backed a Home-tab tile removed
+        # from the product in Phase 23 -- no replacement key, nothing to assert here.
 
     def test_top_merchants_aggregates_by_description_within_trailing_12_months(self) -> None:
         baseline = _month_start(2)
@@ -540,7 +564,7 @@ class HomeInsightsTests(unittest.TestCase):
                 _tx(baseline.isoformat(), 10.0, _EXPENSE, description="Coffee Shop"),
             ]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertEqual(
             result["top_merchants"][0],
             {"description": "Amazon", "amount": 100.0},
@@ -554,7 +578,7 @@ class HomeInsightsTests(unittest.TestCase):
                 _tx(today.isoformat(), 100.0, _EXPENSE),
             ]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         projection = result["cash_flow_projection"]
         self.assertIsNotNone(projection)
         self.assertEqual(projection["month"], today.strftime("%Y-%m"))
@@ -567,104 +591,35 @@ class HomeInsightsTests(unittest.TestCase):
     def test_cash_flow_projection_is_none_without_current_month_data(self) -> None:
         baseline = _month_start(3)
         df = _frame([_tx(baseline.isoformat(), 100.0, _EXPENSE)])
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertIsNone(result["cash_flow_projection"])
 
-    def test_category_drift_compares_current_month_to_the_users_own_baseline(self) -> None:
-        baseline = _month_start(2)
+    def test_month_over_month_drift_uses_the_users_own_baseline(self) -> None:
+        # Groceries has two complete baseline months (100/mo) then spikes to 140 this
+        # month -- this is the old "category drift" test, rewritten against
+        # `month_over_month`'s wide `usual`/`this_month_drift_pct` fields (Phase 23
+        # folded category drift into that list instead of keeping it separate).
+        m3 = _month_start(3)
+        m2 = _month_start(2)
         today = date.today()
         df = _frame(
             [
-                _tx(baseline.isoformat(), 100.0, _EXPENSE, category="Groceries"),
-                _tx(today.isoformat(), 140.0, _EXPENSE, category="Groceries"),
+                _tx(m3.isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g1a"),
+                _tx(m3.replace(day=28).isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g1b"),
+                _tx(m2.isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g2a"),
+                _tx(m2.replace(day=28).isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g2b"),
+                _tx(today.isoformat(), 140.0, _EXPENSE, category="Groceries", transaction_hash="g3"),
+                # First seen this month -- no historical baseline to drift against.
+                _tx(today.isoformat(), 50.0, _EXPENSE, category="Brand New Category", transaction_hash="b1"),
             ]
         )
-        result = build_home(df, [])
-        drift = {row["category"]: row for row in result["category_drift"]}
-        self.assertAlmostEqual(drift["Groceries"]["baseline"], 100.0)
-        self.assertAlmostEqual(drift["Groceries"]["current"], 140.0)
-        self.assertAlmostEqual(drift["Groceries"]["drift_pct"], 0.4)
-
-    def test_category_with_no_baseline_is_skipped(self) -> None:
-        today = date.today()
-        df = _frame([_tx(today.isoformat(), 50.0, _EXPENSE, category="Brand New Category")])
-        result = build_home(df, [])
-        categories = [row["category"] for row in result["category_drift"]]
-        self.assertNotIn("Brand New Category", categories)
-
-    def test_subscription_detected_when_amount_is_stable_across_3_plus_months(self) -> None:
-        rows = [
-            _tx(_month_start(m).isoformat(), 9.99, _EXPENSE, description="Streaming Service")
-            for m in (1, 2, 3)
-        ]
-        df = _frame(rows)
-        result = build_home(df, [])
-        subs = {row["description"]: row for row in result["subscriptions"]}
-        self.assertIn("Streaming Service", subs)
-        self.assertAlmostEqual(subs["Streaming Service"]["average_amount"], 9.99)
-        self.assertEqual(subs["Streaming Service"]["months_seen"], 3)
-
-    def test_no_subscription_when_amount_varies_too_much(self) -> None:
-        df = _frame(
-            [
-                _tx(_month_start(1).isoformat(), 20.0, _EXPENSE, description="Variable Bill"),
-                _tx(_month_start(2).isoformat(), 60.0, _EXPENSE, description="Variable Bill"),
-                _tx(_month_start(3).isoformat(), 100.0, _EXPENSE, description="Variable Bill"),
-            ]
-        )
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertNotIn("Variable Bill", descriptions)
-
-    def test_no_subscription_when_seen_fewer_than_3_months(self) -> None:
-        df = _frame(
-            [
-                _tx(_month_start(1).isoformat(), 9.99, _EXPENSE, description="Too New"),
-                _tx(_month_start(2).isoformat(), 9.99, _EXPENSE, description="Too New"),
-            ]
-        )
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertNotIn("Too New", descriptions)
-
-    def test_subscription_detected_when_billing_day_is_regular(self) -> None:
-        # Netflix-shaped: same description, consistent amount (well within 15%), and
-        # billed on the same day-of-month (+/- 1-2 days) across 4 consecutive months.
-        days = [3, 4, 2, 3]
-        rows = [
-            _tx(
-                _month_start(m).replace(day=d).isoformat(),
-                15.49,
-                _EXPENSE,
-                description="Netflix",
-            )
-            for m, d in zip((4, 3, 2, 1), days, strict=True)
-        ]
-        df = _frame(rows)
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertIn("Netflix", descriptions)
-
-    def test_no_subscription_when_billing_day_is_irregular(self) -> None:
-        # The bug this pins: a description seen in 3+ of the trailing 6 months at a
-        # near-constant amount used to be flagged a "subscription" with no check on
-        # how regularly-spaced the occurrences were -- e.g. a restaurant visited
-        # often with fairly consistent per-visit pricing ("Cafe Du Parquet" in
-        # production). Scattered days-of-month must NOT be flagged.
-        days = [3, 17, 22, 9, 28]
-        rows = [
-            _tx(
-                _month_start(m).replace(day=d).isoformat(),
-                42.00,
-                _EXPENSE,
-                description="Cafe Du Parquet",
-            )
-            for m, d in zip((5, 4, 3, 2, 1), days, strict=True)
-        ]
-        df = _frame(rows)
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertNotIn("Cafe Du Parquet", descriptions)
+        result = build_overview(df, pd.DataFrame([]), df, [])
+        mom = {row["category"]: row for row in result["month_over_month"]}
+        self.assertAlmostEqual(mom["Groceries"]["usual"], 100.0)
+        self.assertAlmostEqual(mom["Groceries"]["this_month"], 140.0)
+        self.assertAlmostEqual(mom["Groceries"]["this_month_drift_pct"], 0.4)
+        self.assertIsNone(mom["Brand New Category"]["usual"])
+        self.assertIsNone(mom["Brand New Category"]["this_month_drift_pct"])
 
     def test_biggest_expense_this_month_picks_largest_by_absolute_amount(self) -> None:
         today = date.today()
@@ -675,7 +630,7 @@ class HomeInsightsTests(unittest.TestCase):
                 _tx(today.isoformat(), 60.0, _EXPENSE, description="Groceries"),
             ]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         biggest = result["biggest_expense_this_month"]
         self.assertIsNotNone(biggest)
         self.assertEqual(biggest["description"], "Rent Top-Up")
@@ -685,31 +640,29 @@ class HomeInsightsTests(unittest.TestCase):
     def test_biggest_expense_this_month_is_none_without_current_month_expenses(self) -> None:
         baseline = _month_start(3)
         df = _frame([_tx(baseline.isoformat(), 50.0, _EXPENSE)])
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertIsNone(result["biggest_expense_this_month"])
 
     def test_net_worth_mom_delta_uses_closest_point_at_least_one_month_prior(self) -> None:
         today = date.today()
         history = [
-            {"date": (today - timedelta(days=95)).isoformat(), "net_worth": 1000.0},
+            _history_point((today - timedelta(days=95)).isoformat(), 1000.0),
             # Closest point that is still >= 1 month before `today` -- must be picked
             # over the (wrong) naive "second-to-last sample" approach.
-            {"date": (today - timedelta(days=40)).isoformat(), "net_worth": 1200.0},
-            {"date": (today - timedelta(days=10)).isoformat(), "net_worth": 1500.0},
-            {"date": today.isoformat(), "net_worth": 1600.0},
+            _history_point((today - timedelta(days=40)).isoformat(), 1200.0),
+            _history_point((today - timedelta(days=10)).isoformat(), 1500.0),
+            _history_point(today.isoformat(), 1600.0),
         ]
-        empty = pd.DataFrame(
-            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
-        )
-        result = build_home(empty, history)
+        # Needs a non-empty df/all_time_df -- an empty one short-circuits before
+        # net_worth_history is even read (see the discrepancy test above).
+        df = _frame([_tx(today.isoformat(), 10.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, history)
         self.assertAlmostEqual(result["net_worth_mom_delta"], 1600.0 - 1200.0)
 
     def test_net_worth_mom_delta_is_none_with_a_single_trend_point(self) -> None:
-        history = [{"date": date.today().isoformat(), "net_worth": 500.0}]
-        empty = pd.DataFrame(
-            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
-        )
-        result = build_home(empty, history)
+        history = [_history_point(date.today().isoformat(), 500.0)]
+        df = _frame([_tx(date.today().isoformat(), 10.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, history)
         self.assertIsNone(result["net_worth_mom_delta"])
 
     def test_upcoming_recurring_projects_next_charge_from_median_interval(self) -> None:
@@ -723,7 +676,7 @@ class HomeInsightsTests(unittest.TestCase):
             for d in occurrence_dates
         ]
         df = _frame(rows)
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
         self.assertIn("Music Streaming", upcoming)
         last_date = occurrence_dates[-1]
@@ -736,7 +689,7 @@ class HomeInsightsTests(unittest.TestCase):
         df = _frame(
             [_tx(date.today().isoformat(), 9.99, _EXPENSE, description="One Timer", is_recurring=True)]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         descriptions = [row["description"] for row in result["upcoming_recurring"]]
         self.assertNotIn("One Timer", descriptions)
 
@@ -754,7 +707,7 @@ class HomeInsightsTests(unittest.TestCase):
             for d in occurrence_dates
         ]
         df = _frame(rows)
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
         self.assertEqual(upcoming["Skewed Gap Sub"]["typical_interval_days"], 30)
 

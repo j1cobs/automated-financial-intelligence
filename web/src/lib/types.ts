@@ -74,8 +74,19 @@ export interface TopCategoryItem {
 
 export interface MonthOverMonthItem {
   category: string;
-  period: string;
-  amount: number;
+  this_month: number;
+  last_month: number;
+  /** The category's average monthly expense across complete months. `null` when
+   * there's no baseline history yet for this category. */
+  usual: number | null;
+  /** Fraction: `(this_month - usual) / usual`, baseline excludes the current
+   * in-progress month. `null` when `usual` isn't computable. */
+  this_month_drift_pct: number | null;
+  /** Fraction: `(last_month - usual) / usual`, using a baseline that ALSO excludes
+   * last month itself from the average -- a different, slightly more accurate
+   * baseline than `usual` above, computed only for this percentage. `null` when not
+   * computable. */
+  last_month_drift_pct: number | null;
 }
 
 export interface IncomeBreakdownItem {
@@ -104,6 +115,65 @@ export interface MetricSummary {
   sparkline: number[];
 }
 
+export interface NetWorthTrendDailyItem {
+  /** ISO date, one snapshot per calendar day the pipeline actually ran -- can be
+   * sparse if the pipeline hasn't run daily. */
+  date: string;
+  net_worth: number;
+  assets: number;
+  liabilities: number;
+  /** Depository-only balance -- the subset of `assets` that excludes investments. */
+  liquid_cash: number;
+}
+
+export interface NetWorthTrendMonthlyItem {
+  /** `YYYY-MM`. One row per calendar month, resampled from the last daily snapshot
+   * observed in that month. */
+  month: string;
+  net_worth: number;
+  savings_rate: number | null;
+  /** Fraction: aggregate credit balance that month ÷ today's total credit limit.
+   * `null` when no account has a set limit. */
+  credit_utilization_pct: number | null;
+  /** Liquid cash that month ÷ a trailing 6-month average expense as of that month.
+   * `null` until at least one month of expense history exists. */
+  emergency_fund_months: number | null;
+}
+
+export interface RecurringItem {
+  description: string;
+  amount: number;
+}
+
+export interface MerchantItem {
+  description: string;
+  amount: number;
+}
+
+export interface CashFlowProjection {
+  month: string;
+  spent_so_far: number;
+  income_so_far: number;
+  projected_expenses: number;
+  projected_income: number;
+  days_elapsed: number;
+  days_in_month: number;
+}
+
+export interface BiggestExpenseItem {
+  description: string;
+  amount: number;
+  date: string;
+}
+
+export interface UpcomingRecurringItem {
+  description: string;
+  amount: number;
+  /** A median-interval projection, not a confirmed billing date. */
+  next_expected_date: string;
+  typical_interval_days: number;
+}
+
 export interface Overview {
   income: number;
   expenses: number;
@@ -120,9 +190,25 @@ export interface Overview {
   metrics: Record<string, MetricSummary>;
   top_categories: TopCategoryItem[];
   month_over_month: MonthOverMonthItem[];
+  /** Current value (liquid savings ÷ average monthly expenses), for the Emergency
+   * Fund card's meter. `net_worth_trend_monthly[*].emergency_fund_months` is the
+   * historical trend version of the same idea, using a different (rolling 6-month)
+   * baseline -- the two can legitimately show slightly different current-month
+   * numbers; that's expected, not a bug. */
   emergency_fund_months: number | null;
   income_breakdown: IncomeBreakdownItem[];
   savings_rate_trend: SavingsRateTrendItem[];
+  // --- Former Home tab content (Phase 23) -----------------------------------------
+  net_worth_trend_daily: NetWorthTrendDailyItem[];
+  net_worth_trend_monthly: NetWorthTrendMonthlyItem[];
+  /** Latest net worth minus the closest snapshot at least one calendar month prior.
+   *  `null` when there isn't a full month of history yet. */
+  net_worth_mom_delta: number | null;
+  recurring_items: RecurringItem[];
+  top_merchants: MerchantItem[];
+  cash_flow_projection: CashFlowProjection | null;
+  biggest_expense_this_month: BiggestExpenseItem | null;
+  upcoming_recurring: UpcomingRecurringItem[];
 }
 
 export interface OverviewResponse {
@@ -197,80 +283,6 @@ export interface BudgetItem {
 export interface BudgetResponse {
   month: string | null;
   items: BudgetItem[];
-}
-
-// ---------------------------------------------------------------------------
-// GET /home
-// ---------------------------------------------------------------------------
-
-export interface NetWorthTrendItem {
-  date: string;
-  net_worth: number;
-}
-
-export interface RecurringItem {
-  description: string;
-  amount: number;
-}
-
-export interface MerchantItem {
-  description: string;
-  amount: number;
-}
-
-export interface CashFlowProjection {
-  month: string;
-  spent_so_far: number;
-  income_so_far: number;
-  projected_expenses: number;
-  projected_income: number;
-  days_elapsed: number;
-  days_in_month: number;
-}
-
-export interface CategoryDriftItem {
-  category: string;
-  current: number;
-  /** The category's own historical average over complete months, not a budget. */
-  baseline: number;
-  /** Fraction: `(current - baseline) / baseline`. Positive = spending more than usual. */
-  drift_pct: number;
-}
-
-export interface SubscriptionItem {
-  description: string;
-  average_amount: number;
-  /** Out of the trailing 6 months. */
-  months_seen: number;
-}
-
-export interface BiggestExpenseItem {
-  description: string;
-  amount: number;
-  date: string;
-}
-
-export interface UpcomingRecurringItem {
-  description: string;
-  amount: number;
-  /** A median-interval projection, not a confirmed billing date. */
-  next_expected_date: string;
-  typical_interval_days: number;
-}
-
-export interface HomeResponse {
-  net_worth_trend: NetWorthTrendItem[];
-  /** Latest net worth minus the closest sample at least one calendar month prior.
-   *  `null` when there isn't a full month of history yet. */
-  net_worth_mom_delta: number | null;
-  recurring_monthly_spend: number;
-  recurring_items: RecurringItem[];
-  top_merchants: MerchantItem[];
-  cash_flow_projection: CashFlowProjection | null;
-  category_drift: CategoryDriftItem[];
-  subscriptions: SubscriptionItem[];
-  biggest_expense_this_month: BiggestExpenseItem | null;
-  upcoming_recurring: UpcomingRecurringItem[];
 }
 
 // ---------------------------------------------------------------------------

@@ -160,7 +160,6 @@ class ApiDataTestCase(unittest.TestCase):
 
 READ_ENDPOINTS = [
     "/overview",
-    "/home",
     "/cash-flow",
     "/budget",
     "/ledger",
@@ -328,28 +327,41 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         self.assertEqual(body["overview"]["income"], 1000.0)
         self.assertEqual(body["overview"]["flagged_count"], 1)
 
-    def test_home_shape_and_net_worth_history_passthrough(self) -> None:
+    def test_overview_carries_former_home_shape_and_net_worth_history_passthrough(self) -> None:
+        """Phase 23 folded the former /home endpoint's insights into /overview."""
         self._authed_client()
         self.mock_db.get_net_worth_history.return_value = [
-            {"date": "2026-08-23", "net_worth": 900.0},
-            {"date": "2026-08-24", "net_worth": 1000.0},
+            {"date": "2026-08-23", "net_worth": 900.0, "assets": 900.0, "liabilities": 0.0, "liquid_cash": 900.0},
+            {"date": "2026-08-24", "net_worth": 1000.0, "assets": 1000.0, "liabilities": 0.0, "liquid_cash": 1000.0},
         ]
         with self._load_financial_data_patch():
-            response = self.client.get("/home")
+            response = self.client.get("/overview")
         self.assertEqual(response.status_code, 200)
-        body = response.json()
+        overview = response.json()["overview"]
         self.assertEqual(
-            body["net_worth_trend"],
+            overview["net_worth_trend_daily"],
             [
-                {"date": "2026-08-23", "net_worth": 900.0},
-                {"date": "2026-08-24", "net_worth": 1000.0},
+                {
+                    "date": "2026-08-23",
+                    "net_worth": 900.0,
+                    "assets": 900.0,
+                    "liabilities": 0.0,
+                    "liquid_cash": 900.0,
+                },
+                {
+                    "date": "2026-08-24",
+                    "net_worth": 1000.0,
+                    "assets": 1000.0,
+                    "liabilities": 0.0,
+                    "liquid_cash": 1000.0,
+                },
             ],
         )
         # hash-1 is flagged is_recurring=True in _tx_df but is an income row, so it
         # must not show up as a recurring EXPENSE.
-        self.assertEqual(body["recurring_items"], [])
-        for key in ("top_merchants", "category_drift", "subscriptions"):
-            self.assertIn(key, body)
+        self.assertEqual(overview["recurring_items"], [])
+        for key in ("top_merchants", "net_worth_trend_monthly", "net_worth_mom_delta", "upcoming_recurring"):
+            self.assertIn(key, overview)
 
     def test_cash_flow_shape(self) -> None:
         self._authed_client()

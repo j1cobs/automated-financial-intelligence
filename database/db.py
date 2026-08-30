@@ -286,19 +286,23 @@ class DatabaseClient:
             self._execute_many(sql, rows)
 
     def get_net_worth_history(self) -> list[dict[str, Any]]:
-        """Daily net worth from `account_balance_snapshots`, joined against the accounts
-        table's CURRENT type (an account's type is treated as effectively static --
-        Plaid doesn't change it after linking, so joining on today's `accounts` row is
-        fine even for a historical snapshot). Signed the same way
+        """Daily net worth (plus its components) from `account_balance_snapshots`, joined
+        against the accounts table's CURRENT type (an account's type is treated as
+        effectively static -- Plaid doesn't change it after linking, so joining on today's
+        `accounts` row is fine even for a historical snapshot). Signed the same way
         `api/viewmodels.py::build_net_worth` signs the live figure: depository and
         investment balances are assets, credit balances are a liability subtracted off.
+        `liquid_cash` is the depository-only subset of `assets` (excludes investment
+        balances) -- Phase 23 added it so the Overview trend chart can show "cash on hand"
+        separately from total assets, without a second query.
         """
         sql = """
         SELECT
             s.snapshot_date,
             SUM(CASE WHEN a.account_type IN ('depository', 'investment') THEN s.balance_current ELSE 0 END)
                 AS assets,
-            SUM(CASE WHEN a.account_type = 'credit' THEN s.balance_current ELSE 0 END) AS liabilities
+            SUM(CASE WHEN a.account_type = 'credit' THEN s.balance_current ELSE 0 END) AS liabilities,
+            SUM(CASE WHEN a.account_type = 'depository' THEN s.balance_current ELSE 0 END) AS liquid_cash
         FROM account_balance_snapshots s
         JOIN accounts a ON a.account_key = s.account_key
         GROUP BY s.snapshot_date
@@ -312,8 +316,11 @@ class DatabaseClient:
             {
                 "date": snapshot_date.isoformat(),
                 "net_worth": float((assets or 0) - (liabilities or 0)),
+                "assets": float(assets or 0),
+                "liabilities": float(liabilities or 0),
+                "liquid_cash": float(liquid_cash or 0),
             }
-            for snapshot_date, assets, liabilities in rows
+            for snapshot_date, assets, liabilities, liquid_cash in rows
         ]
 
     def count_by_source(self) -> dict[str, dict[str, int]]:

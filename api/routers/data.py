@@ -26,7 +26,6 @@ from ..viewmodels import (
     build_anomalies,
     build_budget,
     build_cash_flow,
-    build_home,
     build_ledger,
     build_net_worth,
     build_overview,
@@ -130,9 +129,27 @@ class TopCategoryItem(BaseModel):
 
 
 class MonthOverMonthItem(BaseModel):
+    """Wide row: one object per category carrying both months plus the "usual" baseline
+    and drift context (Phase 23 folded the former Home tab's Category Drift card into
+    this chart's data instead of shipping it separately). The long `{category, period,
+    amount}` shape this used to be forced the frontend to pivot itself — moved
+    server-side per this module's own "series are returned wide" rule."""
+
     category: str
-    period: str
-    amount: float
+    this_month: float
+    last_month: float
+    usual: float | None
+    """The category's average monthly expense across complete months. None when there's
+    no baseline history yet for this category."""
+    this_month_drift_pct: float | None
+    """Fraction: `(this_month - usual) / usual`, using a baseline that excludes the
+    current (in-progress) month. None when `usual` isn't computable."""
+    last_month_drift_pct: float | None
+    """Fraction: `(last_month - usual) / usual`, using a baseline that additionally
+    excludes last month itself from the average (so last month is never judged against
+    a baseline partly made of itself) -- a DIFFERENT, slightly more accurate baseline
+    than the `usual` value above, computed only for this percentage. None when not
+    computable."""
 
 
 class IncomeBreakdownItem(BaseModel):
@@ -192,8 +209,23 @@ class Overview(BaseModel):
     top_categories: list[TopCategoryItem]
     month_over_month: list[MonthOverMonthItem]
     emergency_fund_months: float | None
+    """Current value (liquid savings ÷ average monthly expenses), for the Emergency Fund
+    card's meter. `net_worth_trend_monthly[*].emergency_fund_months` below is the
+    historical trend version of the same idea -- the two use different baselines (this
+    one an all-time average, the trend a rolling 6-month one) so they can legitimately
+    show slightly different numbers for the current month; that's expected, not a bug."""
     income_breakdown: list[IncomeBreakdownItem]
     savings_rate_trend: list[SavingsRateTrendItem]
+    # --- Former Home tab content (Phase 23) -----------------------------------------
+    net_worth_trend_daily: list[NetWorthTrendDailyItem]
+    net_worth_trend_monthly: list[NetWorthTrendMonthlyItem]
+    net_worth_mom_delta: float | None
+    """Latest net worth minus the closest snapshot at least one calendar month prior."""
+    recurring_items: list[RecurringItem]
+    top_merchants: list[MerchantItem]
+    cash_flow_projection: CashFlowProjection | None
+    biggest_expense_this_month: BiggestExpenseItem | None
+    upcoming_recurring: list[UpcomingRecurringItem]
 
 
 class OverviewResponse(BaseModel):
@@ -269,10 +301,31 @@ class BudgetResponse(BaseModel):
     items: list[BudgetItem]
 
 
-class NetWorthTrendItem(BaseModel):
+class NetWorthTrendDailyItem(BaseModel):
     date: str
-    """ISO date, one snapshot per calendar day (`account_balance_snapshots`)."""
+    """ISO date, one snapshot per calendar day the pipeline actually ran
+    (`account_balance_snapshots`) -- can be sparse if the pipeline hasn't run daily."""
     net_worth: float
+    assets: float
+    liabilities: float
+    liquid_cash: float
+    """Depository-only balance -- the subset of `assets` that excludes investments."""
+
+
+class NetWorthTrendMonthlyItem(BaseModel):
+    month: str
+    """`YYYY-MM`. One row per calendar month, resampled from the last daily snapshot
+    observed in that month."""
+    net_worth: float
+    savings_rate: float | None
+    """Fraction (0.2 = 20%). None when the month's income was below the rate floor —
+    see `SavingsRateTrendItem`."""
+    credit_utilization_pct: float | None
+    """Fraction: aggregate credit balance that month ÷ today's total credit limit.
+    None when no account has a set limit."""
+    emergency_fund_months: float | None
+    """Liquid cash that month ÷ a trailing 6-month average expense as of that month.
+    None until at least one month of expense history exists."""
 
 
 class RecurringItem(BaseModel):
@@ -295,22 +348,6 @@ class CashFlowProjection(BaseModel):
     days_in_month: int
 
 
-class CategoryDriftItem(BaseModel):
-    category: str
-    current: float
-    baseline: float
-    """The category's own historical average over complete months, not a budget."""
-    drift_pct: float
-    """Fraction: `(current - baseline) / baseline`. Positive = spending more than usual."""
-
-
-class SubscriptionItem(BaseModel):
-    description: str
-    average_amount: float
-    months_seen: int
-    """Out of the trailing 6 months."""
-
-
 class BiggestExpenseItem(BaseModel):
     description: str
     amount: float
@@ -324,19 +361,6 @@ class UpcomingRecurringItem(BaseModel):
     """A projection (last occurrence + median inter-occurrence interval), not a
     confirmed billing date -- the frontend hedges its copy accordingly."""
     typical_interval_days: int
-
-
-class HomeResponse(BaseModel):
-    net_worth_trend: list[NetWorthTrendItem]
-    net_worth_mom_delta: float | None
-    recurring_monthly_spend: float
-    recurring_items: list[RecurringItem]
-    top_merchants: list[MerchantItem]
-    biggest_expense_this_month: BiggestExpenseItem | None
-    cash_flow_projection: CashFlowProjection | None
-    category_drift: list[CategoryDriftItem]
-    subscriptions: list[SubscriptionItem]
-    upcoming_recurring: list[UpcomingRecurringItem]
 
 
 class LedgerItem(BaseModel):
@@ -406,18 +430,14 @@ def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -
                 exclude_duplicate_rows(filtered),
                 acct_df,
                 exclude_duplicate_rows(all_time),
+                # `all_time` (not `filtered`): every former-Home insight compares against
+                # the user's own full history, same reasoning the rest of this frame's
+                # baselines use -- a status surface that changed shape under an active
+                # period filter would defeat its own purpose (Phase 23).
+                db.get_net_worth_history(),
             )
         ),
     )
-
-
-@router.get("/home", response_model=HomeResponse)
-def get_home(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> HomeResponse:
-    # `all_time` (not `filtered`): every Home insight compares against the user's own
-    # full history, same reasoning `build_overview`'s baselines use -- a status page
-    # that changes shape under an active period filter would defeat its own purpose.
-    _tx, _filtered, all_time, _acct_df = _load_filtered(db, filters)
-    return HomeResponse(**build_home(exclude_duplicate_rows(all_time), db.get_net_worth_history()))
 
 
 @router.get("/cash-flow", response_model=CashFlowResponse)
