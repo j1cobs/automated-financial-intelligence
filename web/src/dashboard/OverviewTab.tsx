@@ -10,12 +10,11 @@ import type {
   TopCategoryItem,
 } from '../lib/types';
 import { MetricTile, MetricInfoBadge } from './MetricTile';
+import { NetWorthTrendChart } from './NetWorthTrendChart';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { formatCategory } from '../lib/categories';
 import {
-  LineChart,
-  Line,
   BarChart,
   Bar,
   XAxis,
@@ -25,7 +24,6 @@ import {
   Legend,
   ResponsiveContainer,
   LabelList,
-  ReferenceLine,
 } from 'recharts';
 import {
   useChartTheme,
@@ -38,7 +36,6 @@ import {
   yAxisProps,
   tooltipProps,
   legendProps,
-  referenceLineProps,
   surfaceGapProps,
   onFillTextColor,
   AXIS_FONT_SIZE,
@@ -402,24 +399,72 @@ function CreditLimitEditor({ items }: { items: CreditUtilizationItem[] }) {
   );
 }
 
-/** Pivots the API's long `{category, period, amount}` rows into one wide row
- * per category so a single grouped `<BarChart>` can plot both series. */
-function buildMonthOverMonthRows(
-  items: MonthOverMonthItem[],
-): { category: string; this_month: number; last_month: number }[] {
-  const byCategory = new Map<string, { this_month: number; last_month: number }>();
-  for (const item of items) {
-    const entry = byCategory.get(item.category) ?? { this_month: 0, last_month: 0 };
-    if (item.period === 'this_month') {
-      entry.this_month = item.amount;
-    } else if (item.period === 'last_month') {
-      entry.last_month = item.amount;
-    }
-    byCategory.set(item.category, entry);
+/** Humanized, deliberately hedged phrasing for a projected (not confirmed) billing
+ *  date -- "next_expected_date" is a median-interval estimate, so the copy reads as
+ *  a guess ("~in 5 days" / "around Aug 29"), never as a scheduled certainty. */
+function formatRelativeDate(isoDate: string): string {
+  const target = new Date(`${isoDate}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysAway = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysAway >= 0 && daysAway <= 10) {
+    if (daysAway === 0) return '~today';
+    if (daysAway === 1) return '~tomorrow';
+    return `~in ${daysAway} days`;
   }
-  return Array.from(byCategory.entries())
-    .map(([category, amounts]) => ({ category, ...amounts }))
-    .sort((a, b) => b.this_month - a.this_month);
+  if (daysAway < 0 && daysAway >= -10) {
+    return daysAway === -1 ? '~yesterday' : `~${Math.abs(daysAway)} days ago`;
+  }
+  const label = target.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `around ${label}`;
+}
+
+interface DriftLabelProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  payload?: MonthOverMonthItem;
+}
+
+/** Minimum bar-segment width (px) that can hold a short "+18%" style label
+ *  without overlapping its neighbours -- mirrors `renderAssetMixSegmentLabel`'s
+ *  narrow-segment guard, just with a smaller threshold since this label is
+ *  shorter than "Savings 12%". */
+const DRIFT_LABEL_MIN_WIDTH = 32;
+
+/** Bar-top "vs usual" percentage label for the Month-over-Month chart's
+ *  `this_month`/`last_month` bars -- reads the matching drift field off the
+ *  row `LabelList`'s `content` callback hands back via `payload`, and renders
+ *  nothing when there's no baseline (`null`) or the segment is too narrow to
+ *  hold text. */
+function renderDriftLabel(
+  props: DriftLabelProps,
+  field: 'this_month_drift_pct' | 'last_month_drift_pct',
+  fill: string,
+) {
+  const { x, y, width, height, payload } = props;
+  if (x == null || y == null || width == null || height == null || payload == null) {
+    return null;
+  }
+  const driftPct = payload[field];
+  if (driftPct == null || width < DRIFT_LABEL_MIN_WIDTH) {
+    return null;
+  }
+  const sign = driftPct >= 0 ? '+' : '';
+  return (
+    <text
+      x={x + width / 2}
+      y={y + height / 2}
+      textAnchor="middle"
+      dominantBaseline="central"
+      fontSize={AXIS_FONT_SIZE}
+      fontWeight={600}
+      fill={onFillTextColor(fill)}
+    >
+      {`${sign}${Math.round(driftPct * 100)}%`}
+    </text>
+  );
 }
 
 export function OverviewTab() {
@@ -461,7 +506,6 @@ export function OverviewTab() {
 
   const nw = data.net_worth;
   const ov = data.overview;
-  const hiddenSavingsMonths = ov.savings_rate_trend.filter((point) => point.savings_rate === null).length;
   // These three tiles average only whole calendar months, so say which window they cover —
   // otherwise "Monthly Expenses" is a number with no stated basis.
   const monthlyWindow =
@@ -469,7 +513,7 @@ export function OverviewTab() {
       ? 'not enough complete months'
       : `avg of ${ov.complete_months} complete ${ov.complete_months === 1 ? 'month' : 'months'}`;
   const dormantCount = nw.dormant_accounts.length;
-  const monthOverMonthRows = buildMonthOverMonthRows(ov.month_over_month);
+  const monthOverMonthRows = ov.month_over_month;
   const sortedIncomeBreakdown = [...ov.income_breakdown].sort((a, b) => b.amount - a.amount);
   const assetMixTotal = nw.asset_mix.reduce((sum, item) => sum + item.balance, 0);
   // Fixed order (depository, investment, credit, other), filtered to types
@@ -504,6 +548,13 @@ export function OverviewTab() {
           format="percent"
           metric={ov.metrics.savings_rate}
         />
+        {ov.cash_flow_projection && (
+          <MetricTile
+            metricKey="projected_month_end_expenses"
+            value={ov.cash_flow_projection.projected_expenses}
+            sublabel={`day ${ov.cash_flow_projection.days_elapsed} of ${ov.cash_flow_projection.days_in_month}`}
+          />
+        )}
       </div>
 
       {/* Duplicate-account warning — mirrors app/dashboard.py:537-543 */}
@@ -540,46 +591,88 @@ export function OverviewTab() {
         />
       </div>
 
-      {/* Savings Rate Trend Chart */}
-      {ov?.savings_rate_trend && ov.savings_rate_trend.length > 0 && (
-        <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-          <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Savings Rate Trend</h3>
-          <ResponsiveContainer width="100%" height={250} minWidth="100%">
-            <LineChart data={ov.savings_rate_trend} margin={CHART_MARGIN.default}>
-              <CartesianGrid {...gridProps()} />
-              {/* `interval="preserveStartEnd"` thins month ticks on a short
-                  filter-bounded series so labels don't crowd into each other;
-                  a wider y-axis (64 vs. the 56px default) gives the
-                  percent-formatted ticks (e.g. "-100.0%") room too -- both
-                  scoped to this chart rather than the shared axis defaults. */}
-              <XAxis dataKey="month" {...xAxisProps()} interval="preserveStartEnd" />
-              <YAxis
-                {...yAxisProps(64)}
-                tickFormatter={(value) => formatPercent(value)}
-                domain={[-1, 1]}
-                allowDataOverflow={true}
-              />
-              <Tooltip {...tooltipProps()} formatter={(value) => formatPercent(value as number)} />
-              <ReferenceLine y={0.2} {...referenceLineProps()} strokeDasharray="4 4" label="Target 20%" />
-              <Line
-                type="monotone"
-                dataKey="savings_rate"
-                stroke={categoricalColor(0)}
-                strokeWidth={2}
-                dot={{ fill: categoricalColor(0) }}
-                name="Savings Rate"
-                connectNulls={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-          {hiddenSavingsMonths > 0 && (
-            <p className="mt-2 text-xs text-ink-muted">
-              {hiddenSavingsMonths} {hiddenSavingsMonths === 1 ? 'month' : 'months'} hidden — no recorded
-              income.
+      {/* Net Worth Trend -- former Home tab content (Phase 23), replacing the
+          old standalone Savings Rate Trend chart; that series now lives inside
+          this component's Monthly tab. */}
+      <NetWorthTrendChart
+        daily={ov.net_worth_trend_daily}
+        monthly={ov.net_worth_trend_monthly}
+        netWorthMomDelta={ov.net_worth_mom_delta}
+      />
+
+      {/* Biggest Expense This Month / Upcoming Recurring Charges -- former
+          Home tab content (Phase 23). */}
+      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+        <Card title="Biggest Expense This Month">
+          {ov.biggest_expense_this_month ? (
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-ink-secondary">
+                {ov.biggest_expense_this_month.description}{' '}
+                <span className="text-ink-muted">· {ov.biggest_expense_this_month.date}</span>
+              </span>
+              <span className="tabular-nums font-medium text-ink">
+                {formatCurrency(ov.biggest_expense_this_month.amount)}
+              </span>
+            </div>
+          ) : (
+            <p className="text-sm text-ink-muted">No expenses recorded this month.</p>
+          )}
+        </Card>
+
+        <Card title="Upcoming Recurring Charges">
+          {ov.upcoming_recurring.length > 0 ? (
+            <ul className="space-y-1.5">
+              {ov.upcoming_recurring.map((row) => (
+                <li key={row.description} className="flex items-center justify-between text-sm">
+                  <span className="text-ink-secondary">
+                    {row.description}{' '}
+                    <span className="text-ink-muted">· {formatRelativeDate(row.next_expected_date)}</span>
+                  </span>
+                  <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-ink-muted">No recurring charges with a predictable cadence yet.</p>
+          )}
+        </Card>
+      </div>
+
+      {/* Top Merchants / Committed Recurring Spend -- former Home tab content
+          (Phase 23). */}
+      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+        <Card title="Top Merchants (Trailing 12 Months)">
+          {ov.top_merchants.length > 0 ? (
+            <ul className="space-y-1.5">
+              {ov.top_merchants.map((row) => (
+                <li key={row.description} className="flex items-center justify-between text-sm">
+                  <span className="text-ink-secondary">{row.description}</span>
+                  <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-ink-muted">Not enough expense history yet.</p>
+          )}
+        </Card>
+
+        <Card title="Committed / Recurring Spend">
+          {ov.recurring_items.length > 0 ? (
+            <ul className="space-y-1.5">
+              {ov.recurring_items.map((row) => (
+                <li key={row.description} className="flex items-center justify-between text-sm">
+                  <span className="text-ink-secondary">{row.description}</span>
+                  <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-ink-muted">
+              Nothing flagged recurring yet — mark a transaction recurring in the Transactions tab.
             </p>
           )}
-        </div>
-      )}
+        </Card>
+      </div>
 
       {/* Emergency Fund and Asset Mix -- paired because both are short, fixed
           -height cards (a few text lines + meter; a single 120px stacked bar).
@@ -745,11 +838,32 @@ export function OverviewTab() {
                   fill={categoricalColor(1)}
                   maxBarSize={BAR_MAX_SIZE}
                   radius={BAR_RADIUS_HORIZONTAL}
-                />
+                >
+                  <LabelList
+                    dataKey="last_month"
+                    content={(props: object) =>
+                      renderDriftLabel(props as DriftLabelProps, 'last_month_drift_pct', categoricalColor(1))
+                    }
+                  />
+                </Bar>
                 <Bar
                   dataKey="this_month"
                   name="This month"
                   fill={categoricalColor(0)}
+                  maxBarSize={BAR_MAX_SIZE}
+                  radius={BAR_RADIUS_HORIZONTAL}
+                >
+                  <LabelList
+                    dataKey="this_month"
+                    content={(props: object) =>
+                      renderDriftLabel(props as DriftLabelProps, 'this_month_drift_pct', categoricalColor(0))
+                    }
+                  />
+                </Bar>
+                <Bar
+                  dataKey="usual"
+                  name="Usual"
+                  fill={categoricalColor(2)}
                   maxBarSize={BAR_MAX_SIZE}
                   radius={BAR_RADIUS_HORIZONTAL}
                 />
