@@ -11,6 +11,7 @@ function tx(overrides: Partial<LedgerItem>): LedgerItem {
     description: 'Unnamed',
     amount: 0,
     category: null,
+    tx_type: 'expense',
     is_recurring: false,
     is_duplicate: false,
     ...overrides,

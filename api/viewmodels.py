@@ -1010,6 +1010,7 @@ def build_ledger(df: pd.DataFrame) -> list[dict[str, Any]]:
             "description": row["description"],
             "amount": float(row["adjusted_amount"]),
             "category": _clean(row["category"]),
+            "tx_type": row["tx_type"],
             "is_recurring": bool(row["is_recurring"]) if pd.notna(row["is_recurring"]) else False,
             "is_duplicate": bool(row["is_duplicate"]) if pd.notna(row["is_duplicate"]) else False,
         }

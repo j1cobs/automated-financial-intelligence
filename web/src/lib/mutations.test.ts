@@ -41,6 +41,7 @@ const ledgerData: LedgerResponse = {
       description: 'Grocery Store',
       amount: -50.25,
       category: 'Uncategorized',
+      tx_type: 'expense',
       is_recurring: false,
       is_duplicate: false,
     },

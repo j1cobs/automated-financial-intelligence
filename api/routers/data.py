@@ -371,6 +371,7 @@ class LedgerItem(BaseModel):
     description: str
     amount: float
     category: str | None
+    tx_type: str
     is_recurring: bool
     is_duplicate: bool
 

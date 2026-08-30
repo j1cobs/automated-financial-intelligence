@@ -14,11 +14,11 @@
  * require mutating the user's actual dashboard filters just to preview one
  * period.
  *
- * `LedgerItem` (see `lib/types.ts`) carries no `tx_type` field -- unlike the
- * aggregate endpoints, the ledger only has `amount`, so the income/expense
- * split here follows the same sign convention `TransactionsTab.tsx`'s
- * `AmountCell` and its "Positive amounts are income or credits. Negative
- * amounts are expenses or debits." caption already document.
+ * `LedgerItem` (see `lib/types.ts`) carries `tx_type`, which is used to filter
+ * out transfers before splitting on amount sign. Likewise, `is_duplicate` rows
+ * are excluded, so the income/expense totals here match `/cash-flow`'s chart
+ * aggregation (which excludes the same categories). Sign convention: positive
+ * amounts are income or credits; negative amounts are expenses or debits.
  *
  * Within each column, transactions are grouped by `description` (not
  * `category` -- the ML classifier is still a Phase-1 stub per `CLAUDE.md`, so
@@ -193,8 +193,9 @@ export function PeriodTransactionsPreview({
   });
 
   const transactions = data?.transactions ?? [];
-  const income = transactions.filter((tx) => tx.amount >= 0);
-  const expenses = transactions.filter((tx) => tx.amount < 0);
+  const relevant = transactions.filter((tx) => !tx.is_duplicate && tx.tx_type !== 'transfer');
+  const income = relevant.filter((tx) => tx.amount >= 0);
+  const expenses = relevant.filter((tx) => tx.amount < 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

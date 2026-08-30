@@ -297,6 +297,7 @@ export interface LedgerItem {
   description: string;
   amount: number;
   category: string | null;
+  tx_type: string;
   is_recurring: boolean;
   is_duplicate: boolean;
 }
