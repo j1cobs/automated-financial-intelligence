@@ -348,9 +348,9 @@ function LedgerRow({
       }`}
     >
       <td className="px-2 py-2 sm:px-4 sm:py-3">{formatDate(tx.date)}</td>
-      <td className="whitespace-nowrap px-2 py-2 sm:px-4 sm:py-3">
-        {tx.account_name}
-        {tx.owner_name && <div className="text-xs text-ink-muted">{tx.owner_name}</div>}
+      <td className="max-w-[7rem] px-2 py-2 sm:max-w-[11rem] sm:px-4 sm:py-3">
+        <div className="truncate">{tx.account_name}</div>
+        {tx.owner_name && <div className="truncate text-xs text-ink-muted">{tx.owner_name}</div>}
       </td>
       <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.is_duplicate ? 'line-through' : ''}`}>
         {tx.description}
@@ -383,7 +383,9 @@ function LedgerRow({
             onClick={() => onStartEdit(tx.hash, tx.category || 'UNCATEGORIZED')}
             className="flex min-h-9 w-full items-center rounded px-2 py-1 text-left text-ink hover:bg-surface-3"
           >
-            {tx.category ? formatCategory(tx.category) : <span className="text-ink-muted">—</span>}
+            <span className="truncate">
+              {tx.category ? formatCategory(tx.category) : <span className="text-ink-muted">—</span>}
+            </span>
           </button>
         )}
       </td>
