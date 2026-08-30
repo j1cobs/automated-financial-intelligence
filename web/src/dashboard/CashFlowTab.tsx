@@ -583,7 +583,6 @@ export function CashFlowTab({
                   }
                   activeDot={activeDotProps()}
                 />
-                {showBrush && <Brush dataKey="date" {...brushProps()} />}
               </LineChart>
             </ResponsiveContainer>
           </div>
