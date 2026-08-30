@@ -526,6 +526,49 @@ class OverviewHomeInsightsTests(unittest.TestCase):
         self.assertEqual(result["top_merchants"], [])
         self.assertIsNone(result["cash_flow_projection"])
 
+    def test_net_worth_trend_monthly_excludes_credit_utilization_for_the_current_month(self) -> None:
+        # Phase 24 fix: credit_utilization_pct previously leaked a value for the
+        # in-progress current month even though savings_rate/emergency_fund_months
+        # (computed from series that already exclude the current month upstream) never
+        # did -- all three "monthly extra" metrics must follow the same "no value until
+        # the month is complete" rule.
+        last_month = _month_start(1)
+        current_month = date.today().replace(day=1)
+        acct_df = pd.DataFrame(
+            [_account("plaid:cc1", "Jacob", "credit", 300.0, balance_limit=1000.0)]
+        )
+        # Not `_history_point()`: that helper hardcodes `liabilities: 0.0`, but this
+        # test needs a nonzero credit balance to exercise `credit_utilization_pct`.
+        history = [
+            {
+                "date": last_month.isoformat(),
+                "net_worth": 700.0,
+                "assets": 1000.0,
+                "liabilities": 300.0,
+                "liquid_cash": 1000.0,
+            },
+            {
+                "date": current_month.isoformat(),
+                "net_worth": 700.0,
+                "assets": 1000.0,
+                "liabilities": 300.0,
+                "liquid_cash": 1000.0,
+            },
+        ]
+        # Some transaction history is needed so `all_time_months`/`complete_month_keys`
+        # treats `last_month` as complete -- spread across the month like other tests
+        # in this file do.
+        df = _frame(
+            [
+                _tx(last_month.isoformat(), 50.0, _EXPENSE),
+                _tx(last_month.replace(day=28).isoformat(), 50.0, _EXPENSE),
+            ]
+        )
+        result = build_overview(df, acct_df, df, history)
+        by_month = {row["month"]: row for row in result["net_worth_trend_monthly"]}
+        self.assertAlmostEqual(by_month[last_month.strftime("%Y-%m")]["credit_utilization_pct"], 0.3)
+        self.assertIsNone(by_month[current_month.strftime("%Y-%m")]["credit_utilization_pct"])
+
     def test_recurring_items_lists_only_flagged_expenses(self) -> None:
         baseline = _month_start(2)
         # Spread across the month (day 1 and day 28) so its observed span covers the

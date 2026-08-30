@@ -1,7 +1,9 @@
 /**
- * Net Worth Trend chart (Phase 23): the former Home tab's net-worth-history
- * insight, now a self-contained component embedded in the Overview tab in
- * place of the old standalone Savings Rate Trend chart. Purely presentational
+ * Financial Trends chart (Phase 23, retitled Phase 24): the former Home tab's
+ * net-worth-history insight, now a self-contained component embedded in the
+ * Overview tab in place of the old standalone Savings Rate Trend chart. Named
+ * "Financial Trends" rather than "Net Worth Trend" since the Monthly tab
+ * carries four different metrics, not just net worth. Purely presentational
  * -- the parent (`OverviewTab.tsx`) fetches via `useOverview()` and passes the
  * two trend arrays plus the month-over-month delta down as props.
  *
@@ -114,7 +116,7 @@ export function NetWorthTrendChart({ daily, monthly, netWorthMomDelta }: NetWort
   return (
     <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-base sm:text-lg font-semibold text-ink">Net Worth Trend</h3>
+        <h3 className="text-base sm:text-lg font-semibold text-ink">Financial Trends</h3>
         <div className="inline-flex rounded-full border border-hairline bg-surface-2 p-1">
           <TabPill active={tab === 'daily'} onClick={() => setTab('daily')}>
             Daily

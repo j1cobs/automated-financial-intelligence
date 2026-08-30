@@ -737,7 +737,12 @@ def build_overview(
         # history is exactly the credit-account balance sum (see get_net_worth_history's
         # docstring) -- divide by TODAY's total credit limit, same simplifying
         # assumption `build_net_worth`'s current-value card already makes (limits rarely
-        # change, and this is a household dashboard, not a compliance system).
+        # change, and this is a household dashboard, not a compliance system). Excluded
+        # for the current in-progress month (see the `month_key != current_month_str`
+        # guard below), same "no value until the month is complete" rule
+        # `savings_rate_by_month`/`rolling_avg_expense` already apply for free via their
+        # own upstream all-time series -- without this, the current month's row showed a
+        # value for this one metric only, which read as broken rather than incomplete.
         total_credit_limit = 0.0
         if not acct_df.empty and "account_type" in acct_df.columns:
             for _, row in acct_df[acct_df["account_type"] == "credit"].iterrows():
@@ -756,7 +761,9 @@ def build_overview(
         for month_key in sorted(by_month):
             snap = by_month[month_key]
             credit_utilization_pct = (
-                snap["liabilities"] / total_credit_limit if total_credit_limit > 0 else None
+                snap["liabilities"] / total_credit_limit
+                if total_credit_limit > 0 and month_key != current_month_str
+                else None
             )
             avg_expense = (
                 float(rolling_avg_expense.get(month_key))

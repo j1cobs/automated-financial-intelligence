@@ -537,23 +537,84 @@ export function OverviewTab() {
     <div className="space-y-6">
       {/* KPI Tiles -- MetricTile (Fix 12/13): value + baseline comparison +
           sparkline where the API provides it, plus a hover/tap tooltip for
-          every metric from `metricInfo.ts`. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <MetricTile metricKey="net_worth" value={nw.net_worth} />
-        <MetricTile metricKey="total_assets" value={nw.total_assets} />
-        <MetricTile metricKey="total_liabilities" value={nw.total_liabilities} />
-        <MetricTile
-          metricKey="savings_rate"
-          value={ov.savings_rate}
-          format="percent"
-          metric={ov.metrics.savings_rate}
-        />
-        {ov.cash_flow_projection && (
+          every metric from `metricInfo.ts`. All 11 top-level metric tiles
+          (former top-row / Income-Expenses-Net-Flow / Additional-Metrics
+          rows) live in one flex-wrap row so they read as a single glanceable
+          block. Width is a percentage of the container computed against a
+          fixed 4-column target (`calc(25% - 0.75rem)` at `lg`, accounting
+          for 3 gaps across 4 tiles at gap-4/1rem) rather than a fixed pixel
+          width -- a fixed pixel width lets the number of tiles-per-row drift
+          with the container's raw pixel width, splitting unevenly (e.g. 5+3
+          instead of 4+4). `justify-center` on the container only visibly
+          centers the genuinely short last row, since a fully-packed row has
+          no leftover space to center. `[&>*]:h-full` stretches each
+          `MetricTile` (its wrapper's only child) to the row's tallest tile --
+          flexbox's default `align-items: stretch` already equalizes the
+          wrapper's own height per row, but `MetricTile` doesn't accept a
+          `className` to fill that height on its own. */}
+      <div className="flex flex-wrap justify-center gap-4">
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="net_worth" value={nw.net_worth} />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="total_assets" value={nw.total_assets} />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="total_liabilities" value={nw.total_liabilities} />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
           <MetricTile
-            metricKey="projected_month_end_expenses"
-            value={ov.cash_flow_projection.projected_expenses}
-            sublabel={`day ${ov.cash_flow_projection.days_elapsed} of ${ov.cash_flow_projection.days_in_month}`}
+            metricKey="savings_rate"
+            value={ov.savings_rate}
+            format="percent"
+            metric={ov.metrics.savings_rate}
           />
+        </div>
+        {ov.cash_flow_projection && (
+          <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+            <MetricTile
+              metricKey="projected_month_end_expenses"
+              value={ov.cash_flow_projection.projected_expenses}
+              sublabel={`day ${ov.cash_flow_projection.days_elapsed} of ${ov.cash_flow_projection.days_in_month}`}
+            />
+          </div>
+        )}
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="avg_monthly_income"
+            value={ov.avg_monthly_income}
+            sublabel={monthlyWindow}
+            metric={ov.metrics.avg_monthly_income}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="avg_monthly_expense"
+            value={ov.avg_monthly_expense}
+            sublabel={monthlyWindow}
+            metric={ov.metrics.avg_monthly_expense}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="avg_monthly_net"
+            value={ov.avg_monthly_net}
+            sublabel={monthlyWindow}
+            metric={ov.metrics.avg_monthly_net}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="flagged_count" value={ov.flagged_count} format="number" />
+        </div>
+        {ov.avg_weekly_expense > 0 && (
+          <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+            <MetricTile metricKey="avg_weekly_expense" value={ov.avg_weekly_expense} />
+          </div>
+        )}
+        {ov.avg_weekly_income > 0 && (
+          <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+            <MetricTile metricKey="avg_weekly_income" value={ov.avg_weekly_income} />
+          </div>
         )}
       </div>
 
@@ -566,30 +627,6 @@ export function OverviewTab() {
           <p className="mt-2 text-sm text-ink-secondary">{nw.forked_accounts.join(', ')}</p>
         </div>
       )}
-
-      {/* Income and Expenses Row -- all three tiles pass an equivalent `metric`
-          prop today, so this row isn't actually stretch-broken; `items-start`
-          is added anyway as defense-in-depth against a future tile that doesn't. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-3">
-        <MetricTile
-          metricKey="avg_monthly_income"
-          value={ov.avg_monthly_income}
-          sublabel={monthlyWindow}
-          metric={ov.metrics.avg_monthly_income}
-        />
-        <MetricTile
-          metricKey="avg_monthly_expense"
-          value={ov.avg_monthly_expense}
-          sublabel={monthlyWindow}
-          metric={ov.metrics.avg_monthly_expense}
-        />
-        <MetricTile
-          metricKey="avg_monthly_net"
-          value={ov.avg_monthly_net}
-          sublabel={monthlyWindow}
-          metric={ov.metrics.avg_monthly_net}
-        />
-      </div>
 
       {/* Net Worth Trend -- former Home tab content (Phase 23), replacing the
           old standalone Savings Rate Trend chart; that series now lives inside
@@ -936,19 +973,6 @@ export function OverviewTab() {
               ))}
             </div>
           </div>
-        )}
-      </div>
-
-      {/* Additional Metrics -- all three tiles are the same MetricTile shape
-          (no `metric` prop), so not stretch-broken today; `items-start` added
-          for the same defense-in-depth reason as the Income/Expenses row above. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <MetricTile metricKey="flagged_count" value={ov.flagged_count} format="number" />
-        {ov.avg_weekly_expense > 0 && (
-          <MetricTile metricKey="avg_weekly_expense" value={ov.avg_weekly_expense} />
-        )}
-        {ov.avg_weekly_income > 0 && (
-          <MetricTile metricKey="avg_weekly_income" value={ov.avg_weekly_income} />
         )}
       </div>
 

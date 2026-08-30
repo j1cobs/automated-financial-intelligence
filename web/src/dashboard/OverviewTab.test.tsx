@@ -440,7 +440,7 @@ describe('OverviewTab', () => {
 
     renderOverviewTab();
 
-    expect(screen.getByText('Net Worth Trend')).toBeInTheDocument();
+    expect(screen.getByText('Financial Trends')).toBeInTheDocument();
     expect(screen.getByText('+$20,000 since last month')).toBeInTheDocument();
   });
 
