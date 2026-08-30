@@ -534,9 +534,7 @@ class OverviewHomeInsightsTests(unittest.TestCase):
         # the month is complete" rule.
         last_month = _month_start(1)
         current_month = date.today().replace(day=1)
-        acct_df = pd.DataFrame(
-            [_account("plaid:cc1", "Jacob", "credit", 300.0, balance_limit=1000.0)]
-        )
+        acct_df = pd.DataFrame([_account("plaid:cc1", "Jacob", "credit", 300.0, balance_limit=1000.0)])
         # Not `_history_point()`: that helper hardcodes `liabilities: 0.0`, but this
         # test needs a nonzero credit balance to exercise `credit_utilization_pct`.
         history = [
@@ -648,9 +646,21 @@ class OverviewHomeInsightsTests(unittest.TestCase):
         df = _frame(
             [
                 _tx(m3.isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g1a"),
-                _tx(m3.replace(day=28).isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g1b"),
+                _tx(
+                    m3.replace(day=28).isoformat(),
+                    50.0,
+                    _EXPENSE,
+                    category="Groceries",
+                    transaction_hash="g1b",
+                ),
                 _tx(m2.isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g2a"),
-                _tx(m2.replace(day=28).isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g2b"),
+                _tx(
+                    m2.replace(day=28).isoformat(),
+                    50.0,
+                    _EXPENSE,
+                    category="Groceries",
+                    transaction_hash="g2b",
+                ),
                 _tx(today.isoformat(), 140.0, _EXPENSE, category="Groceries", transaction_hash="g3"),
                 # First seen this month -- no historical baseline to drift against.
                 _tx(today.isoformat(), 50.0, _EXPENSE, category="Brand New Category", transaction_hash="b1"),

@@ -331,8 +331,20 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         """Phase 23 folded the former /home endpoint's insights into /overview."""
         self._authed_client()
         self.mock_db.get_net_worth_history.return_value = [
-            {"date": "2026-08-23", "net_worth": 900.0, "assets": 900.0, "liabilities": 0.0, "liquid_cash": 900.0},
-            {"date": "2026-08-24", "net_worth": 1000.0, "assets": 1000.0, "liabilities": 0.0, "liquid_cash": 1000.0},
+            {
+                "date": "2026-08-23",
+                "net_worth": 900.0,
+                "assets": 900.0,
+                "liabilities": 0.0,
+                "liquid_cash": 900.0,
+            },
+            {
+                "date": "2026-08-24",
+                "net_worth": 1000.0,
+                "assets": 1000.0,
+                "liabilities": 0.0,
+                "liquid_cash": 1000.0,
+            },
         ]
         with self._load_financial_data_patch():
             response = self.client.get("/overview")

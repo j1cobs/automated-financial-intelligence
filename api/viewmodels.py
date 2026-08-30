@@ -520,9 +520,7 @@ def build_overview(
             usual_by_cat = {
                 str(cat): float(v) for cat, v in monthly_by_cat.groupby("category").mean().items()
             }
-            count_by_cat = {
-                str(cat): int(v) for cat, v in monthly_by_cat.groupby("category").size().items()
-            }
+            count_by_cat = {str(cat): int(v) for cat, v in monthly_by_cat.groupby("category").size().items()}
 
         def _leave_one_out_baseline(category: str, excl_month: str) -> float | None:
             n = count_by_cat.get(category, 0)
@@ -544,13 +542,9 @@ def build_overview(
             usual = usual_by_cat.get(category)
 
             this_baseline = _leave_one_out_baseline(category, this_m)
-            this_drift_pct = (
-                (this_amt - this_baseline) / this_baseline if this_baseline else None
-            )
+            this_drift_pct = (this_amt - this_baseline) / this_baseline if this_baseline else None
             last_baseline = _leave_one_out_baseline(category, last_m)
-            last_drift_pct = (
-                (last_amt - last_baseline) / last_baseline if last_baseline else None
-            )
+            last_drift_pct = (last_amt - last_baseline) / last_baseline if last_baseline else None
 
             month_over_month.append(
                 {
@@ -572,7 +566,9 @@ def build_overview(
     current_month_str = today.strftime("%Y-%m")
 
     # Committed/recurring spend -- `is_recurring` is user-set (Transactions tab checkbox).
-    recurring = all_time_real[(all_time_real["tx_type"] == "expense") & all_time_real["is_recurring"].fillna(False)]
+    recurring = all_time_real[
+        (all_time_real["tx_type"] == "expense") & all_time_real["is_recurring"].fillna(False)
+    ]
     recurring_by_desc = (
         recurring.groupby("description")["adjusted_amount"].sum().abs().sort_values(ascending=False)
     )
@@ -721,9 +717,7 @@ def build_overview(
         latest = net_worth_trend_daily[-1]
         latest_date = pd.to_datetime(latest["date"])
         one_month_prior = latest_date - pd.DateOffset(months=1)
-        prior_candidates = [
-            r for r in net_worth_trend_daily if pd.to_datetime(r["date"]) <= one_month_prior
-        ]
+        prior_candidates = [r for r in net_worth_trend_daily if pd.to_datetime(r["date"]) <= one_month_prior]
         if prior_candidates:
             net_worth_mom_delta = latest["net_worth"] - prior_candidates[-1]["net_worth"]
 
@@ -766,9 +760,7 @@ def build_overview(
                 else None
             )
             avg_expense = (
-                float(rolling_avg_expense.get(month_key))
-                if month_key in rolling_avg_expense.index
-                else None
+                float(rolling_avg_expense.get(month_key)) if month_key in rolling_avg_expense.index else None
             )
             emergency_fund_months_for_month = (
                 snap["liquid_cash"] / avg_expense if avg_expense and avg_expense > 0 else None
@@ -977,8 +969,6 @@ def build_budget(df: pd.DataFrame, budget_rows: list[dict[str, Any]]) -> dict[st
         )
 
     return {"month": current_month_str, "items": items}
-
-
 
 
 def build_anomalies(df: pd.DataFrame) -> list[dict[str, Any]]:
