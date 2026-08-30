@@ -172,11 +172,11 @@ export interface MetricTileProps {
   sublabel?: string;
   /**
    * When provided, the whole tile becomes a clickable/focusable drill-down
-   * target (PLAN.md Phase 15, Fix 13) -- e.g. HomeTab wires this to switch
-   * the dashboard to the tab that has the fuller picture for this metric.
-   * Rendered as `role="button"` on the tile's own container rather than a
-   * real `<button>`, because the tile already nests the info-popover
-   * `<button>` and interactive controls cannot nest in valid HTML.
+   * target (PLAN.md Phase 15, Fix 13) -- e.g. Overview/CashFlow/Budget tabs
+   * wire this to switch the dashboard to the tab that has the fuller picture
+   * for this metric. Rendered as `role="button"` on the tile's own container
+   * rather than a real `<button>`, because the tile already nests the
+   * info-popover `<button>` and interactive controls cannot nest in valid HTML.
    */
   onDrillDown?: () => void;
 }

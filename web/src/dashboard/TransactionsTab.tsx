@@ -498,7 +498,6 @@ function VirtualizedLedgerTable({
  *  each tab component here is otherwise self-contained (see that file's own
  *  comment on the pattern) and only one extra string is at stake. */
 const TAB_LABELS: Record<TabId, string> = {
-  home: 'Home',
   overview: 'Overview',
   cashflow: 'Cash Flow',
   budget: 'Budget',

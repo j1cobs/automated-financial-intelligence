@@ -5,8 +5,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { Dashboard } from './Dashboard';
 import type {
+  OverviewResponse,
   CashFlowResponse,
-  HomeResponse,
   LedgerResponse,
   AnomaliesResponse,
   CategoriesResponse,
@@ -83,6 +83,47 @@ function successResult<T>(data: T): UseQueryResult<T, Error> {
   } as unknown as UseQueryResult<T, Error>;
 }
 
+const overviewData: OverviewResponse = {
+  net_worth: {
+    net_worth: 100000,
+    total_assets: 120000,
+    total_liabilities: 20000,
+    asset_mix: [],
+    owner_balances: [],
+    credit_utilization: [],
+    stale_accounts: [],
+    dormant_accounts: [],
+    forked_accounts: [],
+  },
+  overview: {
+    income: 5000,
+    expenses: 3000,
+    net_flow: 2000,
+    savings_rate: 0.4,
+    flagged_count: 0,
+    avg_weekly_expense: 750,
+    avg_monthly_expense: 3000,
+    avg_weekly_income: 1250,
+    avg_monthly_income: 5000,
+    avg_monthly_net: 2000,
+    complete_months: 3,
+    metrics: {},
+    top_categories: [],
+    month_over_month: [],
+    emergency_fund_months: 3,
+    income_breakdown: [],
+    savings_rate_trend: [],
+    net_worth_trend_daily: [],
+    net_worth_trend_monthly: [],
+    net_worth_mom_delta: null,
+    recurring_items: [],
+    top_merchants: [],
+    cash_flow_projection: null,
+    biggest_expense_this_month: null,
+    upcoming_recurring: [],
+  },
+};
+
 const cashFlowData: CashFlowResponse = {
   income: 5000,
   expenses: 3000,
@@ -101,7 +142,7 @@ const cashFlowData: CashFlowResponse = {
 };
 
 function setupQueryMocks() {
-  vi.mocked(queries.useHome).mockReturnValue(loadingResult<HomeResponse>());
+  vi.mocked(queries.useOverview).mockReturnValue(successResult<OverviewResponse>(overviewData));
   vi.mocked(queries.useCashFlow).mockReturnValue(successResult<CashFlowResponse>(cashFlowData));
   vi.mocked(queries.useLedger).mockReturnValue(loadingResult<LedgerResponse>());
   vi.mocked(queries.useAnomalies).mockReturnValue(loadingResult<AnomaliesResponse>());

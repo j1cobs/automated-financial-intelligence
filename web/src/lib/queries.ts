@@ -23,7 +23,6 @@ import { useFilters } from './FilterContext';
 import { toSearchParams, type DashboardFilters } from './filters';
 import type {
   OverviewResponse,
-  HomeResponse,
   CashFlowResponse,
   BudgetResponse,
   LedgerResponse,
@@ -33,7 +32,6 @@ import type {
 } from './types';
 
 export const overviewQueryKey = ['overview'] as const;
-export const homeQueryKey = ['home'] as const;
 export const cashFlowQueryKey = ['cash-flow'] as const;
 export const budgetQueryKey = ['budget'] as const;
 export const ledgerQueryKey = ['ledger'] as const;
@@ -52,16 +50,6 @@ export function useOverview() {
   return useQuery({
     queryKey: [...overviewQueryKey, filters],
     queryFn: () => apiFetch<OverviewResponse>(withFilters('/overview', filters)),
-  });
-}
-
-// Filter-aware: `/home` applies every filter except period (see api/filters.py's
-// `apply_filters`, `all_time`) -- Home is a status page, not a period-scoped view.
-export function useHome() {
-  const { filters } = useFilters();
-  return useQuery({
-    queryKey: [...homeQueryKey, filters],
-    queryFn: () => apiFetch<HomeResponse>(withFilters('/home', filters)),
   });
 }
 
