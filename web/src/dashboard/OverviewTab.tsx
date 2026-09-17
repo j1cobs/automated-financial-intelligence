@@ -554,13 +554,17 @@ export function OverviewTab() {
           `className` to fill that height on its own. */}
       <div className="flex flex-wrap justify-center gap-4">
         <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
-          <MetricTile metricKey="net_worth" value={nw.net_worth} />
+          <MetricTile metricKey="net_worth" value={nw.net_worth} metric={ov.metrics.net_worth} />
         </div>
         <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
-          <MetricTile metricKey="total_assets" value={nw.total_assets} />
+          <MetricTile metricKey="total_assets" value={nw.total_assets} metric={ov.metrics.total_assets} />
         </div>
         <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
-          <MetricTile metricKey="total_liabilities" value={nw.total_liabilities} />
+          <MetricTile
+            metricKey="total_liabilities"
+            value={nw.total_liabilities}
+            metric={ov.metrics.total_liabilities}
+          />
         </div>
         <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
           <MetricTile
@@ -608,12 +612,20 @@ export function OverviewTab() {
         </div>
         {ov.avg_weekly_expense > 0 && (
           <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
-            <MetricTile metricKey="avg_weekly_expense" value={ov.avg_weekly_expense} />
+            <MetricTile
+              metricKey="avg_weekly_expense"
+              value={ov.avg_weekly_expense}
+              metric={ov.metrics.avg_weekly_expense}
+            />
           </div>
         )}
         {ov.avg_weekly_income > 0 && (
           <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
-            <MetricTile metricKey="avg_weekly_income" value={ov.avg_weekly_income} />
+            <MetricTile
+              metricKey="avg_weekly_income"
+              value={ov.avg_weekly_income}
+              metric={ov.metrics.avg_weekly_income}
+            />
           </div>
         )}
       </div>

@@ -159,6 +159,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: 0.1538,
         baseline_months: 3,
         sparkline: [12000, 13500, 15000],
+        comparison_kind: 'trailing_average',
       },
       avg_monthly_expense: {
         key: 'avg_monthly_expense',
@@ -167,6 +168,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: 0.055,
         baseline_months: 3,
         sparkline: [6800, 7100, 7385],
+        comparison_kind: 'trailing_average',
       },
       avg_monthly_net: {
         key: 'avg_monthly_net',
@@ -175,6 +177,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: 0.269,
         baseline_months: 3,
         sparkline: [5200, 6400, 7615],
+        comparison_kind: 'trailing_average',
       },
       savings_rate: {
         key: 'savings_rate',
@@ -183,6 +186,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: null,
         baseline_months: 0,
         sparkline: [],
+        comparison_kind: 'trailing_average',
       },
     },
     top_categories: [

@@ -29,6 +29,7 @@ function summary(overrides: Partial<MetricSummary> = {}): MetricSummary {
     delta_pct: 0.25,
     baseline_months: 3,
     sparkline: [3800, 4200, 5000],
+    comparison_kind: 'trailing_average',
     ...overrides,
   };
 }
@@ -174,5 +175,42 @@ describe('MetricTile', () => {
     render(<MetricTile metricKey="avg_monthly_income" value={5000} sublabel="avg of 3 complete months" />);
 
     expect(screen.getByText('avg of 3 complete months')).toBeInTheDocument();
+  });
+
+  it('renders "X% above/below last month" when comparison_kind is last_period', () => {
+    render(
+      <MetricTile
+        metricKey="net_worth"
+        value={125000}
+        metric={summary({ comparison_kind: 'last_period', delta_pct: 0.08 })}
+      />,
+    );
+
+    expect(screen.getByText('8% above last month')).toBeInTheDocument();
+    expect(screen.queryByText(/your.*month average/)).not.toBeInTheDocument();
+  });
+
+  it('renders "even with last month" for zero delta with comparison_kind last_period', () => {
+    render(
+      <MetricTile
+        metricKey="net_worth"
+        value={125000}
+        metric={summary({ comparison_kind: 'last_period', delta_pct: 0 })}
+      />,
+    );
+
+    expect(screen.getByText('even with last month')).toBeInTheDocument();
+  });
+
+  it('renders the trailing-average comparison text when comparison_kind is trailing_average', () => {
+    render(
+      <MetricTile
+        metricKey="avg_monthly_income"
+        value={5000}
+        metric={summary({ comparison_kind: 'trailing_average' })}
+      />,
+    );
+
+    expect(screen.getByText('25% above your 3-month average')).toBeInTheDocument();
   });
 });

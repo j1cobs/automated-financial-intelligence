@@ -241,7 +241,9 @@ export function MetricTile({
             <DeltaBadge metricKey={metricKey} metric={metric} />
             {showComparison && (
               <p className="text-xs text-ink-muted">
-                {strings.metricTile.baselineComparison(metric.delta_pct as number, metric.baseline_months)}
+                {metric.comparison_kind === 'last_period'
+                  ? strings.metricTile.baselineComparisonLastPeriod(metric.delta_pct as number)
+                  : strings.metricTile.baselineComparison(metric.delta_pct as number, metric.baseline_months)}
               </p>
             )}
           </div>

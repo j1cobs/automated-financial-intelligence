@@ -40,6 +40,20 @@ export const strings = {
       const direction = deltaPct > 0 ? 'above' : 'below';
       return `${pct}% ${direction} your ${baselineMonths}-month average`;
     },
+    /**
+     * "8% above last month" / "5% below last month" / "even with last month" --
+     * for metrics compared against a single prior period (a balance snapshot),
+     * not a trailing average across many periods. See `comparison_kind` on
+     * `MetricSummary`.
+     */
+    baselineComparisonLastPeriod(deltaPct: number): string {
+      const pct = Math.round(Math.abs(deltaPct) * 100);
+      if (pct === 0) {
+        return 'even with last month';
+      }
+      const direction = deltaPct > 0 ? 'above' : 'below';
+      return `${pct}% ${direction} last month`;
+    },
   },
   crossFilter: {
     /** Discoverability caption placed under a clickable category chart. */

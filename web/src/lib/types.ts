@@ -113,6 +113,9 @@ export interface MetricSummary {
   baseline_months: number;
   /** Up to the last 12 complete months of the underlying monthly series. */
   sparkline: number[];
+  /** Whether the baseline/delta is compared against a trailing average
+   * ('trailing_average') or a single prior period ('last_period'). */
+  comparison_kind: 'trailing_average' | 'last_period';
 }
 
 export interface NetWorthTrendDailyItem {
