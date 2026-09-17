@@ -15,6 +15,20 @@ LOGGER = logging.getLogger(__name__)
 
 _MAX_SYNC_ERROR_RETRIES = 5
 
+
+def _describe_plaid_error(error: Exception) -> str:
+    """Best-effort human description of a Plaid API failure: the error_code from the
+    response body when available, else the exception's class name."""
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        try:
+            error_code = error.response.json().get("error_code")
+            if error_code:
+                return str(error_code)
+        except ValueError:
+            pass
+    return type(error).__name__
+
+
 _NORMALIZED_COLUMNS = [
     "transaction_id",
     "date",
@@ -42,6 +56,7 @@ class SyncResult:
     duplicate_accounts_skipped: int
     full_refresh: bool  # True iff EVERY configured token started this run from a null/absent cursor
     cursors: dict[str, str]  # token_fingerprint (sha256 hex of the access token) -> next_cursor
+    failed_tokens: dict[str, str]  # token_fingerprint -> error description; tokens whose sync failed this run and were skipped
 
 
 class PlaidIngestor(BaseIngestor):
@@ -124,21 +139,27 @@ class PlaidIngestor(BaseIngestor):
             )
         return results
 
-    def fetch_accounts(self, owner_by_token: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    def fetch_accounts(self, owner_by_token: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
         owner_by_token = owner_by_token or {}
         all_accounts: list[dict[str, Any]] = []
+        failed_tokens: dict[str, str] = {}
         for token in self.access_tokens:
             try:
+                fingerprint = hashlib.sha256(token.encode()).hexdigest()
                 accounts = self._fetch_accounts_raw(token, owner_by_token.get(token, ""))
+                for account in accounts:
+                    account["_token_fingerprint"] = fingerprint
                 all_accounts.extend(accounts)
-            except requests.RequestException as error:
-                LOGGER.error(
+            except Exception as error:
+                fingerprint = hashlib.sha256(token.encode()).hexdigest()
+                LOGGER.warning(
                     "Failed to fetch accounts for token suffix=%s (%s)",
                     token[-6:],
-                    type(error).__name__,
+                    _describe_plaid_error(error),
                 )
-                raise
-        return all_accounts
+                failed_tokens[fingerprint] = _describe_plaid_error(error)
+                continue
+        return (all_accounts, failed_tokens)
 
     def _request_page(
         self,
@@ -322,127 +343,144 @@ class PlaidIngestor(BaseIngestor):
         removed_ids: set[str] = set()
         duplicate_accounts_skipped = 0
         cursors: dict[str, str] = {}
+        failed_tokens: dict[str, str] = {}
         every_token_started_null = True
         claimed_identities: dict[tuple[str, str, str, str], str] = {}
 
         for access_token in self.access_tokens:
-            fingerprint = hashlib.sha256(access_token.encode()).hexdigest()
-            starting_cursor = stored_cursors.get(fingerprint)
-            if starting_cursor:
-                every_token_started_null = False
+            try:
+                fingerprint = hashlib.sha256(access_token.encode()).hexdigest()
+                starting_cursor = stored_cursors.get(fingerprint)
+                if starting_cursor:
+                    every_token_started_null = False
 
-            # Account metadata (for canonicalization/upsert) is fetched separately by the
-            # pipeline via fetch_accounts() — this method only needs account_map to resolve
-            # account_id -> account_key/account_name on each transaction, so it must not
-            # re-fetch the same /accounts data a second time per token.
-            account_map, skipped_account_ids, skipped_count = self._claim_accounts(
-                access_token, claimed_identities
-            )
-            duplicate_accounts_skipped += skipped_count
+                # Account metadata (for canonicalization/upsert) is fetched separately by the
+                # pipeline via fetch_accounts() — this method only needs account_map to resolve
+                # account_id -> account_key/account_name on each transaction, so it must not
+                # re-fetch the same /accounts data a second time per token.
+                account_map, skipped_account_ids, skipped_count = self._claim_accounts(
+                    access_token, claimed_identities
+                )
+                duplicate_accounts_skipped += skipped_count
 
-            token_added: list[dict] = []
-            token_modified: list[dict] = []
-            token_removed: set[str] = set()
-            cursor = starting_cursor
-            has_more = True
-            error_retries = 0
-            while has_more:
-                try:
-                    payload = self._request_sync_page(access_token, cursor)
-                except requests.HTTPError as error:
-                    error_code = None
+                token_added: list[dict] = []
+                token_modified: list[dict] = []
+                token_removed: set[str] = set()
+                cursor = starting_cursor
+                has_more = True
+                error_retries = 0
+                while has_more:
                     try:
-                        error_code = (
-                            error.response.json().get("error_code") if error.response is not None else None
-                        )
-                    except ValueError:
+                        payload = self._request_sync_page(access_token, cursor)
+                    except requests.HTTPError as error:
                         error_code = None
-
-                    if error_code in (
-                        "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
-                        "PAGINATION_INVALID_CURSOR",
-                    ):
-                        error_retries += 1
-                        if error_retries > _MAX_SYNC_ERROR_RETRIES:
-                            LOGGER.error(
-                                "Plaid sync for token suffix=%s failed %d times in a row (%s); "
-                                "giving up rather than retrying forever",
-                                access_token[-6:],
-                                error_retries,
-                                error_code,
+                        try:
+                            error_code = (
+                                error.response.json().get("error_code") if error.response is not None else None
                             )
-                            raise
+                        except ValueError:
+                            error_code = None
 
-                    if error_code == "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION":
-                        LOGGER.warning(
-                            "Plaid sync mutated during pagination for token suffix=%s; "
-                            "discarding partial page set and restarting from last saved cursor",
+                        if error_code in (
+                            "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+                            "PAGINATION_INVALID_CURSOR",
+                        ):
+                            error_retries += 1
+                            if error_retries > _MAX_SYNC_ERROR_RETRIES:
+                                LOGGER.error(
+                                    "Plaid sync for token suffix=%s failed %d times in a row (%s); "
+                                    "giving up rather than retrying forever",
+                                    access_token[-6:],
+                                    error_retries,
+                                    error_code,
+                                )
+                                raise
+
+                        if error_code == "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION":
+                            LOGGER.warning(
+                                "Plaid sync mutated during pagination for token suffix=%s; "
+                                "discarding partial page set and restarting from last saved cursor",
+                                access_token[-6:],
+                            )
+                            token_added = []
+                            token_modified = []
+                            token_removed = set()
+                            cursor = starting_cursor
+                            continue
+                        if error_code == "PAGINATION_INVALID_CURSOR":
+                            # Deliberately do NOT re-evaluate every_token_started_null here. This token
+                            # will now fetch from the start (cursor = None), but if it had a cursor at the
+                            # time of the error, every_token_started_null remains False. Skipping
+                            # reconciliation for this run (rather than misapplying it against a partial
+                            # delta) is the fail-safe outcome; a later full-refresh run will reconcile.
+                            LOGGER.warning(
+                                "Plaid sync cursor invalid for token suffix=%s; resetting to full refresh",
+                                access_token[-6:],
+                            )
+                            token_added = []
+                            token_modified = []
+                            token_removed = set()
+                            cursor = None
+                            starting_cursor = None
+                            continue
+
+                        LOGGER.error(
+                            "Plaid sync request failed for token suffix=%s (%s)",
                             access_token[-6:],
+                            type(error).__name__,
                         )
-                        token_added = []
-                        token_modified = []
-                        token_removed = set()
-                        cursor = starting_cursor
-                        continue
-                    if error_code == "PAGINATION_INVALID_CURSOR":
-                        # Deliberately do NOT re-evaluate every_token_started_null here. This token
-                        # will now fetch from the start (cursor = None), but if it had a cursor at the
-                        # time of the error, every_token_started_null remains False. Skipping
-                        # reconciliation for this run (rather than misapplying it against a partial
-                        # delta) is the fail-safe outcome; a later full-refresh run will reconcile.
-                        LOGGER.warning(
-                            "Plaid sync cursor invalid for token suffix=%s; resetting to full refresh",
+                        raise
+                    except requests.RequestException as error:
+                        LOGGER.error(
+                            "Plaid sync request failed for token suffix=%s (%s)",
                             access_token[-6:],
+                            type(error).__name__,
                         )
-                        token_added = []
-                        token_modified = []
-                        token_removed = set()
-                        cursor = None
-                        starting_cursor = None
-                        continue
+                        raise
 
-                    LOGGER.error(
-                        "Plaid sync request failed for token suffix=%s (%s)",
-                        access_token[-6:],
-                        type(error).__name__,
-                    )
-                    raise
-                except requests.RequestException as error:
-                    LOGGER.error(
-                        "Plaid sync request failed for token suffix=%s (%s)",
-                        access_token[-6:],
-                        type(error).__name__,
-                    )
-                    raise
+                    for transaction in payload.get("added", []):
+                        account_id = transaction.get("account_id", "unknown")
+                        if account_id in skipped_account_ids:
+                            continue
+                        token_added.append(self._normalize(transaction, account_map))
+                    for transaction in payload.get("modified", []):
+                        account_id = transaction.get("account_id", "unknown")
+                        if account_id in skipped_account_ids:
+                            continue
+                        token_modified.append(self._normalize(transaction, account_map))
+                    for removed in payload.get("removed", []):
+                        removed_id = removed.get("transaction_id")
+                        if removed_id:
+                            token_removed.add(removed_id)
 
-                for transaction in payload.get("added", []):
-                    account_id = transaction.get("account_id", "unknown")
-                    if account_id in skipped_account_ids:
-                        continue
-                    token_added.append(self._normalize(transaction, account_map))
-                for transaction in payload.get("modified", []):
-                    account_id = transaction.get("account_id", "unknown")
-                    if account_id in skipped_account_ids:
-                        continue
-                    token_modified.append(self._normalize(transaction, account_map))
-                for removed in payload.get("removed", []):
-                    removed_id = removed.get("transaction_id")
-                    if removed_id:
-                        token_removed.add(removed_id)
+                    has_more = bool(payload.get("has_more"))
+                    cursor = payload.get("next_cursor", cursor)
 
-                has_more = bool(payload.get("has_more"))
-                cursor = payload.get("next_cursor", cursor)
+                for row in token_added + token_modified:
+                    pending_id = row.get("pending_transaction_id")
+                    if pending_id:
+                        token_removed.add(pending_id)
 
-            for row in token_added + token_modified:
-                pending_id = row.get("pending_transaction_id")
-                if pending_id:
-                    token_removed.add(pending_id)
+                for row in token_added:
+                    row["_token_fingerprint"] = fingerprint
+                for row in token_modified:
+                    row["_token_fingerprint"] = fingerprint
 
-            added_records.extend(token_added)
-            modified_records.extend(token_modified)
-            removed_ids |= token_removed
-            if cursor:
-                cursors[fingerprint] = cursor
+                added_records.extend(token_added)
+                modified_records.extend(token_modified)
+                removed_ids |= token_removed
+                if cursor:
+                    cursors[fingerprint] = cursor
+
+            except Exception as error:
+                fingerprint = hashlib.sha256(access_token.encode()).hexdigest()
+                LOGGER.warning(
+                    "Skipping token suffix=%s this run (%s)",
+                    access_token[-6:],
+                    _describe_plaid_error(error),
+                )
+                failed_tokens[fingerprint] = _describe_plaid_error(error)
+                continue
 
         added_df = (
             pd.DataFrame.from_records(added_records)
@@ -462,4 +500,5 @@ class PlaidIngestor(BaseIngestor):
             duplicate_accounts_skipped=duplicate_accounts_skipped,
             full_refresh=every_token_started_null,
             cursors=cursors,
+            failed_tokens=failed_tokens,
         )

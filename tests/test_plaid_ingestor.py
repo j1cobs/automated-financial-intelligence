@@ -110,17 +110,21 @@ class DuplicateAccountSkipCountTests(unittest.TestCase):
 class RequestFailureLoggingTests(unittest.TestCase):
     def test_fetch_accounts_logs_class_name_only_no_traceback(self) -> None:
         ingestor = _ingestor()
+        fingerprint = hashlib.sha256(b"token-123456").hexdigest()
 
         with (
             patch.object(ingestor, "_fetch_accounts_raw", side_effect=requests.ConnectionError("boom")),
             patch("ingestion.plaid_ingestor.LOGGER") as logger,
         ):
-            with self.assertRaises(requests.ConnectionError):
-                ingestor.fetch_accounts({})
+            accounts, failed_tokens = ingestor.fetch_accounts({})
 
-        logger.error.assert_called_once()
+        # Per-token isolation: fetch_accounts catches the error and returns it in failed_tokens
+        self.assertEqual(accounts, [])
+        self.assertEqual(failed_tokens, {fingerprint: "ConnectionError"})
+        logger.warning.assert_called_once()
         logger.exception.assert_not_called()
-        args = logger.error.call_args[0]
+        args = logger.warning.call_args[0]
+        self.assertIn("Failed to fetch accounts", args[0])
         self.assertEqual(args[1:], ("123456", "ConnectionError"))
 
     def test_fetch_transactions_page_request_logs_class_name_only_no_traceback(self) -> None:
@@ -311,27 +315,33 @@ class SyncErrorRetryTests(unittest.TestCase):
         from ingestion.plaid_ingestor import _MAX_SYNC_ERROR_RETRIES
 
         ingestor = _ingestor()
+        fingerprint = hashlib.sha256(b"token-123456").hexdigest()
         error = _http_error("PAGINATION_INVALID_CURSOR")
         with (
             patch.object(ingestor, "_fetch_accounts_raw", return_value=[]),
             patch.object(ingestor, "_request_sync_page", side_effect=error) as mock_page,
         ):
-            with self.assertRaises(requests.HTTPError):
-                ingestor.sync_transactions({})
+            result = ingestor.sync_transactions({})
 
+        # The error is caught by per-token isolation after exceeding retry cap
         self.assertEqual(mock_page.call_count, _MAX_SYNC_ERROR_RETRIES + 1)
+        self.assertIn(fingerprint, result.failed_tokens)
+        self.assertEqual(result.failed_tokens[fingerprint], "PAGINATION_INVALID_CURSOR")
 
     def test_unrelated_http_error_is_not_retried(self) -> None:
         ingestor = _ingestor()
+        fingerprint = hashlib.sha256(b"token-123456").hexdigest()
         error = _http_error("INVALID_ACCESS_TOKEN")
         with (
             patch.object(ingestor, "_fetch_accounts_raw", return_value=[]),
             patch.object(ingestor, "_request_sync_page", side_effect=error) as mock_page,
         ):
-            with self.assertRaises(requests.HTTPError):
-                ingestor.sync_transactions({})
+            result = ingestor.sync_transactions({})
 
+        # Unrelated errors are not retried; they're caught by per-token isolation on first failure
         mock_page.assert_called_once()
+        self.assertIn(fingerprint, result.failed_tokens)
+        self.assertEqual(result.failed_tokens[fingerprint], "INVALID_ACCESS_TOKEN")
 
 
 class SyncClaimAccountsTests(unittest.TestCase):
@@ -390,6 +400,116 @@ class SyncClaimAccountsTests(unittest.TestCase):
             result = ingestor.sync_transactions({})
 
         self.assertTrue(result.added.empty)
+
+
+class SyncPerTokenIsolationTests(unittest.TestCase):
+    def test_sync_transactions_isolates_non_recoverable_error_to_failed_tokens(self) -> None:
+        """When one of three tokens fails with a non-recoverable error (not a retry-able code),
+        that token should be skipped and recorded in failed_tokens, while other tokens' data
+        is included in the result."""
+        token_1 = "token-111111"
+        token_2 = "token-222222"
+        token_3 = "token-333333"
+        ingestor = PlaidIngestor(client_id="cid", secret="secret", access_tokens=[token_1, token_2, token_3])
+
+        fp_1 = hashlib.sha256(token_1.encode()).hexdigest()
+        fp_2 = hashlib.sha256(token_2.encode()).hexdigest()
+        fp_3 = hashlib.sha256(token_3.encode()).hexdigest()
+
+        txn_1 = {
+            "transaction_id": "txn-from-token-1",
+            "account_id": "acc-1",
+            "date": "2026-08-01",
+            "name": "Merchant A",
+            "amount": 10.0,
+        }
+        txn_3 = {
+            "transaction_id": "txn-from-token-3",
+            "account_id": "acc-3",
+            "date": "2026-08-02",
+            "name": "Merchant C",
+            "amount": 30.0,
+        }
+
+        # Mock _fetch_accounts_raw to return empty lists (no account filtering needed for this test)
+        with (
+            patch.object(ingestor, "_fetch_accounts_raw", return_value=[]),
+            patch.object(
+                ingestor,
+                "_request_sync_page",
+                side_effect=[
+                    _sync_page(added=[txn_1], next_cursor="cursor-1"),  # token 1 succeeds
+                    _http_error("ITEM_LOGIN_REQUIRED"),  # token 2 fails with non-recoverable error
+                    _sync_page(added=[txn_3], next_cursor="cursor-3"),  # token 3 succeeds
+                ],
+            ),
+        ):
+            result = ingestor.sync_transactions({})
+
+        # Assert: added data contains rows from token 1 and 3, but not token 2
+        self.assertEqual(len(result.added), 2)
+        fingerprints_in_result = set(result.added["_token_fingerprint"].unique())
+        self.assertEqual(fingerprints_in_result, {fp_1, fp_3})
+        self.assertNotIn(fp_2, fingerprints_in_result)
+
+        # Assert: failed_tokens contains only token 2's fingerprint
+        self.assertEqual(len(result.failed_tokens), 1)
+        self.assertIn(fp_2, result.failed_tokens)
+        self.assertEqual(result.failed_tokens[fp_2], "ITEM_LOGIN_REQUIRED")
+
+        # Assert: cursors contains entries for token 1 and 3, but not token 2
+        self.assertEqual(set(result.cursors.keys()), {fp_1, fp_3})
+        self.assertEqual(result.cursors[fp_1], "cursor-1")
+        self.assertEqual(result.cursors[fp_3], "cursor-3")
+
+
+class FetchAccountsPerTokenIsolationTests(unittest.TestCase):
+    def test_fetch_accounts_isolates_token_failure_to_failed_tokens(self) -> None:
+        """When one of two tokens fails, that token should be skipped and recorded in
+        failed_tokens, while the other token's accounts are included in the result."""
+        token_1 = "token-111111"
+        token_2 = "token-222222"
+        ingestor = PlaidIngestor(client_id="cid", secret="secret", access_tokens=[token_1, token_2])
+
+        fp_1 = hashlib.sha256(token_1.encode()).hexdigest()
+        fp_2 = hashlib.sha256(token_2.encode()).hexdigest()
+
+        account_2 = {
+            "account_key": "plaid:acc-2",
+            "account_name": "Checking (••••5678)",
+            "official_name": "Chequing Account",
+            "account_type": "depository",
+            "account_subtype": "checking",
+            "persistent_account_id": "persist-2",
+            "mask": "5678",
+            "balance_available": 1000.0,
+            "balance_current": 1000.0,
+            "balance_limit": None,
+            "iso_currency_code": "USD",
+            "source": "plaid",
+            "_account_id": "acc-2",
+        }
+
+        def side_effect_fetch_raw(token: str, owner_name: str) -> list[dict]:
+            if token == token_1:
+                raise requests.RequestException("Connection failed")
+            return [account_2]
+
+        with patch.object(ingestor, "_fetch_accounts_raw", side_effect=side_effect_fetch_raw):
+            accounts, failed_tokens = ingestor.fetch_accounts({})
+
+        # Assert: returned accounts list contains only token 2's accounts
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["_account_id"], "acc-2")
+        self.assertEqual(accounts[0]["_token_fingerprint"], fp_2)
+
+        # Assert: failed_tokens contains only token 1's fingerprint
+        self.assertEqual(len(failed_tokens), 1)
+        self.assertIn(fp_1, failed_tokens)
+        self.assertEqual(failed_tokens[fp_1], "RequestException")
+
+        # Assert: token 2's account has the correct fingerprint
+        self.assertEqual(accounts[0]["_token_fingerprint"], fp_2)
 
 
 if __name__ == "__main__":
