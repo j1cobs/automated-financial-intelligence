@@ -36,6 +36,7 @@ def _sync_result(
     duplicate_accounts_skipped: int = 0,
     full_refresh: bool = True,
     cursors: dict[str, str] | None = None,
+    failed_tokens: dict[str, str] | None = None,
 ) -> SyncResult:
     return SyncResult(
         added=added if added is not None else _empty_frame(),
@@ -44,6 +45,7 @@ def _sync_result(
         duplicate_accounts_skipped=duplicate_accounts_skipped,
         full_refresh=full_refresh,
         cursors=cursors or {},
+        failed_tokens=failed_tokens or {},
     )
 
 
@@ -119,6 +121,26 @@ class RunPipelineTests(unittest.TestCase):
             ]
         )
 
+    def _added_frame_with_fingerprint(self, fingerprint: str) -> pd.DataFrame:
+        """Create a transaction frame with _token_fingerprint for testing token filtering."""
+        return pd.DataFrame.from_records(
+            [
+                {
+                    "transaction_id": f"tx-{fingerprint[:8]}",
+                    "date": "2026-07-01",
+                    "description": "Coffee Shop",
+                    "amount": 5.25,
+                    "balance": None,
+                    "account_key": f"plaid:acc-{fingerprint[:8]}",
+                    "account_name": "Checking",
+                    "source": "plaid",
+                    "pending": False,
+                    "pending_transaction_id": None,
+                    "_token_fingerprint": fingerprint,
+                }
+            ]
+        )
+
     def _database(self) -> MagicMock:
         database = MagicMock()
         database.canonicalize_account_keys.return_value = {}
@@ -135,7 +157,7 @@ class RunPipelineTests(unittest.TestCase):
         database.upsert_transactions.return_value = (1, 0)
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = [{"account_key": "plaid:acc1"}]
+        ingestor.fetch_accounts.return_value = ([{"account_key": "plaid:acc1"}], {})
         ingestor.sync_transactions.return_value = _sync_result(
             added=self._added_frame(), duplicate_accounts_skipped=2, full_refresh=True
         )
@@ -164,7 +186,7 @@ class RunPipelineTests(unittest.TestCase):
         database = self._database()
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(
             full_refresh=False, cursors={"fp-1": "cursor-after-empty-delta"}
         )
@@ -190,7 +212,7 @@ class RunPipelineTests(unittest.TestCase):
         database.reconcile_transactions.return_value = 0
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(full_refresh=True)
 
         with (
@@ -212,7 +234,7 @@ class RunPipelineTests(unittest.TestCase):
         database = self._database()
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame(), full_refresh=False)
 
         with (
@@ -232,7 +254,7 @@ class RunPipelineTests(unittest.TestCase):
         database.reconcile_transactions.return_value = 3
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame(), full_refresh=True)
 
         with (
@@ -256,7 +278,7 @@ class RunPipelineTests(unittest.TestCase):
         database.upsert_transactions.side_effect = RuntimeError("write failed")
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(
             added=self._added_frame(), cursors={"fp-1": "cursor-should-not-be-saved"}
         )
@@ -277,7 +299,7 @@ class RunPipelineTests(unittest.TestCase):
         database.delete_transactions_by_external_ids.side_effect = RuntimeError("delete failed")
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(
             added=self._added_frame(),
             removed_ids=["removed-1"],
@@ -305,7 +327,7 @@ class RunPipelineTests(unittest.TestCase):
         )
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = accounts
+        ingestor.fetch_accounts.return_value = (accounts, {})
         ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame())
 
         with (
@@ -326,7 +348,7 @@ class RunPipelineTests(unittest.TestCase):
         accounts = [{"account_key": "plaid:acc1", "account_name": "Checking", "balance_current": 200.0}]
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = accounts
+        ingestor.fetch_accounts.return_value = (accounts, {})
         ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame())
 
         call_order: list[str] = []
@@ -344,6 +366,149 @@ class RunPipelineTests(unittest.TestCase):
 
         database.record_balance_snapshots.assert_called_once_with(accounts)
         self.assertEqual(call_order, ["upsert_plaid_accounts", "record_balance_snapshots"])
+
+    def test_cross_step_exclusion_token_a_sync_succeeds_accounts_fails(self) -> None:
+        """Cross-step exclusion scenario: Token A syncs successfully (produces transactions)
+        but fails during fetch_accounts. Token B succeeds at both steps.
+
+        Expected behavior:
+        - Only B's account is upserted (A's account filtered out)
+        - Only B's transactions are persisted (A's transactions filtered out)
+        - Only B's cursor is advanced (A's cursor skipped)
+        - Status is "partial_success"
+        - failed_accounts_summary is non-None and mentions token A
+        """
+        settings = _settings()
+        database = self._database()
+        database.upsert_transactions.return_value = (1, 0)
+
+        # Token A fingerprint and B fingerprint (SHA256 hashes of the tokens)
+        import hashlib
+        fp_a = hashlib.sha256("token-1".encode()).hexdigest()
+        fp_b = hashlib.sha256("token-2".encode()).hexdigest()
+
+        # Token A: sync succeeds (produces transactions) but fetch_accounts fails
+        # Token B: both succeed
+        accounts_b = [{"account_key": f"plaid:acc-{fp_b[:8]}", "account_name": "B Checking", "_token_fingerprint": fp_b}]
+        accounts_failed = {fp_a: "Item error: NO_ACCOUNTS"}
+
+        added_a = self._added_frame_with_fingerprint(fp_a)
+        added_b = self._added_frame_with_fingerprint(fp_b)
+        combined_added = pd.concat([added_a, added_b], ignore_index=True)
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = (accounts_b, accounts_failed)
+        ingestor.sync_transactions.return_value = _sync_result(
+            added=combined_added,
+            cursors={fp_a: "cursor-a", fp_b: "cursor-b"},
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+        ):
+            result = run_pipeline()
+
+        # Assert only B's account is upserted
+        database.upsert_plaid_accounts.assert_called_once()
+        upserted_accounts = database.upsert_plaid_accounts.call_args[0][0]
+        self.assertEqual(len(upserted_accounts), 1)
+        self.assertEqual(upserted_accounts[0]["account_key"], f"plaid:acc-{fp_b[:8]}")
+        # Verify _token_fingerprint was stripped
+        self.assertNotIn("_token_fingerprint", upserted_accounts[0])
+
+        # Assert only B's transactions are persisted
+        database.upsert_transactions.assert_called_once()
+        upserted_transactions = database.upsert_transactions.call_args[0][0]
+        self.assertEqual(len(upserted_transactions), 1)
+        self.assertEqual(upserted_transactions.iloc[0]["account_key"], f"plaid:acc-{fp_b[:8]}")
+
+        # Assert only B's cursor is advanced
+        self.assertEqual(database.set_sync_cursor.call_count, 1)
+        cursor_call = database.set_sync_cursor.call_args[0]
+        self.assertEqual(cursor_call[0], fp_b)
+        self.assertEqual(cursor_call[1], "cursor-b")
+
+        # Assert status is partial_success
+        self.assertEqual(result.status, "partial_success")
+
+        # Assert failed_accounts_summary is not None and contains A's info
+        self.assertIsNotNone(result.failed_accounts_summary)
+        self.assertIn("Alex", result.failed_accounts_summary)  # Token A owner name
+        self.assertIn("1/2", result.failed_accounts_summary)  # 1 of 2 failed
+
+    def test_all_tokens_fail(self) -> None:
+        """When all configured tokens fail (both sync and/or account fetch),
+        status should be "failed"."""
+        import hashlib
+
+        settings = _settings()
+        database = self._database()
+
+        fp_a = hashlib.sha256("token-1".encode()).hexdigest()
+        fp_b = hashlib.sha256("token-2".encode()).hexdigest()
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = ([], {fp_a: "NO_ACCOUNTS", fp_b: "INVALID_REQUEST"})
+        ingestor.sync_transactions.return_value = _sync_result(
+            failed_tokens={fp_a: "ITEM_LOGIN_REQUIRED"}
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+        ):
+            result = run_pipeline()
+
+        self.assertEqual(result.status, "failed")
+        self.assertIsNotNone(result.failed_accounts_summary)
+        self.assertIn("2/2", result.failed_accounts_summary)
+
+    def test_all_tokens_succeed_returns_success_status(self) -> None:
+        """Smoke test: when no tokens fail, status should be "success"
+        and failed_accounts_summary should be None."""
+        import hashlib
+
+        settings = _settings()
+        database = self._database()
+        database.upsert_transactions.return_value = (1, 0)
+
+        fp_a = hashlib.sha256("token-1".encode()).hexdigest()
+        fp_b = hashlib.sha256("token-2".encode()).hexdigest()
+
+        accounts = [
+            {"account_key": f"plaid:acc-{fp_a[:8]}", "_token_fingerprint": fp_a},
+            {"account_key": f"plaid:acc-{fp_b[:8]}", "_token_fingerprint": fp_b},
+        ]
+
+        added = pd.concat(
+            [
+                self._added_frame_with_fingerprint(fp_a),
+                self._added_frame_with_fingerprint(fp_b),
+            ],
+            ignore_index=True,
+        )
+
+        ingestor = MagicMock()
+        ingestor.fetch_accounts.return_value = (accounts, {})
+        ingestor.sync_transactions.return_value = _sync_result(
+            added=added,
+            cursors={fp_a: "cursor-a", fp_b: "cursor-b"},
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.PlaidIngestor", return_value=ingestor),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+        ):
+            result = run_pipeline()
+
+        self.assertEqual(result.status, "success")
+        self.assertIsNone(result.failed_accounts_summary)
+        # All cursors should be advanced
+        self.assertEqual(database.set_sync_cursor.call_count, 2)
 
 
 class CategorizerModeWiringTests(unittest.TestCase):
@@ -388,7 +553,7 @@ class CategorizerModeWiringTests(unittest.TestCase):
         database.get_all_merchant_categories.return_value = {"COFFEE SHOP": "FOOD_AND_DRINK"}
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame())
 
         fake_bundle = SimpleNamespace(
@@ -427,7 +592,7 @@ class CategorizerModeWiringTests(unittest.TestCase):
         database = self._database()
 
         ingestor = MagicMock()
-        ingestor.fetch_accounts.return_value = []
+        ingestor.fetch_accounts.return_value = ([], {})
         ingestor.sync_transactions.return_value = _sync_result(added=self._added_frame())
 
         fake_bundle = SimpleNamespace(
@@ -467,6 +632,8 @@ class MainTests(unittest.TestCase):
             duplicate_accounts_skipped=4,
             removed_count=5,
             full_refresh=True,
+            status="success",
+            failed_accounts_summary=None,
         )
 
         with (
@@ -499,6 +666,8 @@ class MainTests(unittest.TestCase):
             duplicate_accounts_skipped=0,
             removed_count=0,
             full_refresh=False,
+            status="success",
+            failed_accounts_summary=None,
         )
 
         with (
@@ -569,6 +738,71 @@ class MainTests(unittest.TestCase):
                 main()
 
         database_class.assert_not_called()
+
+    def test_partial_success_logs_run_with_failed_accounts_summary(self) -> None:
+        """When some tokens fail, status is 'partial_success', logs with error_message."""
+        settings = _settings(github_event_name="schedule")
+        database = MagicMock()
+        result = SimpleNamespace(
+            transactions=pd.DataFrame(),
+            inserted=1,
+            updated=0,
+            removed=0,
+            duplicate_accounts_skipped=0,
+            removed_count=0,
+            full_refresh=False,
+            status="partial_success",
+            failed_accounts_summary="1/2 accounts failed: Alex (NO_ACCOUNTS)",
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.run_pipeline", return_value=result),
+        ):
+            with self.assertRaises(SystemExit) as context:
+                main()
+
+        self.assertEqual(context.exception.code, 1)
+        database.log_pipeline_run.assert_called_once()
+        args, kwargs = database.log_pipeline_run.call_args
+        self.assertEqual(args[1], "partial_success")
+        self.assertEqual(kwargs["error_message"], "1/2 accounts failed: Alex (NO_ACCOUNTS)")
+        self.assertEqual(kwargs["transactions_inserted"], 1)
+
+    def test_failed_status_logs_run_with_failed_accounts_summary(self) -> None:
+        """When all tokens fail, status is 'failed', logs with error_message."""
+        settings = _settings(github_event_name="local")
+        database = MagicMock()
+        result = SimpleNamespace(
+            transactions=pd.DataFrame(),
+            inserted=0,
+            updated=0,
+            removed=0,
+            duplicate_accounts_skipped=0,
+            removed_count=0,
+            full_refresh=False,
+            status="failed",
+            failed_accounts_summary="2/2 accounts failed: Alex (NO_ACCOUNTS); Sam (INVALID_REQUEST)",
+        )
+
+        with (
+            patch("pipeline.runner.load_settings", return_value=settings),
+            patch("pipeline.runner.DatabaseClient", return_value=database),
+            patch("pipeline.runner.run_pipeline", return_value=result),
+        ):
+            with self.assertRaises(SystemExit) as context:
+                main()
+
+        self.assertEqual(context.exception.code, 1)
+        database.log_pipeline_run.assert_called_once()
+        args, kwargs = database.log_pipeline_run.call_args
+        self.assertEqual(args[1], "failed")
+        self.assertEqual(
+            kwargs["error_message"],
+            "2/2 accounts failed: Alex (NO_ACCOUNTS); Sam (INVALID_REQUEST)",
+        )
+        self.assertNotIn("transactions_inserted", kwargs)
 
 
 if __name__ == "__main__":

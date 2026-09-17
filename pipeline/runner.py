@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import NamedTuple
@@ -23,6 +24,8 @@ class PipelineResult(NamedTuple):
     duplicate_accounts_skipped: int
     removed_count: int
     full_refresh: bool
+    status: str
+    failed_accounts_summary: str | None
 
 
 def _build_ingestor(settings):
@@ -64,7 +67,32 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # enforces equal length when it's non-empty), so an empty owners list must zip to {} here,
     # not raise.
     owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners, strict=False))
-    accounts = ingestor.fetch_accounts(owner_by_token)
+    accounts, accounts_failed = ingestor.fetch_accounts(owner_by_token)
+
+    # Compute union of failed tokens from both sync and accounts-fetch operations
+    failed_fingerprints = set(result.failed_tokens) | set(accounts_failed)
+
+    # Build a label map for human-readable error reporting
+    label_by_fingerprint = {
+        hashlib.sha256(token.encode()).hexdigest(): (owner_by_token.get(token) or f"token …{token[-6:]}")
+        for token in settings.plaid_access_tokens
+    }
+
+    # Build failed_accounts_summary for logging and persistence
+    failed_accounts_summary: str | None = None
+    if failed_fingerprints:
+        total_tokens = len(settings.plaid_access_tokens)
+        reasons = {**accounts_failed, **result.failed_tokens}  # sync_transactions reason wins if both failed
+        details = "; ".join(
+            f"{label_by_fingerprint.get(fp, fp[:8])} ({reasons.get(fp, 'unknown error')})"
+            for fp in sorted(failed_fingerprints)
+        )
+        failed_accounts_summary = f"{len(failed_fingerprints)}/{total_tokens} accounts failed: {details}"
+
+    # Filter accounts to drop any entry from failed tokens and strip _token_fingerprint key
+    accounts = [a for a in accounts if a.get("_token_fingerprint") not in failed_fingerprints]
+    for account in accounts:
+        account.pop("_token_fingerprint", None)
 
     # Re-map each account onto its existing canonical account_key (if any) *before* persisting,
     # so a Plaid Item re-link (new account_ids for the same physical accounts, e.g. after
@@ -81,6 +109,12 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # account_keys through the same key_remap used above, so sync-sourced rows land on the
     # same canonical account_key as the accounts block just persisted.
     transactions = pd.concat([result.added, result.modified], ignore_index=True)
+
+    # Filter out transactions from failed tokens and strip _token_fingerprint column
+    if "_token_fingerprint" in transactions.columns:
+        transactions = transactions[~transactions["_token_fingerprint"].isin(failed_fingerprints)]
+        transactions = transactions.drop(columns=["_token_fingerprint"])
+
     transactions["account_key"] = transactions["account_key"].map(lambda key: key_remap.get(key, key))
 
     models = build_models(settings.categorizer_mode)
@@ -116,7 +150,17 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # reconcile) has committed. Advancing earlier would mean a crash between here and the writes
     # loses that delta permanently, since sync never replays a delta once its cursor is passed.
     for fingerprint, cursor in result.cursors.items():
-        database.set_sync_cursor(fingerprint, cursor)
+        if fingerprint not in failed_fingerprints:
+            database.set_sync_cursor(fingerprint, cursor)
+
+    # Compute overall status
+    total_tokens = len(settings.plaid_access_tokens)
+    if not failed_fingerprints:
+        status = "success"
+    elif len(failed_fingerprints) >= total_tokens:
+        status = "failed"
+    else:
+        status = "partial_success"
 
     return PipelineResult(
         transactions,
@@ -126,6 +170,8 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
         result.duplicate_accounts_skipped,
         removed_count,
         result.full_refresh,
+        status,
+        failed_accounts_summary,
     )
 
 
@@ -164,15 +210,40 @@ def main() -> None:
         LOGGER.error("Pipeline run: failed (%s)", type(error).__name__)
         raise
 
-    database.log_pipeline_run(
-        started_at,
-        "success",
-        transactions_inserted=result.inserted,
-        transactions_updated=result.updated,
-        stale_duplicates_removed=result.removed,
-        duplicate_accounts_skipped=result.duplicate_accounts_skipped,
-        removed_count=result.removed_count,
-        full_refresh=result.full_refresh,
-        trigger_type=trigger_type,
-    )
-    LOGGER.info("Pipeline run: success")
+    if result.status == "success":
+        database.log_pipeline_run(
+            started_at,
+            "success",
+            transactions_inserted=result.inserted,
+            transactions_updated=result.updated,
+            stale_duplicates_removed=result.removed,
+            duplicate_accounts_skipped=result.duplicate_accounts_skipped,
+            removed_count=result.removed_count,
+            full_refresh=result.full_refresh,
+            trigger_type=trigger_type,
+        )
+        LOGGER.info("Pipeline run: success")
+    elif result.status == "partial_success":
+        LOGGER.warning("Pipeline run: partial success (%s)", result.failed_accounts_summary)
+        database.log_pipeline_run(
+            started_at,
+            "partial_success",
+            transactions_inserted=result.inserted,
+            transactions_updated=result.updated,
+            stale_duplicates_removed=result.removed,
+            duplicate_accounts_skipped=result.duplicate_accounts_skipped,
+            removed_count=result.removed_count,
+            full_refresh=result.full_refresh,
+            error_message=(result.failed_accounts_summary or "")[:500],
+            trigger_type=trigger_type,
+        )
+        raise SystemExit(1)
+    else:  # "failed" -- every configured token failed
+        LOGGER.error("Pipeline run: failed (%s)", result.failed_accounts_summary)
+        database.log_pipeline_run(
+            started_at,
+            "failed",
+            error_message=(result.failed_accounts_summary or "")[:500],
+            trigger_type=trigger_type,
+        )
+        raise SystemExit(1)
