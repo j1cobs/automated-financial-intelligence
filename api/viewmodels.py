@@ -74,6 +74,25 @@ def exclude_duplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df[~df["is_duplicate"].fillna(False).astype(bool)]
 
 
+_CATEGORY_TX_TYPE_OVERRIDES = {"INCOME": "income", "TRANSFER_IN": "transfer", "TRANSFER_OUT": "transfer"}
+
+
+def _apply_category_driven_tx_type(df: pd.DataFrame) -> pd.DataFrame:
+    """Override `tx_type` for the categories where cash-flow direction is unambiguous
+    from the category alone: INCOME, TRANSFER_IN, TRANSFER_OUT. Every other category
+    (including LOAN_PAYMENTS, OTHER, UNCATEGORIZED, and all spend categories) keeps
+    whatever `_enrich_transactions`/`_classify_tx_type` (app/dashboard.py, frozen)
+    already computed from account_type + amount sign + description keywords.
+
+    This is also a working manual lever: recategorizing a transaction to TRANSFER_IN
+    (e.g. an insurance reimbursement) pulls it out of income without any new UI.
+    """
+    result = df.copy()
+    override = result["category"].map(_CATEGORY_TX_TYPE_OVERRIDES)
+    result["tx_type"] = override.fillna(result["tx_type"])
+    return result
+
+
 def prepare_transactions(tx_df: pd.DataFrame) -> pd.DataFrame:
     """Mirror `render_dashboard`'s prep: parse dates, enrich once on the full frame
     so internal-transfer pair matching sees both legs of a transfer regardless of
@@ -82,7 +101,8 @@ def prepare_transactions(tx_df: pd.DataFrame) -> pd.DataFrame:
         return tx_df
     tx = tx_df.copy()
     tx["date"] = pd.to_datetime(tx["date"])
-    return _enrich_transactions(tx)
+    enriched = _enrich_transactions(tx)
+    return _apply_category_driven_tx_type(enriched)
 
 
 def _clean(value: Any) -> Any:

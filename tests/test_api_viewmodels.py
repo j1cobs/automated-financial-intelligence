@@ -24,6 +24,7 @@ from api.viewmodels import (  # noqa: E402
     MIN_MONTHLY_INCOME_FOR_RATE,
     SPARKLINE_MONTHS,
     SYNC_STALE_DAYS,
+    _apply_category_driven_tx_type,
     _build_last_period_metric,
     _build_metric,
     _weekly_series,
@@ -740,6 +741,72 @@ class BuildLedgerTests(unittest.TestCase):
         )
         result = build_ledger(empty)
         self.assertEqual(result, [])
+
+
+class ApplyCategoryDrivenTxTypeTests(unittest.TestCase):
+    """Tests for `_apply_category_driven_tx_type` and its integration in
+    `prepare_transactions`. The override map forces tx_type for INCOME/TRANSFER_IN/
+    TRANSFER_OUT categories, while non-override categories keep the heuristic value
+    from `_enrich_transactions`/`_classify_tx_type`."""
+
+    def test_income_category_overrides_expense_amount_sign(self) -> None:
+        # A positive amount (outflow) would normally be "expense" per the sign heuristic,
+        # but INCOME category overrides it to "income" anyway — proving category wins.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="INCOME", transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "income")
+
+    def test_transfer_in_category_overrides_to_transfer(self) -> None:
+        # TRANSFER_IN category always becomes "transfer", regardless of amount sign.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="TRANSFER_IN", transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "transfer")
+
+    def test_transfer_out_category_overrides_to_transfer(self) -> None:
+        # TRANSFER_OUT category always becomes "transfer", regardless of amount sign.
+        row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_OUT", transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "transfer")
+
+    def test_medical_category_does_not_override_heuristic(self) -> None:
+        # MEDICAL is a spend category, NOT in the override map. A positive amount
+        # (outflow on depository) should remain "expense" per the heuristic.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="MEDICAL", transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        # Positive amount on depository → expense, and MEDICAL doesn't override it
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_loan_payments_category_does_not_override_heuristic(self) -> None:
+        # LOAN_PAYMENTS is NOT in the override map, so the heuristic value survives.
+        # A positive amount (outflow) stays as "expense" per sign-based classification.
+        row = _tx(
+            "2026-05-01",
+            100.0,
+            _EXPENSE,
+            category="LOAN_PAYMENTS",
+            transaction_hash="h1",
+        )
+        df = _frame([row])
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_missing_category_does_not_override(self) -> None:
+        # category is None/NaN — .map() returns NaN, .fillna() keeps the original tx_type.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category=None, transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        # No override, so heuristic applies: positive amount → expense
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_empty_dataframe_returns_empty(self) -> None:
+        # prepare_transactions has an early-return guard for empty input.
+        empty = pd.DataFrame([])
+        result = prepare_transactions(empty)
+        self.assertTrue(result.empty)
 
 
 class BuildLastPeriodMetricTests(unittest.TestCase):
