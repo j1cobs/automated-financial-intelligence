@@ -24,7 +24,9 @@ from api.viewmodels import (  # noqa: E402
     MIN_MONTHLY_INCOME_FOR_RATE,
     SPARKLINE_MONTHS,
     SYNC_STALE_DAYS,
+    _build_last_period_metric,
     _build_metric,
+    _weekly_series,
     build_cash_flow,
     build_net_worth,
     build_overview,
@@ -412,7 +414,14 @@ class MetricBaselineTests(unittest.TestCase):
         metrics = build_overview(self._two_years(), pd.DataFrame([]))["metrics"]
         self.assertEqual(
             set(metrics),
-            {"avg_monthly_income", "avg_monthly_expense", "avg_monthly_net", "savings_rate"},
+            {
+                "avg_monthly_income",
+                "avg_monthly_expense",
+                "avg_monthly_net",
+                "savings_rate",
+                "avg_weekly_income",
+                "avg_weekly_expense",
+            },
         )
         for key, metric in metrics.items():
             with self.subTest(key=key):
@@ -673,6 +682,128 @@ class OverviewHomeInsightsTests(unittest.TestCase):
         self.assertAlmostEqual(mom["Groceries"]["this_month_drift_pct"], 0.4)
         self.assertIsNone(mom["Brand New Category"]["usual"])
         self.assertIsNone(mom["Brand New Category"]["this_month_drift_pct"])
+
+
+class BuildLastPeriodMetricTests(unittest.TestCase):
+    """New helper backing the balance tiles (net worth / assets / liabilities): compare
+    against the value one period ago, not a trailing average."""
+
+    def test_prior_value_present(self) -> None:
+        metric = _build_last_period_metric("net_worth", 1200.0, 1000.0, [1000.0, 1200.0])
+        self.assertEqual(metric["value"], 1200.0)
+        self.assertEqual(metric["baseline"], 1000.0)
+        self.assertAlmostEqual(metric["delta_pct"], 0.2)
+        self.assertEqual(metric["baseline_months"], 1)
+        self.assertEqual(metric["sparkline"], [1000.0, 1200.0])
+        self.assertEqual(metric["comparison_kind"], "last_period")
+
+    def test_prior_value_absent(self) -> None:
+        metric = _build_last_period_metric("net_worth", 1200.0, None, [1200.0])
+        self.assertIsNone(metric["baseline"])
+        self.assertIsNone(metric["delta_pct"])
+
+    def test_prior_value_zero(self) -> None:
+        # Dividing by zero would either raise or produce +/-inf; a zero baseline must
+        # report "no comparison available" instead, same convention as `_build_metric`.
+        metric = _build_last_period_metric("net_worth", 500.0, 0.0, [0.0, 500.0])
+        self.assertEqual(metric["baseline"], 0.0)
+        self.assertIsNone(metric["delta_pct"])
+
+
+class WeeklySeriesTests(unittest.TestCase):
+    """New helper backing the avg_weekly_* metric baselines -- must match the existing
+    avg_weekly_income/avg_weekly_expense headline convention: no completeness filter,
+    unlike `_monthly_series`/`complete_month_keys`."""
+
+    def test_no_completeness_filter_partial_current_week_is_included(self) -> None:
+        today = date.today()
+        df = _frame([_tx(today.isoformat(), 100.0, _INCOME)])
+        real = df[df["tx_type"] != "transfer"]
+        series = _weekly_series(real, "income")
+        # The current (possibly partial) week must still appear -- no exclusion rule
+        # like complete_month_keys applies here.
+        self.assertEqual(float(series.sum()), 100.0)
+
+    def test_matches_avg_weekly_income_headline_convention(self) -> None:
+        df = _frame(
+            [
+                _tx("2026-05-01", 1000.0, _INCOME),
+                _tx("2026-05-08", 500.0, _INCOME),
+            ]
+        )
+        result = build_overview(df, pd.DataFrame([]))
+        real = df[df["tx_type"] != "transfer"]
+        series = _weekly_series(real, "income")
+        self.assertAlmostEqual(float(series.mean()), result["avg_weekly_income"])
+
+    def test_empty_subset_returns_empty_series(self) -> None:
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE)])
+        real = df[df["tx_type"] != "transfer"]
+        series = _weekly_series(real, "income")
+        self.assertTrue(series.empty)
+
+
+class OverviewBalanceMetricsTests(unittest.TestCase):
+    """`build_overview`'s new metrics["net_worth"|"total_assets"|"total_liabilities"]
+    (last-period comparison) and metrics["avg_weekly_income"|"avg_weekly_expense"]
+    (trailing-average, same family as the existing monthly metrics)."""
+
+    def test_balance_metrics_populate_with_two_months_of_history(self) -> None:
+        last_month = _month_start(1)
+        current_month = date.today().replace(day=1)
+        history = [
+            {
+                "date": last_month.isoformat(),
+                "net_worth": 1000.0,
+                "assets": 1500.0,
+                "liabilities": 500.0,
+                "liquid_cash": 800.0,
+            },
+            {
+                "date": current_month.isoformat(),
+                "net_worth": 1200.0,
+                "assets": 1800.0,
+                "liabilities": 600.0,
+                "liquid_cash": 900.0,
+            },
+        ]
+        df = _frame([_tx(last_month.isoformat(), 50.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, history)
+        metrics = result["metrics"]
+
+        self.assertAlmostEqual(metrics["net_worth"]["value"], 1200.0)
+        self.assertAlmostEqual(metrics["net_worth"]["baseline"], 1000.0)
+        self.assertAlmostEqual(metrics["net_worth"]["delta_pct"], 0.2)
+        self.assertEqual(metrics["net_worth"]["comparison_kind"], "last_period")
+
+        self.assertAlmostEqual(metrics["total_assets"]["value"], 1800.0)
+        self.assertAlmostEqual(metrics["total_assets"]["baseline"], 1500.0)
+
+        self.assertAlmostEqual(metrics["total_liabilities"]["value"], 600.0)
+        self.assertAlmostEqual(metrics["total_liabilities"]["baseline"], 500.0)
+
+    def test_balance_metrics_absent_without_net_worth_history(self) -> None:
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, [])
+        metrics = result["metrics"]
+        self.assertNotIn("net_worth", metrics)
+        self.assertNotIn("total_assets", metrics)
+        self.assertNotIn("total_liabilities", metrics)
+
+    def test_avg_weekly_metrics_populate(self) -> None:
+        df = _frame(
+            [
+                _tx("2026-05-01", 1000.0, _INCOME),
+                _tx("2026-05-02", 200.0, _EXPENSE),
+            ]
+        )
+        result = build_overview(df, pd.DataFrame([]))
+        metrics = result["metrics"]
+        self.assertIn("avg_weekly_income", metrics)
+        self.assertIn("avg_weekly_expense", metrics)
+        self.assertEqual(metrics["avg_weekly_income"]["comparison_kind"], "trailing_average")
+        self.assertAlmostEqual(metrics["avg_weekly_income"]["value"], result["avg_weekly_income"])
+        self.assertAlmostEqual(metrics["avg_weekly_expense"]["value"], result["avg_weekly_expense"])
 
     def test_biggest_expense_this_month_picks_largest_by_absolute_amount(self) -> None:
         today = date.today()

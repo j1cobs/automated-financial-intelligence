@@ -13,6 +13,8 @@ additionally requires `RequireCsrfDep` (api/deps.py::require_csrf).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
@@ -187,6 +189,10 @@ class MetricSummary(BaseModel):
     zero. Divided by the ABSOLUTE baseline so the sign always means above/below."""
     baseline_months: int
     sparkline: list[float]
+    comparison_kind: Literal["trailing_average", "last_period"]
+    """Which comparison `baseline`/`delta_pct` represent: a trailing average across
+    complete months (flows), or the value one period ago (balances). See
+    `_build_metric`/`_build_last_period_metric` in `api/viewmodels.py`."""
     """Up to the last 12 complete months of the underlying monthly series."""
 
 

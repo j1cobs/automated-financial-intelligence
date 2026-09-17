@@ -136,6 +136,37 @@ def _monthly_series(real: pd.DataFrame, tx_type: str, months: set[str]) -> pd.Se
 SPARKLINE_MONTHS = 12
 
 
+def _weekly_series(real: pd.DataFrame, tx_type: str) -> pd.Series:
+    """Per-week signed totals for one tx_type, across all history. Unlike
+    `_monthly_series`, there is no completeness filter -- the existing
+    avg_weekly_* headline figures already average over partial weeks too,
+    so the baseline uses the same convention for an apples-to-apples delta."""
+    subset = real[real["tx_type"] == tx_type]
+    if subset.empty:
+        return pd.Series(dtype=float)
+    return subset.groupby("week")["adjusted_amount"].sum()
+
+
+def _build_last_period_metric(
+    key: str, value: float, prior_value: float | None, sparkline: list[float]
+) -> dict[str, Any]:
+    """Pair a headline figure with its value one period ago, for metrics where
+    'vs last month' is the meaningful comparison (balances), not a trailing
+    average (which `_build_metric` already covers for flows)."""
+    delta_pct = None
+    if prior_value is not None and prior_value != 0:
+        delta_pct = (value - prior_value) / abs(prior_value)
+    return {
+        "key": key,
+        "value": float(value),
+        "baseline": prior_value,
+        "delta_pct": delta_pct,
+        "baseline_months": 1,
+        "sparkline": sparkline,
+        "comparison_kind": "last_period",
+    }
+
+
 def _build_metric(key: str, value: float, monthly: pd.Series) -> dict[str, Any]:
     """Pair a headline figure with the baseline that makes it legible.
 
@@ -163,6 +194,7 @@ def _build_metric(key: str, value: float, monthly: pd.Series) -> dict[str, Any]:
         "delta_pct": delta_pct,
         "baseline_months": int(len(ordered)),
         "sparkline": [float(v) for v in ordered.tail(SPARKLINE_MONTHS).tolist()],
+        "comparison_kind": "trailing_average",
     }
 
 
@@ -390,7 +422,7 @@ def build_overview(
         "avg_monthly_income": 0.0,
         "avg_monthly_net": 0.0,
         "complete_months": 0,
-        # Same four keys as the populated path, so the UI never branches on presence.
+        # Same keys as the populated path, so the UI never branches on presence.
         "metrics": {
             key: _build_metric(key, 0.0, pd.Series(dtype=float))
             for key in (
@@ -398,6 +430,8 @@ def build_overview(
                 "avg_monthly_expense",
                 "avg_monthly_net",
                 "savings_rate",
+                "avg_weekly_income",
+                "avg_weekly_expense",
             )
         },
         "top_categories": [],
@@ -449,6 +483,8 @@ def build_overview(
     at_income = _monthly_series(all_time_real, "income", all_time_months)
     at_expense = _monthly_series(all_time_real, "expense", all_time_months).abs()
     at_net = at_income.subtract(at_expense, fill_value=0.0)
+    at_weekly_income = _weekly_series(all_time_real, "income")
+    at_weekly_expense = _weekly_series(all_time_real, "expense").abs()
     metrics = {
         "avg_monthly_income": _build_metric("avg_monthly_income", avg_monthly_income, at_income),
         "avg_monthly_expense": _build_metric("avg_monthly_expense", avg_monthly_expense, at_expense),
@@ -456,6 +492,8 @@ def build_overview(
         "savings_rate": _build_metric(
             "savings_rate", savings_rate, _monthly_savings_rates(all_time_real, all_time_months)
         ),
+        "avg_weekly_income": _build_metric("avg_weekly_income", avg_weekly_income, at_weekly_income),
+        "avg_weekly_expense": _build_metric("avg_weekly_expense", avg_weekly_expense, at_weekly_expense),
     }
 
     max_date = all_time_df["date"].max()
@@ -721,6 +759,8 @@ def build_overview(
         if prior_candidates:
             net_worth_mom_delta = latest["net_worth"] - prior_candidates[-1]["net_worth"]
 
+        prior_snapshot = prior_candidates[-1] if prior_candidates else None
+
         by_month: dict[str, dict[str, Any]] = {}
         for row in net_worth_trend_daily:
             by_month[row["date"][:7]] = row
@@ -773,6 +813,25 @@ def build_overview(
                     "credit_utilization_pct": credit_utilization_pct,
                     "emergency_fund_months": emergency_fund_months_for_month,
                 }
+            )
+
+        # Balance-tile metrics (net worth, assets, liabilities) compare against the
+        # value one month ago, not a trailing average -- a balance's natural baseline
+        # is where it stood last, not its average over history (see
+        # `_build_last_period_metric`'s docstring). `prior_snapshot` is the same
+        # month-ago snapshot already resolved above for `net_worth_mom_delta`.
+        sorted_months = sorted(by_month)
+        for field_key, snap_field in (
+            ("net_worth", "net_worth"),
+            ("total_assets", "assets"),
+            ("total_liabilities", "liabilities"),
+        ):
+            sparkline = [float(by_month[m][snap_field]) for m in sorted_months[-SPARKLINE_MONTHS:]]
+            metrics[field_key] = _build_last_period_metric(
+                field_key,
+                float(latest[snap_field]),
+                float(prior_snapshot[snap_field]) if prior_snapshot else None,
+                sparkline,
             )
 
     return {
