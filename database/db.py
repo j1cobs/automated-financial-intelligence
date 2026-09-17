@@ -547,6 +547,19 @@ class DatabaseClient:
                 rows = cur.fetchall()
         return {merchant_key: category for merchant_key, category in rows}
 
+    def get_transaction_pfc_details(self) -> dict[str, tuple[str | None, str | None]]:
+        """transaction_hash -> (pfc_detailed, category_source) for every transaction.
+
+        Pure data access for the API's optional PFC-detail columns, kept out of
+        app/dashboard.py::load_financial_data (frozen) per the precedent in
+        api/dataload.py's module docstring."""
+        sql = "SELECT transaction_hash, pfc_detailed, category_source FROM transactions"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {row[0]: (row[1], row[2]) for row in rows}
+
     def set_merchant_category(self, merchant_key: str, category: str, source: str = "user") -> None:
         """Insert or update merchant memory for merchant_key. This is what lets the cascade
         (analytics/categorizer.py) apply a single correction to every future transaction from

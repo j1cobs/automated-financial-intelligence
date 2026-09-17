@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
 
@@ -24,6 +25,23 @@ from api import dataload  # noqa: E402
 
 DB_A = "postgresql://localhost/a"
 DB_B = "postgresql://localhost/b"
+
+
+@contextmanager
+def _patch_dataload_reads(tx_df: pd.DataFrame | None = None, acct_df: pd.DataFrame | None = None):
+    """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
+    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details` (added alongside
+    it, without touching the frozen loader -- see api/dataload.py's module docstring).
+    Yields the `load_financial_data` mock, since that's what existing tests assert
+    call counts against; defaults `get_transaction_pfc_details` to an empty mapping so
+    tests that don't care about pfc_detailed/category_source aren't forced to mock it."""
+    with patch(
+        "api.dataload.load_financial_data",
+        return_value=(tx_df if tx_df is not None else _tx_df(), acct_df if acct_df is not None else _acct_df()),
+    ) as loader:
+        with patch("api.dataload.DatabaseClient") as mock_db_class:
+            mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+            yield loader
 
 
 def _tx_df() -> pd.DataFrame:
@@ -79,7 +97,7 @@ class DataLoadCacheTests(unittest.TestCase):
         dataload.clear()
 
     def _patched(self):
-        return patch("api.dataload.load_financial_data", return_value=(_tx_df(), _acct_df()))
+        return _patch_dataload_reads()
 
     def test_second_read_inside_the_window_does_not_hit_the_database(self) -> None:
         with self._patched() as loader:
@@ -148,7 +166,7 @@ class SharedFrameIsNotMutatedTests(unittest.TestCase):
             exclude_duplicate_rows,
         )
 
-        with patch("api.dataload.load_financial_data", return_value=(_tx_df(), _acct_df())):
+        with _patch_dataload_reads():
             tx, acct = dataload.load_frames(DB_A)
 
         before = tx.copy(deep=True)
@@ -166,6 +184,126 @@ class SharedFrameIsNotMutatedTests(unittest.TestCase):
         # Any builder that mutated in place instead of copying would corrupt every other
         # request served from this same cached frame for the rest of the TTL window.
         pd.testing.assert_frame_equal(tx, before)
+
+
+class PFCDetailsMergingTests(unittest.TestCase):
+    """Test that `load_frames()` merges pfc_detailed and category_source from DB."""
+
+    def setUp(self) -> None:
+        dataload.clear()
+
+    def tearDown(self) -> None:
+        dataload.clear()
+
+    def test_pfc_details_merged_onto_transaction_frame(self) -> None:
+        """When DatabaseClient.get_transaction_pfc_details() returns mappings,
+        load_frames() merges them onto the tx_df as pfc_detailed and category_source."""
+        from unittest.mock import MagicMock
+
+        tx_df = _tx_df()
+        acct_df = _acct_df()
+
+        pfc_details = {
+            "h1": ("FOOD_AND_DRINK_RESTAURANTS", "plaid"),
+        }
+
+        with patch("api.dataload.load_financial_data", return_value=(tx_df, acct_df)):
+            with patch("api.dataload.DatabaseClient") as mock_db_class:
+                mock_db = MagicMock()
+                mock_db_class.return_value = mock_db
+                mock_db.get_transaction_pfc_details.return_value = pfc_details
+                prepared, _ = dataload.load_frames(DB_A)
+
+        # The prepared frame should have the merged columns
+        self.assertIn("pfc_detailed", prepared.columns)
+        self.assertIn("category_source", prepared.columns)
+        self.assertEqual(prepared["pfc_detailed"].iloc[0], "FOOD_AND_DRINK_RESTAURANTS")
+        self.assertEqual(prepared["category_source"].iloc[0], "plaid")
+
+    def test_missing_hash_gets_none_for_pfc_details(self) -> None:
+        """When a transaction_hash is not in the pfc_details mapping,
+        pfc_detailed and category_source should be None."""
+        from unittest.mock import MagicMock
+
+        tx_df = _tx_df()
+        acct_df = _acct_df()
+
+        # Empty mapping: the hash h1 won't be found
+        pfc_details = {}
+
+        with patch("api.dataload.load_financial_data", return_value=(tx_df, acct_df)):
+            with patch("api.dataload.DatabaseClient") as mock_db_class:
+                mock_db = MagicMock()
+                mock_db_class.return_value = mock_db
+                mock_db.get_transaction_pfc_details.return_value = pfc_details
+                prepared, _ = dataload.load_frames(DB_A)
+
+        # The columns exist but the value for this hash is None
+        self.assertIn("pfc_detailed", prepared.columns)
+        self.assertIn("category_source", prepared.columns)
+        self.assertIsNone(prepared["pfc_detailed"].iloc[0])
+        self.assertIsNone(prepared["category_source"].iloc[0])
+
+    def test_partial_pfc_details_coverage(self) -> None:
+        """When some hashes are in the mapping and others aren't,
+        only the mapped ones get values."""
+        tx_rows = [
+            {
+                "date": pd.Timestamp("2026-05-01"),
+                "transaction_hash": "h1",
+                "account_key": "k",
+                "account_name": "Chequing",
+                "owner_name": "Jacob",
+                "account_type": "depository",
+                "account_subtype": "checking",
+                "description": "Thing 1",
+                "amount": 10.0,
+                "category": "Shopping",
+                "outlier_score": 0.0,
+                "is_outlier": False,
+                "is_recurring": False,
+                "is_duplicate": False,
+            },
+            {
+                "date": pd.Timestamp("2026-05-02"),
+                "transaction_hash": "h2",
+                "account_key": "k",
+                "account_name": "Chequing",
+                "owner_name": "Jacob",
+                "account_type": "depository",
+                "account_subtype": "checking",
+                "description": "Thing 2",
+                "amount": 20.0,
+                "category": "Shopping",
+                "outlier_score": 0.0,
+                "is_outlier": False,
+                "is_recurring": False,
+                "is_duplicate": False,
+            },
+        ]
+        tx_df = pd.DataFrame(tx_rows)
+        acct_df = _acct_df()
+
+        # Only h1 is in the mapping
+        pfc_details = {"h1": ("FOOD_AND_DRINK", "cascade")}
+
+        with patch("api.dataload.load_financial_data", return_value=(tx_df, acct_df)):
+            with patch("api.dataload.DatabaseClient") as mock_db_class:
+                mock_db = MagicMock()
+                mock_db_class.return_value = mock_db
+                mock_db.get_transaction_pfc_details.return_value = pfc_details
+                prepared, _ = dataload.load_frames(DB_A)
+
+        # h1 has the value, h2 is None or NaN (pandas converts None in map to NaN)
+        h1_row = prepared[prepared["transaction_hash"] == "h1"].iloc[0]
+        h2_row = prepared[prepared["transaction_hash"] == "h2"].iloc[0]
+
+        self.assertEqual(h1_row["pfc_detailed"], "FOOD_AND_DRINK")
+        self.assertEqual(h1_row["category_source"], "cascade")
+
+        # For h2, the value should be None or NaN -- both are falsy and non-string
+        self.assertTrue(pd.isna(h2_row["pfc_detailed"]) or h2_row["pfc_detailed"] is None)
+        self.assertTrue(pd.isna(h2_row["category_source"]) or h2_row["category_source"] is None)
 
 
 class WriteEndpointInvalidationTests(unittest.TestCase):

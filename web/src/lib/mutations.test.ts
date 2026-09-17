@@ -44,6 +44,8 @@ const ledgerData: LedgerResponse = {
       tx_type: 'expense',
       is_recurring: false,
       is_duplicate: false,
+      pfc_detailed: null,
+      category_source: null,
     },
   ],
 };

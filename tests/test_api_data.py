@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
@@ -108,6 +109,26 @@ def _acct_df() -> pd.DataFrame:
     )
 
 
+@contextmanager
+def _patch_dataload_reads(tx_df=None, acct_df=None):
+    """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
+    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details` (added alongside
+    it, without touching the frozen loader -- see api/dataload.py's module docstring).
+    Yields the `load_financial_data` mock. Defaults `get_transaction_pfc_details` to an
+    empty mapping so tests that don't care about pfc_detailed/category_source aren't
+    forced to mock it."""
+    with patch(
+        "api.dataload.load_financial_data",
+        return_value=(
+            tx_df if tx_df is not None else _tx_df(),
+            acct_df if acct_df is not None else _acct_df(),
+        ),
+    ) as loader:
+        with patch("api.dataload.DatabaseClient") as mock_db_class:
+            mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+            yield loader
+
+
 class ApiDataTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # The frame cache is process-global; without this, one test's fixture leaks into
@@ -147,15 +168,12 @@ class ApiDataTestCase(unittest.TestCase):
         return self.client
 
     def _load_financial_data_patch(self, tx_df=None, acct_df=None):
-        return patch(
-            # Patched where it is USED, not where it was defined: the loader moved
-            # behind `api/dataload.py`'s TTL cache.
-            "api.dataload.load_financial_data",
-            return_value=(
-                tx_df if tx_df is not None else _tx_df(),
-                acct_df if acct_df is not None else _acct_df(),
-            ),
-        )
+        # Patched where it is USED, not where it was defined: the loader moved behind
+        # `api/dataload.py`'s TTL cache. Also patches `DatabaseClient` there, since
+        # `load_frames()` additionally calls `DatabaseClient.get_transaction_pfc_details()`
+        # (added alongside the frozen loader, not inside it) -- without this, these tests
+        # would attempt a real DB connection for that one extra read.
+        return _patch_dataload_reads(tx_df=tx_df, acct_df=acct_df)
 
 
 READ_ENDPOINTS = [

@@ -380,6 +380,8 @@ class LedgerItem(BaseModel):
     tx_type: str
     is_recurring: bool
     is_duplicate: bool
+    pfc_detailed: str | None
+    category_source: str | None
 
 
 class LedgerResponse(BaseModel):

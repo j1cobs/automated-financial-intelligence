@@ -163,6 +163,8 @@ function setDefaultMutations() {
 describe('TransactionsTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Clear localStorage between tests to avoid state leakage
+    localStorage.clear();
   });
 
   describe('Ledger loading and error states', () => {
@@ -238,6 +240,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
           {
             hash: 'tx-2',
@@ -250,6 +254,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: true,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -283,6 +289,8 @@ describe('TransactionsTab', () => {
           tx_type: 'expense',
           is_recurring: false,
           is_duplicate: false,
+          pfc_detailed: null,
+          category_source: null,
         })),
       };
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
@@ -320,6 +328,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           })),
         };
         mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
@@ -392,6 +402,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
           {
             hash: 'tx-big',
@@ -404,6 +416,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -450,6 +464,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: true,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -567,6 +583,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -617,6 +635,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -668,6 +688,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -683,8 +705,10 @@ describe('TransactionsTab', () => {
 
       renderComponent();
 
-      const recurringCheckboxes = screen.getAllByRole('checkbox');
-      const recurringCheckbox = recurringCheckboxes[0];
+      // Find the recurring checkbox for the specific transaction (not the "Show category detail" checkbox)
+      const recurringCheckbox = screen.getByRole('checkbox', {
+        name: /Mark Netflix Subscription as recurring/i,
+      });
 
       await user.click(recurringCheckbox);
 
@@ -715,6 +739,8 @@ describe('TransactionsTab', () => {
             tx_type: 'expense',
             is_recurring: false,
             is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
           },
         ],
       };
@@ -730,8 +756,10 @@ describe('TransactionsTab', () => {
 
       renderComponent();
 
-      const duplicateCheckboxes = screen.getAllByRole('checkbox');
-      const duplicateCheckbox = duplicateCheckboxes[1];
+      // Find the duplicate checkbox for the specific transaction (not the "Show category detail" checkbox)
+      const duplicateCheckbox = screen.getByRole('checkbox', {
+        name: /Mark Coffee Shop as duplicate/i,
+      });
 
       await user.click(duplicateCheckbox);
 
@@ -741,6 +769,232 @@ describe('TransactionsTab', () => {
           duplicate: true,
         });
       });
+    });
+  });
+
+  describe('Plaid detail column (pfc_detailed) toggle', () => {
+    it('does not render the "Plaid detail" column by default when localStorage is empty', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Grocery Store',
+            amount: -50.25,
+            category: 'Groceries',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
+            category_source: 'plaid',
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Groceries'] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      // The "Show category detail" checkbox should exist and be unchecked
+      const checkbox = screen.getByRole('checkbox', { name: /show category detail/i });
+      expect(checkbox).toBeInTheDocument();
+      expect(checkbox).not.toBeChecked();
+
+      // The "Plaid detail" column header should not be in the document
+      expect(screen.queryByText('Plaid detail')).not.toBeInTheDocument();
+    });
+
+    it('renders the "Plaid detail" column with pfc_detailed values when checkbox is clicked', async () => {
+      const user = userEvent.setup();
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Grocery Store',
+            amount: -50.25,
+            category: 'Groceries',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
+            category_source: 'plaid',
+          },
+          {
+            hash: 'tx-2',
+            date: '2024-01-14',
+            account_name: 'Credit Card',
+            owner_name: null,
+            description: 'Gas Station',
+            amount: -40.0,
+            category: 'Gas',
+            tx_type: 'expense',
+            is_recurring: true,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Groceries', 'Gas'] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      // Column should not exist initially
+      expect(screen.queryByText('Plaid detail')).not.toBeInTheDocument();
+
+      // Click the "Show category detail" checkbox
+      const checkbox = screen.getByRole('checkbox', { name: /show category detail/i });
+      await user.click(checkbox);
+
+      // Column header should now appear
+      expect(screen.getByText('Plaid detail')).toBeInTheDocument();
+
+      // pfc_detailed values should be rendered in the column
+      expect(screen.getByText('FOOD_AND_DRINK_GROCERIES')).toBeInTheDocument();
+
+      // Null pfc_detailed should render as "—"
+      const gasRow = screen.getByText('Gas Station').closest('tr');
+      expect(within(gasRow!).getByText('—')).toBeInTheDocument();
+    });
+
+    it('persists the toggle state to localStorage and restores it on fresh mount', async () => {
+      const user = userEvent.setup();
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Test Transaction',
+            amount: -25.0,
+            category: 'Testing',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: 'TEST_DETAILED',
+            category_source: 'plaid',
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Testing'] }));
+      setDefaultMutations();
+
+      // First render: column not visible
+      const { unmount } = renderComponent();
+      expect(screen.queryByText('Plaid detail')).not.toBeInTheDocument();
+
+      // Toggle the checkbox on
+      const checkbox = screen.getByRole('checkbox', { name: /show category detail/i });
+      await user.click(checkbox);
+      expect(screen.getByText('Plaid detail')).toBeInTheDocument();
+
+      // Unmount to simulate page unload
+      unmount();
+
+      // Fresh mount (simulating page reload) with same mocked data
+      renderComponent();
+
+      // The column should be visible immediately without toggling again
+      expect(screen.getByText('Plaid detail')).toBeInTheDocument();
+      expect(screen.getByText('TEST_DETAILED')).toBeInTheDocument();
+
+      // The checkbox should be checked
+      const newCheckbox = screen.getByRole('checkbox', { name: /show category detail/i });
+      expect(newCheckbox).toBeChecked();
+    });
+
+    it('renders bg-surface-2 class on detail cells only when category_source is "merchant"', async () => {
+      const user = userEvent.setup();
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-merchant',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Merchant Transaction',
+            amount: -30.0,
+            category: 'Groceries',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: 'CUSTOM_MERCHANT_CATEGORY',
+            category_source: 'merchant',
+          },
+          {
+            hash: 'tx-plaid',
+            date: '2024-01-14',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Plaid Transaction',
+            amount: -20.0,
+            category: 'Gas',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: 'TRANSPORTATION_FUEL',
+            category_source: 'plaid',
+          },
+          {
+            hash: 'tx-null-source',
+            date: '2024-01-13',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Old Transaction',
+            amount: -10.0,
+            category: 'Other',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: 'SOME_CATEGORY',
+            category_source: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Groceries', 'Gas', 'Other'] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      // Toggle on the detail column
+      const checkbox = screen.getByRole('checkbox', { name: /show category detail/i });
+      await user.click(checkbox);
+
+      // Find the rows by their descriptions
+      const merchantRow = screen.getByText('Merchant Transaction').closest('tr');
+      const plaidRow = screen.getByText('Plaid Transaction').closest('tr');
+      const nullSourceRow = screen.getByText('Old Transaction').closest('tr');
+
+      // The merchant row's detail cell should have bg-surface-2
+      const merchantDetailCell = within(merchantRow!).getByText('CUSTOM_MERCHANT_CATEGORY').closest('td');
+      expect(merchantDetailCell?.className).toMatch(/bg-surface-2/);
+
+      // The plaid row's detail cell should NOT have bg-surface-2
+      const plaidDetailCell = within(plaidRow!).getByText('TRANSPORTATION_FUEL').closest('td');
+      expect(plaidDetailCell?.className).not.toMatch(/bg-surface-2/);
+
+      // The null-source row's detail cell should NOT have bg-surface-2
+      const nullSourceDetailCell = within(nullSourceRow!).getByText('SOME_CATEGORY').closest('td');
+      expect(nullSourceDetailCell?.className).not.toMatch(/bg-surface-2/);
     });
   });
 });

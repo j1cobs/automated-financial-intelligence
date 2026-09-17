@@ -303,6 +303,8 @@ export interface LedgerItem {
   tx_type: string;
   is_recurring: boolean;
   is_duplicate: boolean;
+  pfc_detailed: string | null;
+  category_source: string | null;
 }
 
 export interface LedgerResponse {

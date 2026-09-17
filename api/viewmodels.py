@@ -1072,6 +1072,8 @@ def build_ledger(df: pd.DataFrame) -> list[dict[str, Any]]:
             "tx_type": row["tx_type"],
             "is_recurring": bool(row["is_recurring"]) if pd.notna(row["is_recurring"]) else False,
             "is_duplicate": bool(row["is_duplicate"]) if pd.notna(row["is_duplicate"]) else False,
+            "pfc_detailed": _clean(row["pfc_detailed"]),
+            "category_source": _clean(row["category_source"]),
         }
         for _, row in ordered.iterrows()
     ]

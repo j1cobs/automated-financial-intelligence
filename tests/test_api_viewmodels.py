@@ -28,6 +28,7 @@ from api.viewmodels import (  # noqa: E402
     _build_metric,
     _weekly_series,
     build_cash_flow,
+    build_ledger,
     build_net_worth,
     build_overview,
     complete_month_keys,
@@ -682,6 +683,63 @@ class OverviewHomeInsightsTests(unittest.TestCase):
         self.assertAlmostEqual(mom["Groceries"]["this_month_drift_pct"], 0.4)
         self.assertIsNone(mom["Brand New Category"]["usual"])
         self.assertIsNone(mom["Brand New Category"]["this_month_drift_pct"])
+
+
+class BuildLedgerTests(unittest.TestCase):
+    """Test `build_ledger()` output includes pfc_detailed and category_source fields."""
+
+    def test_ledger_includes_pfc_and_category_source_from_dataframe(self) -> None:
+        # Build a frame using _frame() then manually add pfc columns after enrichment
+        df = _frame(
+            [
+                _tx("2026-05-01", 10.0, _EXPENSE, transaction_hash="h1"),
+                _tx("2026-05-02", 20.0, _EXPENSE, transaction_hash="h2"),
+            ]
+        )
+        # After prepare_transactions/enrichment, add the pfc columns using a dict for proper alignment
+        pfc_map = {"h1": "FOOD_AND_DRINK_RESTAURANTS", "h2": None}
+        source_map = {"h1": "plaid", "h2": None}
+        df["pfc_detailed"] = df["transaction_hash"].map(pfc_map)
+        df["category_source"] = df["transaction_hash"].map(source_map)
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 2)
+        # build_ledger sorts by date descending, so result[0] is h2 (2026-05-02)
+        h1_result = next(r for r in result if r["hash"] == "h1")
+        h2_result = next(r for r in result if r["hash"] == "h2")
+        # h1 row has both fields populated
+        self.assertEqual(h1_result["pfc_detailed"], "FOOD_AND_DRINK_RESTAURANTS")
+        self.assertEqual(h1_result["category_source"], "plaid")
+        # h2 row has None
+        self.assertIsNone(h2_result["pfc_detailed"])
+        self.assertIsNone(h2_result["category_source"])
+
+    def test_ledger_handles_nan_pfc_and_source_fields(self) -> None:
+        # NaN values from missing columns get converted to None by _clean()
+        df = _frame([_tx("2026-05-01", 10.0, _EXPENSE, transaction_hash="h1")])
+        # Explicitly add NaN columns (as would occur if merged but no value found)
+        df["pfc_detailed"] = pd.NA
+        df["category_source"] = pd.NA
+        result = build_ledger(df)
+        self.assertIsNone(result[0]["pfc_detailed"])
+        self.assertIsNone(result[0]["category_source"])
+
+    def test_ledger_empty_dataframe_returns_empty_list(self) -> None:
+        empty = pd.DataFrame(
+            [],
+            columns=[
+                "date",
+                "month",
+                "week",
+                "tx_type",
+                "adjusted_amount",
+                "is_outlier",
+                "pfc_detailed",
+                "category_source",
+            ],
+        )
+        result = build_ledger(empty)
+        self.assertEqual(result, [])
 
 
 class BuildLastPeriodMetricTests(unittest.TestCase):

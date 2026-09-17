@@ -750,6 +750,49 @@ class DeleteTransactionsByExternalIdsTests(unittest.TestCase):
         connect.assert_not_called()
 
 
+class GetTransactionPFCDetailsTests(unittest.TestCase):
+    def test_returns_mapping_of_hash_to_pfc_tuple(self) -> None:
+        connect, cursor = _mock_connect(
+            [
+                ("hash1", "FOOD_AND_DRINK_RESTAURANTS", "plaid"),
+                ("hash2", "FOOD_AND_DRINK_GROCERIES", "cascade"),
+                ("hash3", None, "user"),
+            ]
+        )
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_pfc_details()
+
+        self.assertEqual(
+            result,
+            {
+                "hash1": ("FOOD_AND_DRINK_RESTAURANTS", "plaid"),
+                "hash2": ("FOOD_AND_DRINK_GROCERIES", "cascade"),
+                "hash3": (None, "user"),
+            },
+        )
+        sql = cursor.execute.call_args[0][0]
+        self.assertIn("SELECT transaction_hash, pfc_detailed, category_source", sql)
+        self.assertIn("FROM transactions", sql)
+
+    def test_returns_empty_mapping_when_no_transactions(self) -> None:
+        connect, cursor = _mock_connect([])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_pfc_details()
+
+        self.assertEqual(result, {})
+
+    def test_handles_null_pfc_detailed_and_source(self) -> None:
+        connect, cursor = _mock_connect(
+            [
+                ("hash1", None, None),
+            ]
+        )
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_pfc_details()
+
+        self.assertEqual(result["hash1"], (None, None))
+
+
 class SyncCursorTests(unittest.TestCase):
     def test_get_sync_cursors_returns_mapping(self) -> None:
         connect, cursor = _mock_connect([("fp-1", "cursor-1"), ("fp-2", "cursor-2")])

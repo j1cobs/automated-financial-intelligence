@@ -31,6 +31,7 @@ import time
 import pandas as pd
 
 from app.dashboard import load_financial_data
+from database.db import DatabaseClient
 
 from .viewmodels import prepare_transactions
 
@@ -58,6 +59,14 @@ def load_frames(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Two concurrent misses may both load — wasteful once, never wrong, and far better
     # than serialising every reader behind one database round-trip.
     tx_df, acct_df = load_financial_data(database_url)
+
+    # Merge pfc_detailed and category_source from the database — these are not part of
+    # the frozen app/dashboard.py::load_financial_data, so we fetch them separately.
+    db = DatabaseClient(database_url)
+    pfc_details = db.get_transaction_pfc_details()
+    tx_df["pfc_detailed"] = tx_df["transaction_hash"].map(lambda h: pfc_details.get(h, (None, None))[0])
+    tx_df["category_source"] = tx_df["transaction_hash"].map(lambda h: pfc_details.get(h, (None, None))[1])
+
     prepared = prepare_transactions(tx_df)
 
     with _lock:

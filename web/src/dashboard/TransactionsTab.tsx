@@ -274,10 +274,12 @@ function LedgerTheadRow({
   sortKey,
   sortDir,
   toggleSort,
+  showPfcDetail,
 }: {
   sortKey: SortKey;
   sortDir: SortDir;
   toggleSort: (key: SortKey) => void;
+  showPfcDetail: boolean;
 }) {
   return (
     <tr className="border-b border-hairline bg-surface-2">
@@ -308,6 +310,7 @@ function LedgerTheadRow({
         />
       </th>
       <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Category</th>
+      {showPfcDetail && <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Plaid detail</th>}
       <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Recurring</th>
       <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Duplicate</th>
     </tr>
@@ -321,6 +324,7 @@ interface LedgerRowProps {
   categories: string[] | undefined;
   isRecurringPending: boolean;
   isDuplicatePending: boolean;
+  showPfcDetail: boolean;
   onStartEdit: (hash: string, category: string) => void;
   onCategoryChange: (hash: string, category: string) => void;
   onStopEdit: () => void;
@@ -335,6 +339,7 @@ function LedgerRow({
   categories,
   isRecurringPending,
   isDuplicatePending,
+  showPfcDetail,
   onStartEdit,
   onCategoryChange,
   onStopEdit,
@@ -389,6 +394,11 @@ function LedgerRow({
           </button>
         )}
       </td>
+      {showPfcDetail && (
+        <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.category_source === 'merchant' ? 'bg-surface-2' : ''}`}>
+          <span>{tx.pfc_detailed ? tx.pfc_detailed : <span className="text-ink-muted">—</span>}</span>
+        </td>
+      )}
       <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
         <input
           type="checkbox"
@@ -418,7 +428,7 @@ function LedgerRow({
  *  from whatever rows happen to be in the DOM, which changes every scroll
  *  frame once rows unmount. Only used on the virtualized (large-ledger)
  *  path; the plain path keeps natural auto-layout. */
-function LedgerColgroup() {
+function LedgerColgroup({ showPfcDetail }: { showPfcDetail: boolean }) {
   return (
     <colgroup>
       <col className="w-[10%]" />
@@ -426,6 +436,7 @@ function LedgerColgroup() {
       <col className="w-[27%]" />
       <col className="w-[12%]" />
       <col className="w-[14%]" />
+      {showPfcDetail && <col className="w-[11%]" />}
       <col className="w-[10%]" />
       <col className="w-[11%]" />
     </colgroup>
@@ -437,6 +448,7 @@ interface VirtualizedLedgerTableProps extends Omit<LedgerRowProps, 'tx'> {
   sortKey: SortKey;
   sortDir: SortDir;
   toggleSort: (key: SortKey) => void;
+  showPfcDetail: boolean;
 }
 
 /** The large-ledger path: a fixed-height scroll container with a sticky
@@ -450,6 +462,7 @@ function VirtualizedLedgerTable({
   sortKey,
   sortDir,
   toggleSort,
+  showPfcDetail,
   ...rowProps
 }: VirtualizedLedgerTableProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -464,29 +477,32 @@ function VirtualizedLedgerTable({
   const paddingBottom =
     virtualRows.length > 0 ? rowVirtualizer.getTotalSize() - virtualRows[virtualRows.length - 1].end : 0;
 
+  const colSpan = showPfcDetail ? 8 : 7;
+
   return (
     <div ref={scrollRef} className="max-h-[70vh] overflow-auto rounded-lg border border-hairline">
       <table className="w-full text-xs sm:text-sm" style={{ tableLayout: 'fixed' }}>
-        <LedgerColgroup />
+        <LedgerColgroup showPfcDetail={showPfcDetail} />
         <thead className="sticky top-0 z-10">
-          <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} />
+          <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} showPfcDetail={showPfcDetail} />
         </thead>
         <tbody>
           {paddingTop > 0 && (
             <tr aria-hidden="true" style={{ height: `${paddingTop}px` }}>
-              <td colSpan={7} />
+              <td colSpan={colSpan} />
             </tr>
           )}
           {virtualRows.map((virtualRow) => (
             <LedgerRow
               key={transactions[virtualRow.index].hash}
               tx={transactions[virtualRow.index]}
+              showPfcDetail={showPfcDetail}
               {...rowProps}
             />
           ))}
           {paddingBottom > 0 && (
             <tr aria-hidden="true" style={{ height: `${paddingBottom}px` }}>
-              <td colSpan={7} />
+              <td colSpan={colSpan} />
             </tr>
           )}
         </tbody>
@@ -531,6 +547,23 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
   const [editingCategory, setEditingCategory] = useState<string>('');
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [showPfcDetail, setShowPfcDetail] = useState(() => {
+    try {
+      const stored = localStorage.getItem('showPfcDetailColumn');
+      return stored === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleTogglePfcDetail = (newValue: boolean) => {
+    setShowPfcDetail(newValue);
+    try {
+      localStorage.setItem('showPfcDetailColumn', String(newValue));
+    } catch {
+      // silently fail if localStorage is unavailable
+    }
+  };
 
   // Ledger edits are optimistic (see `lib/mutations.ts`): the row updates before the
   // request resolves, and a failure rolls it back via the mutation's own onError. The
@@ -647,6 +680,18 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
           <p>Positive amounts are income or credits. Negative amounts are expenses or debits.</p>
         </div>
 
+        <div className="mb-2 flex items-center gap-2">
+          <label className="flex items-center gap-2 text-xs text-ink-secondary sm:text-sm">
+            <input
+              type="checkbox"
+              checked={showPfcDetail}
+              onChange={(e) => handleTogglePfcDetail(e.target.checked)}
+              className="h-4 w-4 cursor-pointer"
+            />
+            Show category detail
+          </label>
+        </div>
+
         {editFailed && (
           <div className="mb-2 rounded border border-neg bg-surface-2 px-3 py-2 text-xs text-neg-text sm:text-sm">
             {strings.loading.editFailed}
@@ -685,6 +730,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                 sortKey={sortKey}
                 sortDir={sortDir}
                 toggleSort={toggleSort}
+                showPfcDetail={showPfcDetail}
                 editingHash={editingHash}
                 editingCategory={editingCategory}
                 categories={categoriesQuery.data?.categories}
@@ -703,13 +749,13 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
               <div className="overflow-x-auto rounded-lg border border-hairline">
                 <table className="min-w-full text-xs sm:text-sm">
                   <thead>
-                    <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} />
+                    <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} showPfcDetail={showPfcDetail} />
                   </thead>
                   <tbody>
                     {sortedTransactions.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={showPfcDetail ? 8 : 7}
                           className="px-2 py-6 text-center text-xs text-ink-muted sm:px-4 sm:py-8 sm:text-sm"
                         >
                           No transactions found
@@ -725,6 +771,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                           categories={categoriesQuery.data?.categories}
                           isRecurringPending={updateRecurring.isPending}
                           isDuplicatePending={updateDuplicate.isPending}
+                          showPfcDetail={showPfcDetail}
                           onStartEdit={(hash, category) => {
                             setEditingHash(hash);
                             setEditingCategory(category);
