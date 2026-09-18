@@ -458,11 +458,19 @@ function LedgerRow({
                   Math.sign(candidate.amount) !== Math.sign(tx.amount) && // opposite sign
                   !candidate.linked_transaction_hash, // not already linked
               )
-              // Sort by closest date
+              // Sort by closest amount first, then by closest date as a tie-break --
+              // the amount is usually the stronger signal for which transaction is the
+              // actual matching reimbursement/expense.
               .sort((a, b) => {
+                const txAmount = Math.abs(tx.amount);
+                const aAmountDistance = Math.abs(Math.abs(a.amount) - txAmount);
+                const bAmountDistance = Math.abs(Math.abs(b.amount) - txAmount);
+                if (aAmountDistance !== bAmountDistance) {
+                  return aAmountDistance - bAmountDistance;
+                }
+                const txDate = new Date(tx.date).getTime();
                 const aDate = new Date(a.date).getTime();
                 const bDate = new Date(b.date).getTime();
-                const txDate = new Date(tx.date).getTime();
                 return Math.abs(aDate - txDate) - Math.abs(bDate - txDate);
               });
 
