@@ -46,6 +46,7 @@ const ledgerData: LedgerResponse = {
       is_duplicate: false,
       pfc_detailed: null,
       category_source: null,
+      linked_transaction_hash: null,
     },
   ],
 };

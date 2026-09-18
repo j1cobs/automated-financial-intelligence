@@ -72,7 +72,7 @@ type LedgerSnapshot = Array<[QueryKey, LedgerResponse | undefined]>;
 function patchLedgerRow(
   queryClient: QueryClient,
   hash: string,
-  patch: Partial<Pick<LedgerItem, 'category' | 'is_recurring' | 'is_duplicate'>>,
+  patch: Partial<Pick<LedgerItem, 'category' | 'is_recurring' | 'is_duplicate' | 'linked_transaction_hash'>>,
 ): LedgerSnapshot {
   const snapshot = queryClient.getQueriesData<LedgerResponse>({ queryKey: ledgerQueryKey });
   queryClient.setQueriesData<LedgerResponse>({ queryKey: ledgerQueryKey }, (old) => {
@@ -197,6 +197,55 @@ export function useUpdateDuplicate() {
       // is_duplicate changes which rows are excluded everywhere except the
       // ledger (see api/viewmodels.py's exclude_duplicate_rows), so every other
       // read is potentially stale too -- debounced along with category edits.
+      void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+export function useLinkTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ hash, otherHash }: { hash: string; otherHash: string }) =>
+      apiFetch<void>(`/transactions/${encodeURIComponent(hash)}/link`, {
+        method: 'POST',
+        body: { other_hash: otherHash },
+      }),
+    onMutate: async ({ hash, otherHash }) => {
+      await queryClient.cancelQueries({ queryKey: ledgerQueryKey });
+      const snapshot = patchLedgerRow(queryClient, hash, { linked_transaction_hash: otherHash });
+      return { snapshot };
+    },
+    onError: (_err, _vars, context) => {
+      if (context) restoreLedgerSnapshot(queryClient, context.snapshot);
+    },
+    onSettled: () => {
+      // Linking changes which rows are netted into aggregates (linked pairs are
+      // excluded from analytics), so every analytics read is potentially stale
+      // too -- debounced along with category and duplicate edits.
+      void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+export function useUnlinkTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (hash: string) =>
+      apiFetch<void>(`/transactions/${encodeURIComponent(hash)}/link`, { method: 'DELETE' }),
+    onMutate: async (hash) => {
+      await queryClient.cancelQueries({ queryKey: ledgerQueryKey });
+      const snapshot = patchLedgerRow(queryClient, hash, { linked_transaction_hash: null });
+      return { snapshot };
+    },
+    onError: (_err, _vars, context) => {
+      if (context) restoreLedgerSnapshot(queryClient, context.snapshot);
+    },
+    onSettled: () => {
+      // Unlinking changes which rows are netted into aggregates, so every
+      // analytics read is potentially stale too -- debounced along with category
+      // and duplicate edits.
       void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
       invalidateAnalyticsDebounced(queryClient);
     },

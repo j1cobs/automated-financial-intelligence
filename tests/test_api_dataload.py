@@ -30,17 +30,19 @@ DB_B = "postgresql://localhost/b"
 @contextmanager
 def _patch_dataload_reads(tx_df: pd.DataFrame | None = None, acct_df: pd.DataFrame | None = None):
     """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
-    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details` (added alongside
-    it, without touching the frozen loader -- see api/dataload.py's module docstring).
-    Yields the `load_financial_data` mock, since that's what existing tests assert
-    call counts against; defaults `get_transaction_pfc_details` to an empty mapping so
-    tests that don't care about pfc_detailed/category_source aren't forced to mock it."""
+    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
+    (added alongside it, without touching the frozen loader -- see api/dataload.py's module
+    docstring). Yields the `load_financial_data` mock, since that's what existing tests
+    assert call counts against; defaults the two DatabaseClient reads to empty mappings so
+    tests that don't care about pfc_detailed/category_source/linked_transaction_hash aren't
+    forced to mock them."""
     with patch(
         "api.dataload.load_financial_data",
         return_value=(tx_df if tx_df is not None else _tx_df(), acct_df if acct_df is not None else _acct_df()),
     ) as loader:
         with patch("api.dataload.DatabaseClient") as mock_db_class:
             mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+            mock_db_class.return_value.get_transaction_links.return_value = {}
             yield loader
 
 

@@ -112,11 +112,11 @@ def _acct_df() -> pd.DataFrame:
 @contextmanager
 def _patch_dataload_reads(tx_df=None, acct_df=None):
     """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
-    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details` (added alongside
-    it, without touching the frozen loader -- see api/dataload.py's module docstring).
-    Yields the `load_financial_data` mock. Defaults `get_transaction_pfc_details` to an
-    empty mapping so tests that don't care about pfc_detailed/category_source aren't
-    forced to mock it."""
+    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
+    (added alongside it, without touching the frozen loader -- see api/dataload.py's module
+    docstring). Yields the `load_financial_data` mock. Defaults the two DatabaseClient reads
+    to empty mappings so tests that don't care about pfc_detailed/category_source/
+    linked_transaction_hash aren't forced to mock them."""
     with patch(
         "api.dataload.load_financial_data",
         return_value=(
@@ -126,6 +126,7 @@ def _patch_dataload_reads(tx_df=None, acct_df=None):
     ) as loader:
         with patch("api.dataload.DatabaseClient") as mock_db_class:
             mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+            mock_db_class.return_value.get_transaction_links.return_value = {}
             yield loader
 
 
@@ -461,6 +462,31 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         body = response.json()
         hashes = {tx["hash"] for tx in body["transactions"]}
         self.assertEqual(hashes, {"hash-1", "hash-2"})
+
+    def test_ledger_response_includes_linked_transaction_hash(self) -> None:
+        """Regression test: `linked_transaction_hash` was added to `build_ledger()`'s output
+        dict but not to the `LedgerItem` Pydantic model, so Pydantic silently dropped it from
+        every real HTTP response even though the DB/analytics-netting path was correct. This
+        does a real round-trip through the endpoint (not just `build_ledger()` directly) so a
+        field present in the dict but missing from the response model fails loudly here."""
+        self._authed_client()
+        with patch(
+            "api.dataload.load_financial_data",
+            return_value=(_tx_df(), _acct_df()),
+        ):
+            with patch("api.dataload.DatabaseClient") as mock_db_class:
+                mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+                mock_db_class.return_value.get_transaction_links.return_value = {
+                    "hash-1": "hash-2",
+                    "hash-2": "hash-1",
+                }
+                response = self.client.get("/ledger")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        by_hash = {tx["hash"]: tx for tx in body["transactions"]}
+        self.assertIn("linked_transaction_hash", by_hash["hash-1"])
+        self.assertEqual(by_hash["hash-1"]["linked_transaction_hash"], "hash-2")
+        self.assertEqual(by_hash["hash-2"]["linked_transaction_hash"], "hash-1")
 
     def test_anomalies_only_includes_outliers(self) -> None:
         self._authed_client()

@@ -40,10 +40,18 @@ vi.mock('../lib/mutations', () => ({
   useUpdateCategory: vi.fn(),
   useUpdateRecurring: vi.fn(),
   useUpdateDuplicate: vi.fn(),
+  useLinkTransaction: vi.fn(),
+  useUnlinkTransaction: vi.fn(),
 }));
 
 import { useLedger, useAnomalies, useCategories } from '../lib/queries';
-import { useUpdateCategory, useUpdateRecurring, useUpdateDuplicate } from '../lib/mutations';
+import {
+  useUpdateCategory,
+  useUpdateRecurring,
+  useUpdateDuplicate,
+  useLinkTransaction,
+  useUnlinkTransaction,
+} from '../lib/mutations';
 
 const mockedUseLedger = vi.mocked(useLedger);
 const mockedUseAnomalies = vi.mocked(useAnomalies);
@@ -51,6 +59,8 @@ const mockedUseCategories = vi.mocked(useCategories);
 const mockedUseUpdateCategory = vi.mocked(useUpdateCategory);
 const mockedUseUpdateRecurring = vi.mocked(useUpdateRecurring);
 const mockedUseUpdateDuplicate = vi.mocked(useUpdateDuplicate);
+const mockedUseLinkTransaction = vi.mocked(useLinkTransaction);
+const mockedUseUnlinkTransaction = vi.mocked(useUnlinkTransaction);
 
 function renderComponent() {
   const queryClient = new QueryClient({
@@ -158,6 +168,8 @@ function setDefaultMutations() {
   );
   mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
   mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseLinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseUnlinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
 }
 
 describe('TransactionsTab', () => {
@@ -242,6 +254,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
           {
             hash: 'tx-2',
@@ -256,6 +269,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -291,6 +305,7 @@ describe('TransactionsTab', () => {
           is_duplicate: false,
           pfc_detailed: null,
           category_source: null,
+          linked_transaction_hash: null,
         })),
       };
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
@@ -330,6 +345,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           })),
         };
         mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
@@ -404,6 +420,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
           {
             hash: 'tx-big',
@@ -418,6 +435,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -466,6 +484,7 @@ describe('TransactionsTab', () => {
             is_duplicate: true,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -585,6 +604,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -637,6 +657,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -690,6 +711,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -741,6 +763,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -789,6 +812,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
             category_source: 'plaid',
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -826,6 +850,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
             category_source: 'plaid',
+            linked_transaction_hash: null,
           },
           {
             hash: 'tx-2',
@@ -840,6 +865,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: null,
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -886,6 +912,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: 'TEST_DETAILED',
             category_source: 'plaid',
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -936,6 +963,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: 'CUSTOM_MERCHANT_CATEGORY',
             category_source: 'merchant',
+            linked_transaction_hash: null,
           },
           {
             hash: 'tx-plaid',
@@ -950,6 +978,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: 'TRANSPORTATION_FUEL',
             category_source: 'plaid',
+            linked_transaction_hash: null,
           },
           {
             hash: 'tx-null-source',
@@ -964,6 +993,7 @@ describe('TransactionsTab', () => {
             is_duplicate: false,
             pfc_detailed: 'SOME_CATEGORY',
             category_source: null,
+            linked_transaction_hash: null,
           },
         ],
       };
@@ -995,6 +1025,432 @@ describe('TransactionsTab', () => {
       // The null-source row's detail cell should NOT have bg-surface-2
       const nullSourceDetailCell = within(nullSourceRow!).getByText('SOME_CATEGORY').closest('td');
       expect(nullSourceDetailCell?.className).not.toMatch(/bg-surface-2/);
+    });
+  });
+
+  describe('Transaction linking', () => {
+    it('shows "Link" button when transaction is unlinked (linked_transaction_hash is null)', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Expense',
+            amount: -50.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      expect(screen.getByRole('button', { name: 'Link' })).toBeInTheDocument();
+      expect(screen.queryByText('Linked')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Unlink' })).not.toBeInTheDocument();
+    });
+
+    it('shows "Linked" text and "Unlink" button when transaction is linked', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Expense',
+            amount: -50.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: 'tx-2',
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      expect(screen.getByText('Linked')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Unlink' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Link' })).not.toBeInTheDocument();
+    });
+
+    it('opens picker with candidate transactions filtered to opposite-sign amounts when Link is clicked', async () => {
+      const user = userEvent.setup();
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-expense',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Expense (negative)',
+            amount: -100.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+          {
+            hash: 'tx-reimbursement',
+            date: '2024-01-14',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Reimbursement (positive)',
+            amount: 80.0,
+            category: 'Income',
+            tx_type: 'income',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+          {
+            hash: 'tx-same-sign',
+            date: '2024-01-13',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Same sign (negative)',
+            amount: -50.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      setDefaultMutations();
+
+      renderComponent();
+
+      // Click Link button on the expense row
+      const linkButtons = screen.getAllByRole('button', { name: 'Link' });
+      await user.click(linkButtons[0]);
+
+      // Picker should open with a select dropdown
+      const select = screen.getByRole('combobox');
+      expect(select).toBeInTheDocument();
+
+      // Get options (excluding the "Select transaction" placeholder)
+      const options = within(select).getAllByRole('option');
+      const optionTexts = options.map((opt) => opt.textContent);
+
+      // Should include the opposite-sign reimbursement
+      expect(optionTexts.some((text) => text?.includes('Reimbursement'))).toBe(true);
+
+      // Should NOT include the same-sign expense
+      expect(optionTexts.some((text) => text?.includes('Same sign'))).toBe(false);
+
+      // Should NOT include self
+      expect(optionTexts.some((text) => text?.includes('Expense (negative)'))).toBe(false);
+    });
+
+    it('calls useLinkTransaction with correct hash and otherHash when a candidate is selected and Confirm is clicked', async () => {
+      const user = userEvent.setup();
+      const mockMutateAsync = vi.fn().mockResolvedValue(undefined);
+
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-expense',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Expense',
+            amount: -100.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+          {
+            hash: 'tx-reimburse',
+            date: '2024-01-14',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Reimbursement',
+            amount: 100.0,
+            category: 'Income',
+            tx_type: 'income',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseLinkTransaction.mockReturnValue(mockMutation(mockMutateAsync));
+      mockedUseUnlinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+
+      renderComponent();
+
+      // Click Link button on the Expense row (find the row first)
+      const expenseRow = screen.getByText('Expense').closest('tr');
+      const linkButton = within(expenseRow!).getByRole('button', { name: 'Link' });
+      await user.click(linkButton);
+
+      // Select the reimbursement from the dropdown
+      const select = screen.getByRole('combobox');
+      await user.selectOptions(select, 'tx-reimburse');
+
+      // Click Confirm button
+      const confirmButton = screen.getByRole('button', { name: 'Confirm' });
+      await user.click(confirmButton);
+
+      await waitFor(() => {
+        expect(mockMutateAsync).toHaveBeenCalledWith({
+          hash: 'tx-expense',
+          otherHash: 'tx-reimburse',
+        });
+      });
+    });
+
+    it('closes the picker without calling mutation when Cancel is clicked', async () => {
+      const user = userEvent.setup();
+      const mockMutateAsync = vi.fn().mockResolvedValue(undefined);
+
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-expense',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Expense',
+            amount: -100.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+          {
+            hash: 'tx-reimburse',
+            date: '2024-01-14',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Reimbursement',
+            amount: 100.0,
+            category: 'Income',
+            tx_type: 'income',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseLinkTransaction.mockReturnValue(mockMutation(mockMutateAsync));
+      mockedUseUnlinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+
+      renderComponent();
+
+      // Click Link button on the Expense row
+      const expenseRow = screen.getByText('Expense').closest('tr');
+      const linkButton = within(expenseRow!).getByRole('button', { name: 'Link' });
+      await user.click(linkButton);
+
+      // Picker should be open
+      const select = screen.getByRole('combobox');
+      expect(select).toBeInTheDocument();
+
+      // Click Cancel
+      const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+      await user.click(cancelButton);
+
+      // Picker should be closed (select gone)
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+
+      // Mutation should not have been called
+      expect(mockMutateAsync).not.toHaveBeenCalled();
+
+      // Link button should be back (on the expense row)
+      const expenseRowAfter = screen.getByText('Expense').closest('tr');
+      expect(within(expenseRowAfter!).getByRole('button', { name: 'Link' })).toBeInTheDocument();
+    });
+
+    it('calls useUnlinkTransaction with correct hash when Unlink is clicked on a linked row', async () => {
+      const user = userEvent.setup();
+      const mockMutateAsync = vi.fn().mockResolvedValue(undefined);
+
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-expense',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Linked Expense',
+            amount: -100.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: 'tx-reimburse',
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseLinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUnlinkTransaction.mockReturnValue(mockMutation(mockMutateAsync));
+
+      renderComponent();
+
+      // Find and click the Unlink button
+      const unlinkButton = screen.getByRole('button', { name: 'Unlink' });
+      await user.click(unlinkButton);
+
+      await waitFor(() => {
+        expect(mockMutateAsync).toHaveBeenCalledWith('tx-expense');
+      });
+    });
+
+    it('shows error banner when link mutation fails', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Expense',
+            amount: -50.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: null,
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseLinkTransaction.mockReturnValue(
+        mockMutation(vi.fn().mockRejectedValue(new Error('fail')), { isError: true }),
+      );
+      mockedUseUnlinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+
+      renderComponent();
+
+      expect(
+        screen.getByText('Failed to save your change. It has been reverted — please try again.'),
+      ).toBeInTheDocument();
+    });
+
+    it('shows error banner when unlink mutation fails', () => {
+      const mockLedgerData: LedgerResponse = {
+        transactions: [
+          {
+            hash: 'tx-1',
+            date: '2024-01-15',
+            account_name: 'Checking',
+            owner_name: null,
+            description: 'Linked Expense',
+            amount: -50.0,
+            category: 'Food',
+            tx_type: 'expense',
+            is_recurring: false,
+            is_duplicate: false,
+            pfc_detailed: null,
+            category_source: null,
+            linked_transaction_hash: 'tx-2',
+          },
+        ],
+      };
+
+      mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
+      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+      mockedUseUpdateCategory.mockReturnValue(
+        mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
+      );
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseLinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+      mockedUseUnlinkTransaction.mockReturnValue(
+        mockMutation(vi.fn().mockRejectedValue(new Error('fail')), { isError: true }),
+      );
+
+      renderComponent();
+
+      expect(
+        screen.getByText('Failed to save your change. It has been reverted — please try again.'),
+      ).toBeInTheDocument();
     });
   });
 });

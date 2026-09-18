@@ -74,6 +74,62 @@ def exclude_duplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df[~df["is_duplicate"].fillna(False).astype(bool)]
 
 
+def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse each linked pair (see `linked_transaction_hash`) present in `df` into a
+    single row carrying the pair's net cost, so a linked expense + reimbursement is not
+    double-counted as gross expense + separate income.
+
+    For each pair where BOTH legs are present in `df` (a leg whose partner isn't in this
+    frame -- e.g. filtered out by date range, or excluded as a duplicate upstream by
+    `exclude_duplicate_rows` -- is left completely untouched, as if unlinked; this is a
+    deliberate fallback, not a bug): the leg with the larger `amount` (Plaid's outflow-
+    positive convention -- the real expense) is the anchor. Its `amount`/`adjusted_amount`
+    are overwritten with the pair's summed net value (summing raw `amount` works directly:
+    a +3000 expense + a -2000 reimbursement = +1000 net, per Plaid's sign convention), and
+    the other leg's row is dropped entirely. The anchor's own date/category are kept as-is
+    -- the net is attributed to when/what the money was actually spent on.
+
+    Called selectively, alongside `exclude_duplicate_rows`, by the aggregate-building
+    endpoints in api/routers/data.py -- NOT by build_ledger, which always shows each
+    transaction's real, individual amount.
+    """
+    if "linked_transaction_hash" not in df.columns:
+        return df
+    linked_mask = df["linked_transaction_hash"].notna()
+    if not linked_mask.any():
+        return df
+
+    result = df.copy()
+    hash_to_index = {h: i for i, h in zip(result.index, result["transaction_hash"])}
+    drop_indices: set = set()
+    processed: set = set()
+
+    for idx in result.index[linked_mask]:
+        if idx in processed or idx in drop_indices:
+            continue
+        this_hash = result.at[idx, "transaction_hash"]
+        partner_hash = result.at[idx, "linked_transaction_hash"]
+        partner_idx = hash_to_index.get(partner_hash)
+        if partner_idx is None or partner_idx == idx:
+            continue  # partner not present in this frame -- leave this leg untouched
+
+        processed.add(idx)
+        processed.add(partner_idx)
+
+        this_amount = result.at[idx, "amount"]
+        partner_amount = result.at[partner_idx, "amount"]
+        net_amount = this_amount + partner_amount
+
+        anchor_idx, dropped_idx = (idx, partner_idx) if this_amount >= partner_amount else (partner_idx, idx)
+        result.at[anchor_idx, "amount"] = net_amount
+        result.at[anchor_idx, "adjusted_amount"] = -net_amount
+        drop_indices.add(dropped_idx)
+
+    if drop_indices:
+        result = result.drop(index=list(drop_indices))
+    return result
+
+
 _CATEGORY_TX_TYPE_OVERRIDES = {"INCOME": "income", "TRANSFER_IN": "transfer", "TRANSFER_OUT": "transfer"}
 
 
@@ -1094,6 +1150,7 @@ def build_ledger(df: pd.DataFrame) -> list[dict[str, Any]]:
             "is_duplicate": bool(row["is_duplicate"]) if pd.notna(row["is_duplicate"]) else False,
             "pfc_detailed": _clean(row["pfc_detailed"]),
             "category_source": _clean(row["category_source"]),
+            "linked_transaction_hash": _clean(row["linked_transaction_hash"]),
         }
         for _, row in ordered.iterrows()
     ]

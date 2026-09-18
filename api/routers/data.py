@@ -32,6 +32,7 @@ from ..viewmodels import (
     build_net_worth,
     build_overview,
     exclude_duplicate_rows,
+    net_linked_transactions,
 )
 
 router = APIRouter(tags=["data"])
@@ -382,6 +383,7 @@ class LedgerItem(BaseModel):
     is_duplicate: bool
     pfc_detailed: str | None
     category_source: str | None
+    linked_transaction_hash: str | None
 
 
 class LedgerResponse(BaseModel):
@@ -436,9 +438,9 @@ def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -
         net_worth=NetWorth(**build_net_worth(acct_df, tx)),
         overview=Overview(
             **build_overview(
-                exclude_duplicate_rows(filtered),
+                net_linked_transactions(exclude_duplicate_rows(filtered)),
                 acct_df,
-                exclude_duplicate_rows(all_time),
+                net_linked_transactions(exclude_duplicate_rows(all_time)),
                 # `all_time` (not `filtered`): every former-Home insight compares against
                 # the user's own full history, same reasoning the rest of this frame's
                 # baselines use -- a status surface that changed shape under an active
@@ -452,13 +454,13 @@ def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -
 @router.get("/cash-flow", response_model=CashFlowResponse)
 def get_cash_flow(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> CashFlowResponse:
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
-    return CashFlowResponse(**build_cash_flow(exclude_duplicate_rows(filtered)))
+    return CashFlowResponse(**build_cash_flow(net_linked_transactions(exclude_duplicate_rows(filtered))))
 
 
 @router.get("/budget", response_model=BudgetResponse)
 def get_budget(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> BudgetResponse:
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
-    return BudgetResponse(**build_budget(exclude_duplicate_rows(filtered), db.get_budgets()))
+    return BudgetResponse(**build_budget(net_linked_transactions(exclude_duplicate_rows(filtered)), db.get_budgets()))
 
 
 @router.get("/ledger", response_model=LedgerResponse)
@@ -472,7 +474,7 @@ def get_ledger(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> 
 def get_anomalies(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> AnomaliesResponse:
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
     return AnomaliesResponse(
-        anomalies=[AnomalyItem(**item) for item in build_anomalies(exclude_duplicate_rows(filtered))]
+        anomalies=[AnomalyItem(**item) for item in build_anomalies(net_linked_transactions(exclude_duplicate_rows(filtered)))]
     )
 
 

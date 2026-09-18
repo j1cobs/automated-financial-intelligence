@@ -560,6 +560,19 @@ class DatabaseClient:
                 rows = cur.fetchall()
         return {row[0]: (row[1], row[2]) for row in rows}
 
+    def get_transaction_links(self) -> dict[str, str | None]:
+        """transaction_hash -> linked_transaction_hash for every transaction.
+
+        Pure data access for the API's linked-transaction netting (net_linked_transactions
+        in api/viewmodels.py), kept out of app/dashboard.py::load_financial_data (frozen)
+        per the same precedent as get_transaction_pfc_details."""
+        sql = "SELECT transaction_hash, linked_transaction_hash FROM transactions"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {row[0]: row[1] for row in rows}
+
     def set_merchant_category(self, merchant_key: str, category: str, source: str = "user") -> None:
         """Insert or update merchant memory for merchant_key. This is what lets the cascade
         (analytics/categorizer.py) apply a single correction to every future transaction from

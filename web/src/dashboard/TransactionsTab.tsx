@@ -13,7 +13,13 @@ import {
 } from 'recharts';
 import type { TooltipContentProps } from 'recharts';
 import { useLedger, useAnomalies, useCategories } from '../lib/queries';
-import { useUpdateCategory, useUpdateRecurring, useUpdateDuplicate } from '../lib/mutations';
+import {
+  useUpdateCategory,
+  useUpdateRecurring,
+  useUpdateDuplicate,
+  useLinkTransaction,
+  useUnlinkTransaction,
+} from '../lib/mutations';
 import type { LedgerItem, AnomalyItem } from '../lib/types';
 import { formatCategory } from '../lib/categories';
 import {
@@ -310,9 +316,12 @@ function LedgerTheadRow({
         />
       </th>
       <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Category</th>
-      {showPfcDetail && <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Plaid detail</th>}
+      {showPfcDetail && (
+        <th className="px-2 py-2 text-left font-semibold text-ink-secondary sm:px-4 sm:py-3">Plaid detail</th>
+      )}
       <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Recurring</th>
       <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Duplicate</th>
+      <th className="px-2 py-2 text-center font-semibold text-ink-secondary sm:px-4 sm:py-3">Link</th>
     </tr>
   );
 }
@@ -324,12 +333,20 @@ interface LedgerRowProps {
   categories: string[] | undefined;
   isRecurringPending: boolean;
   isDuplicatePending: boolean;
+  isLinkPending: boolean;
   showPfcDetail: boolean;
+  linkingHash: string | null;
+  selectedLinkedHash: string | null;
+  allTransactions: LedgerItem[];
   onStartEdit: (hash: string, category: string) => void;
   onCategoryChange: (hash: string, category: string) => void;
   onStopEdit: () => void;
   onToggleRecurring: (hash: string, current: boolean) => void;
   onToggleDuplicate: (hash: string, current: boolean) => void;
+  onStartLinking: (hash: string | null) => void;
+  onSelectLinkedHash: (hash: string) => void;
+  onLink: (hash: string, otherHash: string) => void;
+  onUnlink: (hash: string) => void;
 }
 
 function LedgerRow({
@@ -339,12 +356,20 @@ function LedgerRow({
   categories,
   isRecurringPending,
   isDuplicatePending,
+  isLinkPending,
   showPfcDetail,
+  linkingHash,
+  selectedLinkedHash,
+  allTransactions,
   onStartEdit,
   onCategoryChange,
   onStopEdit,
   onToggleRecurring,
   onToggleDuplicate,
+  onStartLinking,
+  onSelectLinkedHash,
+  onLink,
+  onUnlink,
 }: LedgerRowProps) {
   return (
     <tr
@@ -395,7 +420,9 @@ function LedgerRow({
         )}
       </td>
       {showPfcDetail && (
-        <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.category_source === 'merchant' ? 'bg-surface-2' : ''}`}>
+        <td
+          className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.category_source === 'merchant' ? 'bg-surface-2' : ''}`}
+        >
           <span>{tx.pfc_detailed ? tx.pfc_detailed : <span className="text-ink-muted">—</span>}</span>
         </td>
       )}
@@ -419,6 +446,87 @@ function LedgerRow({
           aria-label={`Mark ${tx.description} as ${tx.is_duplicate ? 'not a duplicate' : 'duplicate'}`}
         />
       </td>
+      <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
+        {linkingHash === tx.hash ? (
+          // Picker mode: show dropdown with candidate transactions
+          (() => {
+            // Filter candidates: opposite sign, not self, not already linked
+            const candidates = allTransactions
+              .filter(
+                (candidate) =>
+                  candidate.hash !== tx.hash && // not self
+                  Math.sign(candidate.amount) !== Math.sign(tx.amount) && // opposite sign
+                  !candidate.linked_transaction_hash, // not already linked
+              )
+              // Sort by closest date
+              .sort((a, b) => {
+                const aDate = new Date(a.date).getTime();
+                const bDate = new Date(b.date).getTime();
+                const txDate = new Date(tx.date).getTime();
+                return Math.abs(aDate - txDate) - Math.abs(bDate - txDate);
+              });
+
+            return (
+              <div className="flex flex-col gap-1">
+                <select
+                  autoFocus
+                  value={selectedLinkedHash || ''}
+                  onChange={(e) => onSelectLinkedHash(e.target.value)}
+                  className="min-h-9 rounded border border-hairline bg-surface-1 px-2 py-1 text-xs sm:text-sm"
+                >
+                  <option value="">Select transaction</option>
+                  {candidates.map((candidate) => (
+                    <option key={candidate.hash} value={candidate.hash}>
+                      {formatDate(candidate.date)} • {candidate.description} •{' '}
+                      {formatCurrency(candidate.amount)}
+                    </option>
+                  ))}
+                </select>
+                {candidates.length > 0 && selectedLinkedHash && (
+                  <button
+                    type="button"
+                    onClick={() => onLink(tx.hash, selectedLinkedHash)}
+                    disabled={isLinkPending}
+                    className="rounded border border-hairline px-1.5 py-0.5 text-xs font-medium text-ink hover:bg-surface-3 disabled:opacity-50 sm:text-sm"
+                  >
+                    Confirm
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onStartLinking(null)}
+                  className="rounded border border-hairline px-1.5 py-0.5 text-xs font-medium text-ink-secondary hover:text-ink sm:text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            );
+          })()
+        ) : tx.linked_transaction_hash ? (
+          // Linked state: show "Linked" label and "Unlink" button
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-xs font-medium text-ink-secondary">Linked</span>
+            <button
+              type="button"
+              onClick={() => onUnlink(tx.hash)}
+              disabled={isLinkPending}
+              className="rounded border border-hairline px-1.5 py-0.5 text-xs font-medium text-ink hover:bg-surface-3 disabled:opacity-50 sm:text-sm"
+            >
+              Unlink
+            </button>
+          </div>
+        ) : (
+          // Unlinked state: show "Link" button
+          <button
+            type="button"
+            onClick={() => onStartLinking(tx.hash)}
+            disabled={isLinkPending}
+            className="rounded border border-hairline px-2 py-1 text-xs font-medium text-ink hover:bg-surface-3 disabled:opacity-50 sm:text-sm"
+          >
+            Link
+          </button>
+        )}
+      </td>
     </tr>
   );
 }
@@ -432,13 +540,14 @@ function LedgerColgroup({ showPfcDetail }: { showPfcDetail: boolean }) {
   return (
     <colgroup>
       <col className="w-[10%]" />
-      <col className="w-[16%]" />
-      <col className="w-[27%]" />
+      <col className="w-[15%]" />
+      <col className="w-[26%]" />
       <col className="w-[12%]" />
-      <col className="w-[14%]" />
+      <col className="w-[13%]" />
       {showPfcDetail && <col className="w-[11%]" />}
-      <col className="w-[10%]" />
-      <col className="w-[11%]" />
+      <col className="w-[9%]" />
+      <col className="w-[9%]" />
+      <col className="w-[9%]" />
     </colgroup>
   );
 }
@@ -477,14 +586,19 @@ function VirtualizedLedgerTable({
   const paddingBottom =
     virtualRows.length > 0 ? rowVirtualizer.getTotalSize() - virtualRows[virtualRows.length - 1].end : 0;
 
-  const colSpan = showPfcDetail ? 8 : 7;
+  const colSpan = showPfcDetail ? 9 : 8;
 
   return (
     <div ref={scrollRef} className="max-h-[70vh] overflow-auto rounded-lg border border-hairline">
       <table className="w-full text-xs sm:text-sm" style={{ tableLayout: 'fixed' }}>
         <LedgerColgroup showPfcDetail={showPfcDetail} />
         <thead className="sticky top-0 z-10">
-          <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} showPfcDetail={showPfcDetail} />
+          <LedgerTheadRow
+            sortKey={sortKey}
+            sortDir={sortDir}
+            toggleSort={toggleSort}
+            showPfcDetail={showPfcDetail}
+          />
         </thead>
         <tbody>
           {paddingTop > 0 && (
@@ -542,11 +656,15 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
   const updateCategory = useUpdateCategory();
   const updateRecurring = useUpdateRecurring();
   const updateDuplicate = useUpdateDuplicate();
+  const linkTransaction = useLinkTransaction();
+  const unlinkTransaction = useUnlinkTransaction();
 
   const [editingHash, setEditingHash] = useState<string | null>(null);
   const [editingCategory, setEditingCategory] = useState<string>('');
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [linkingHash, setLinkingHash] = useState<string | null>(null);
+  const [selectedLinkedHash, setSelectedLinkedHash] = useState<string | null>(null);
   const [showPfcDetail, setShowPfcDetail] = useState(() => {
     try {
       const stored = localStorage.getItem('showPfcDetailColumn');
@@ -570,7 +688,12 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
   // rollback is silent to the row itself, so this banner is what actually tells the
   // user the edit didn't take -- swallowing the rejection here would otherwise leave
   // an unhandled promise rejection with `mutateAsync` and no visible failure at all.
-  const editFailed = updateCategory.isError || updateRecurring.isError || updateDuplicate.isError;
+  const editFailed =
+    updateCategory.isError ||
+    updateRecurring.isError ||
+    updateDuplicate.isError ||
+    linkTransaction.isError ||
+    unlinkTransaction.isError;
 
   // Merchant-memory backfill confirmation (PLAN.md Phase 18, Step 4): the API
   // reports how many other rows from the same merchant it just recategorized
@@ -599,6 +722,33 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
       await updateDuplicate.mutateAsync({ hash, duplicate: !currentValue });
     } catch {
       /* surfaced via updateDuplicate.isError below */
+    }
+  };
+
+  const handleStartLinking = (hash: string | null) => {
+    setLinkingHash(hash);
+    setSelectedLinkedHash(null);
+  };
+
+  const handleSelectLinkedHash = (hash: string) => {
+    setSelectedLinkedHash(hash);
+  };
+
+  const handleLink = async (hash: string, otherHash: string) => {
+    try {
+      await linkTransaction.mutateAsync({ hash, otherHash });
+      setLinkingHash(null);
+      setSelectedLinkedHash(null);
+    } catch {
+      /* surfaced via linkTransaction.isError below */
+    }
+  };
+
+  const handleUnlink = async (hash: string) => {
+    try {
+      await unlinkTransaction.mutateAsync(hash);
+    } catch {
+      /* surfaced via unlinkTransaction.isError below */
     }
   };
 
@@ -736,6 +886,10 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                 categories={categoriesQuery.data?.categories}
                 isRecurringPending={updateRecurring.isPending}
                 isDuplicatePending={updateDuplicate.isPending}
+                isLinkPending={linkTransaction.isPending || unlinkTransaction.isPending}
+                linkingHash={linkingHash}
+                selectedLinkedHash={selectedLinkedHash}
+                allTransactions={sortedTransactions}
                 onStartEdit={(hash, category) => {
                   setEditingHash(hash);
                   setEditingCategory(category);
@@ -744,18 +898,27 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                 onStopEdit={() => setEditingHash(null)}
                 onToggleRecurring={handleRecurringToggle}
                 onToggleDuplicate={handleDuplicateToggle}
+                onStartLinking={handleStartLinking}
+                onSelectLinkedHash={handleSelectLinkedHash}
+                onLink={handleLink}
+                onUnlink={handleUnlink}
               />
             ) : (
               <div className="overflow-x-auto rounded-lg border border-hairline">
                 <table className="min-w-full text-xs sm:text-sm">
                   <thead>
-                    <LedgerTheadRow sortKey={sortKey} sortDir={sortDir} toggleSort={toggleSort} showPfcDetail={showPfcDetail} />
+                    <LedgerTheadRow
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      toggleSort={toggleSort}
+                      showPfcDetail={showPfcDetail}
+                    />
                   </thead>
                   <tbody>
                     {sortedTransactions.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={showPfcDetail ? 8 : 7}
+                          colSpan={showPfcDetail ? 9 : 8}
                           className="px-2 py-6 text-center text-xs text-ink-muted sm:px-4 sm:py-8 sm:text-sm"
                         >
                           No transactions found
@@ -771,7 +934,11 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                           categories={categoriesQuery.data?.categories}
                           isRecurringPending={updateRecurring.isPending}
                           isDuplicatePending={updateDuplicate.isPending}
+                          isLinkPending={linkTransaction.isPending || unlinkTransaction.isPending}
                           showPfcDetail={showPfcDetail}
+                          linkingHash={linkingHash}
+                          selectedLinkedHash={selectedLinkedHash}
+                          allTransactions={sortedTransactions}
                           onStartEdit={(hash, category) => {
                             setEditingHash(hash);
                             setEditingCategory(category);
@@ -780,6 +947,10 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                           onStopEdit={() => setEditingHash(null)}
                           onToggleRecurring={handleRecurringToggle}
                           onToggleDuplicate={handleDuplicateToggle}
+                          onStartLinking={handleStartLinking}
+                          onSelectLinkedHash={handleSelectLinkedHash}
+                          onLink={handleLink}
+                          onUnlink={handleUnlink}
                         />
                       ))
                     )}

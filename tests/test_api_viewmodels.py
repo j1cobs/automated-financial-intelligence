@@ -28,11 +28,15 @@ from api.viewmodels import (  # noqa: E402
     _build_last_period_metric,
     _build_metric,
     _weekly_series,
+    build_anomalies,
+    build_budget,
     build_cash_flow,
     build_ledger,
     build_net_worth,
     build_overview,
     complete_month_keys,
+    exclude_duplicate_rows,
+    net_linked_transactions,
     prepare_transactions,
 )
 
@@ -702,6 +706,7 @@ class BuildLedgerTests(unittest.TestCase):
         source_map = {"h1": "plaid", "h2": None}
         df["pfc_detailed"] = df["transaction_hash"].map(pfc_map)
         df["category_source"] = df["transaction_hash"].map(source_map)
+        df["linked_transaction_hash"] = None
 
         result = build_ledger(df)
         self.assertEqual(len(result), 2)
@@ -721,6 +726,7 @@ class BuildLedgerTests(unittest.TestCase):
         # Explicitly add NaN columns (as would occur if merged but no value found)
         df["pfc_detailed"] = pd.NA
         df["category_source"] = pd.NA
+        df["linked_transaction_hash"] = pd.NA
         result = build_ledger(df)
         self.assertIsNone(result[0]["pfc_detailed"])
         self.assertIsNone(result[0]["category_source"])
@@ -1019,6 +1025,318 @@ class OverviewBalanceMetricsTests(unittest.TestCase):
         result = build_overview(df, pd.DataFrame([]), df, [])
         upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
         self.assertEqual(upcoming["Skewed Gap Sub"]["typical_interval_days"], 30)
+
+
+class NetLinkedTransactionsUnitTests(unittest.TestCase):
+    """Direct unit tests for the `net_linked_transactions` function."""
+
+    def test_linked_pair_collapses_to_anchor_with_netted_amount(self) -> None:
+        """A linked pair (expense + reimbursement) collapses to one row.
+
+        Anchor (larger amount) keeps the netted amount/adjusted_amount; the other leg
+        is dropped.
+        """
+        # Expense: 3000 outflow (positive in Plaid sign convention)
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        # Reimbursement: -2000 inflow (negative in Plaid sign convention)
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        # Wire the mutual link
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        result = net_linked_transactions(df)
+
+        # Result should have exactly 1 row (the reimbursement leg is dropped)
+        self.assertEqual(len(result), 1)
+        anchor = result.iloc[0]
+
+        # The anchor is the expense (larger amount: 3000 > 2000)
+        self.assertEqual(anchor["transaction_hash"], "h-expense")
+        # Net amount: 3000 + (-2000) = 1000 (both expressed as Plaid amounts)
+        self.assertAlmostEqual(anchor["amount"], 1000.0)
+        self.assertAlmostEqual(anchor["adjusted_amount"], -1000.0)
+        # Anchor's original date and category stay unchanged
+        self.assertEqual(anchor["date"].strftime("%Y-%m-%d"), "2026-05-01")
+
+    def test_unlinked_row_with_partner_not_in_frame_stays_untouched(self) -> None:
+        """A row linking to a partner not in this frame is left completely untouched.
+
+        This is the "partner filtered out upstream" fallback case.
+        """
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        df = _frame([expense])
+        # Link to a partner that doesn't exist in this frame
+        df["linked_transaction_hash"] = "h-missing-partner"
+
+        result = net_linked_transactions(df)
+
+        # Row should still be present, unchanged
+        self.assertEqual(len(result), 1)
+        row = result.iloc[0]
+        self.assertEqual(row["transaction_hash"], "h-expense")
+        self.assertAlmostEqual(row["amount"], 3000.0)
+        self.assertAlmostEqual(row["adjusted_amount"], -3000.0)
+        self.assertEqual(row["linked_transaction_hash"], "h-missing-partner")
+
+    def test_unlinked_frame_with_column_null_returns_unchanged(self) -> None:
+        """An unlinked frame (column present but all null) is returned unchanged."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        df = _frame([expense])
+        # Add the column but leave it null
+        df["linked_transaction_hash"] = None
+
+        result = net_linked_transactions(df)
+
+        # Should return a DataFrame with the same values (copy semantics)
+        self.assertEqual(len(result), 1)
+        row = result.iloc[0]
+        self.assertAlmostEqual(row["amount"], 3000.0)
+
+    def test_frame_without_linked_transaction_hash_column_does_not_raise(self) -> None:
+        """A frame entirely lacking the `linked_transaction_hash` column doesn't raise."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        df = _frame([expense])
+        # Ensure the column doesn't exist
+        if "linked_transaction_hash" in df.columns:
+            df = df.drop(columns=["linked_transaction_hash"])
+
+        # Should not raise
+        result = net_linked_transactions(df)
+
+        # Should return the frame unchanged (same values)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result.iloc[0]["amount"], 3000.0)
+
+    def test_two_independent_linked_pairs_are_each_netted_correctly(self) -> None:
+        """Multiple independent linked pairs in the same frame are each netted correctly.
+
+        Proves the function doesn't accidentally cross-link non-partners.
+        """
+        # Pair 1: expense + reimbursement
+        expense1 = _tx("2026-05-01", 1000.0, _EXPENSE, transaction_hash="h-exp1")
+        reimbursement1 = _tx("2026-05-02", 800.0, _INCOME, transaction_hash="h-reimb1")
+
+        # Pair 2: expense + reimbursement
+        expense2 = _tx("2026-05-03", 2000.0, _EXPENSE, transaction_hash="h-exp2")
+        reimbursement2 = _tx("2026-05-04", 1500.0, _INCOME, transaction_hash="h-reimb2")
+
+        df = _frame([expense1, reimbursement1, expense2, reimbursement2])
+
+        # Wire pair 1 links
+        df.loc[df["transaction_hash"] == "h-exp1", "linked_transaction_hash"] = "h-reimb1"
+        df.loc[df["transaction_hash"] == "h-reimb1", "linked_transaction_hash"] = "h-exp1"
+
+        # Wire pair 2 links
+        df.loc[df["transaction_hash"] == "h-exp2", "linked_transaction_hash"] = "h-reimb2"
+        df.loc[df["transaction_hash"] == "h-reimb2", "linked_transaction_hash"] = "h-exp2"
+
+        result = net_linked_transactions(df)
+
+        # Should have 2 rows (both reimbursements dropped)
+        self.assertEqual(len(result), 2)
+
+        # Check pair 1: net = 1000 + (-800) = 200
+        pair1 = result[result["transaction_hash"] == "h-exp1"].iloc[0]
+        self.assertAlmostEqual(pair1["amount"], 200.0)
+        self.assertAlmostEqual(pair1["adjusted_amount"], -200.0)
+
+        # Check pair 2: net = 2000 + (-1500) = 500
+        pair2 = result[result["transaction_hash"] == "h-exp2"].iloc[0]
+        self.assertAlmostEqual(pair2["amount"], 500.0)
+        self.assertAlmostEqual(pair2["adjusted_amount"], -500.0)
+
+    def test_function_does_not_mutate_input_dataframe(self) -> None:
+        """The function copies before mutating; the input frame is unchanged."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        original_amount = df[df["transaction_hash"] == "h-expense"]["amount"].iloc[0]
+
+        # Wire the link
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        # Call the function
+        result = net_linked_transactions(df)
+
+        # Input df should be unchanged
+        self.assertAlmostEqual(
+            df[df["transaction_hash"] == "h-expense"]["amount"].iloc[0],
+            original_amount,
+        )
+        # Result should have the netted value
+        self.assertAlmostEqual(result[result["transaction_hash"] == "h-expense"]["amount"].iloc[0], 1000.0)
+
+
+class BuildLedgerLinkedTransactionHashTests(unittest.TestCase):
+    """Test that `build_ledger` includes the `linked_transaction_hash` field."""
+
+    def test_ledger_includes_linked_transaction_hash_when_set(self) -> None:
+        """build_ledger output includes linked_transaction_hash field when set."""
+        df = _frame(
+            [
+                _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h1"),
+                _tx("2026-05-02", 2000.0, _INCOME, transaction_hash="h2"),
+            ]
+        )
+        # Add required columns (prepare_transactions doesn't add pfc_detailed/category_source)
+        df["pfc_detailed"] = None
+        df["category_source"] = None
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h1", "linked_transaction_hash"] = "h2"
+        df.loc[df["transaction_hash"] == "h2", "linked_transaction_hash"] = "h1"
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 2)
+
+        # Find each result by hash
+        h1_result = next(r for r in result if r["hash"] == "h1")
+        h2_result = next(r for r in result if r["hash"] == "h2")
+
+        # Both should have linked_transaction_hash set
+        self.assertEqual(h1_result["linked_transaction_hash"], "h2")
+        self.assertEqual(h2_result["linked_transaction_hash"], "h1")
+
+    def test_ledger_includes_linked_transaction_hash_when_null(self) -> None:
+        """build_ledger output includes linked_transaction_hash (as None) when unlinked."""
+        df = _frame([_tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h1")])
+        # Add required columns
+        df["pfc_detailed"] = None
+        df["category_source"] = None
+        df["linked_transaction_hash"] = None
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0]["linked_transaction_hash"])
+
+    def test_ledger_includes_linked_transaction_hash_with_pfc_values(self) -> None:
+        """build_ledger includes both linked_transaction_hash and pfc fields."""
+        df = _frame(
+            [
+                _tx("2026-05-01", 10.0, _EXPENSE, transaction_hash="h1"),
+                _tx("2026-05-02", 20.0, _EXPENSE, transaction_hash="h2"),
+            ]
+        )
+        # Add columns with some values populated (matching existing test pattern)
+        pfc_map = {"h1": "FOOD_AND_DRINK_RESTAURANTS", "h2": None}
+        source_map = {"h1": "plaid", "h2": None}
+        df["pfc_detailed"] = df["transaction_hash"].map(pfc_map)
+        df["category_source"] = df["transaction_hash"].map(source_map)
+        df["linked_transaction_hash"] = None
+        df["linked_transaction_hash"] = None
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 2)
+        # build_ledger sorts by date descending, so result[0] is h2 (2026-05-02)
+        h1_result = next(r for r in result if r["hash"] == "h1")
+        h2_result = next(r for r in result if r["hash"] == "h2")
+        # h1 row has pfc fields populated
+        self.assertEqual(h1_result["pfc_detailed"], "FOOD_AND_DRINK_RESTAURANTS")
+        self.assertEqual(h1_result["category_source"], "plaid")
+        # h2 row has None for pfc fields
+        self.assertIsNone(h2_result["pfc_detailed"])
+        self.assertIsNone(h2_result["category_source"])
+        # Both should have linked_transaction_hash (None in this case)
+        self.assertIsNone(h1_result["linked_transaction_hash"])
+        self.assertIsNone(h2_result["linked_transaction_hash"])
+
+
+class NetLinkedTransactionsIntegrationTests(unittest.TestCase):
+    """Integration tests for net_linked_transactions in the API response path."""
+
+    def test_overview_reflects_netted_amount_for_linked_pair(self) -> None:
+        """The /overview response shows the netted amount, not the gross double-count.
+
+        When an expense and reimbursement are linked, build_overview is called on
+        the result of `net_linked_transactions(exclude_duplicate_rows(filtered))`,
+        so the aggregates (income, expenses, etc.) should reflect the net.
+        """
+        # Expense: 3000 outflow
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        # Reimbursement: 2000 inflow
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        # Apply the same transformations as get_overview does
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+
+        # Build overview on the netted frame
+        result = build_overview(netted, pd.DataFrame([]))
+
+        # The expense should be netted to 1000 (3000 - 2000), not double-counted
+        # As a single row with amount=1000, adjusted_amount=-1000, tx_type="expense"
+        # Income: 0 (the reimbursement was dropped)
+        # Expenses: 1000 (the netted amount)
+        self.assertAlmostEqual(result["income"], 0.0)
+        self.assertAlmostEqual(result["expenses"], 1000.0)
+        self.assertAlmostEqual(result["net_flow"], -1000.0)
+
+    def test_cash_flow_reflects_netted_amounts(self) -> None:
+        """The /cash-flow response also applies net_linked_transactions."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        # Apply the same transformations as get_cash_flow does
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+        result = build_cash_flow(netted)
+
+        # Expenses should be 1000 (the netted amount)
+        self.assertAlmostEqual(result["expenses"], 1000.0)
+        self.assertAlmostEqual(result["income"], 0.0)
+
+    def test_budget_reflects_netted_amounts(self) -> None:
+        """The /budget response also applies net_linked_transactions."""
+        # Create a linked expense/reimbursement pair for May
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, category="Shopping", transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, category="Shopping", transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+        result = build_budget(netted, [])
+
+        # Month should be "2026-05"
+        self.assertEqual(result["month"], "2026-05")
+        # Shopping category should show 1000 spent (the netted amount)
+        shopping_item = next((item for item in result["items"] if item["category"] == "Shopping"), None)
+        self.assertIsNotNone(shopping_item)
+        self.assertAlmostEqual(shopping_item["spent"], 1000.0)
+
+    def test_anomalies_reflects_netted_amounts(self) -> None:
+        """The /anomalies response also applies net_linked_transactions."""
+        # Linked pair both marked as outliers
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        df.loc[df["transaction_hash"] == "h-expense", "is_outlier"] = True
+        df.loc[df["transaction_hash"] == "h-reimbursement", "is_outlier"] = True
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+        result = build_anomalies(netted)
+
+        # Should have exactly 1 anomaly (the anchor expense with netted amount)
+        self.assertEqual(len(result), 1)
+        # build_anomalies returns adjusted_amount; for an expense (negative), this is -1000.0
+        self.assertAlmostEqual(result[0]["amount"], -1000.0)
 
 
 if __name__ == "__main__":

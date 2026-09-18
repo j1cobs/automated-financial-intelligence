@@ -305,6 +305,7 @@ export interface LedgerItem {
   is_duplicate: boolean;
   pfc_detailed: string | null;
   category_source: string | null;
+  linked_transaction_hash: string | null;
 }
 
 export interface LedgerResponse {
