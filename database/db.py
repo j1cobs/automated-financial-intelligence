@@ -682,6 +682,68 @@ class DatabaseClient:
         sql = "UPDATE transactions SET is_duplicate = %s, updated_at = NOW() WHERE transaction_hash = %s"
         self._execute_many(sql, [(is_duplicate, transaction_hash)])
 
+    def link_transactions(self, hash_a: str, hash_b: str) -> None:
+        """Link two transactions symmetrically (e.g. an expense and its insurance
+        reimbursement), so the dashboard can later net them into one true-cost figure.
+        Reversible via unlink_transaction. Survives pipeline re-runs (upsert_transactions
+        never touches this column, same as user_category/is_recurring/is_duplicate).
+
+        Raises ValueError if hash_a == hash_b, or if either row is already linked to a
+        DIFFERENT partner (must be unlinked first).
+        """
+        if hash_a == hash_b:
+            raise ValueError("Cannot link a transaction to itself.")
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT transaction_hash, linked_transaction_hash FROM transactions "
+                    "WHERE transaction_hash IN (%s, %s)",
+                    (hash_a, hash_b),
+                )
+                rows = {row[0]: row[1] for row in cur.fetchall()}
+                for h in (hash_a, hash_b):
+                    other = hash_b if h == hash_a else hash_a
+                    existing = rows.get(h)
+                    if existing is not None and existing != other:
+                        raise ValueError(
+                            f"Transaction {h} is already linked to {existing}; unlink it first."
+                        )
+                cur.execute(
+                    "UPDATE transactions SET linked_transaction_hash = %s, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (hash_b, hash_a),
+                )
+                cur.execute(
+                    "UPDATE transactions SET linked_transaction_hash = %s, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (hash_a, hash_b),
+                )
+            conn.commit()
+
+    def unlink_transaction(self, transaction_hash: str) -> None:
+        """Clear a link on both sides. Safe to call on an already-unlinked transaction
+        (no-op)."""
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT linked_transaction_hash FROM transactions WHERE transaction_hash = %s",
+                    (transaction_hash,),
+                )
+                row = cur.fetchone()
+                partner = row[0] if row else None
+                cur.execute(
+                    "UPDATE transactions SET linked_transaction_hash = NULL, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (transaction_hash,),
+                )
+                if partner:
+                    cur.execute(
+                        "UPDATE transactions SET linked_transaction_hash = NULL, updated_at = NOW() "
+                        "WHERE transaction_hash = %s",
+                        (partner,),
+                    )
+            conn.commit()
+
     def rehash_transactions(self) -> tuple[int, int]:
         """Recompute transaction_hash for every row using the current build_transaction_hash
         formula (account_key-based, with type-canonicalized amount/date). Needed once after
@@ -976,9 +1038,9 @@ class DatabaseClient:
         transaction_id after an Item re-link: that hashes differently and lands as a second
         row. reconcile_transactions() trims those against the count Plaid itself reports.
 
-        Columns the user owns — user_category, is_recurring, is_duplicate — are deliberately
-        absent from both the INSERT list and the conflict-update list, so a pipeline run can
-        never clear a manual edit. Keep them out when adding columns here.
+        Columns the user owns — user_category, is_recurring, is_duplicate, linked_transaction_hash —
+        are deliberately absent from both the INSERT list and the conflict-update list, so a
+        pipeline run can never clear a manual edit. Keep them out when adding columns here.
 
         `pending` / `pending_transaction_id` (migration 019) round-trip Plaid's pending-
         authorization lineage. `pending` is left as None/NULL when the source record doesn't

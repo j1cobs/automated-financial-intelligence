@@ -192,6 +192,8 @@ WRITE_ENDPOINTS = [
     ("patch", "/transactions/hash-2/category", {"category": "Groceries"}),
     ("patch", "/transactions/hash-2/recurring", {"recurring": True}),
     ("patch", "/transactions/hash-2/duplicate", {"duplicate": True}),
+    ("post", "/transactions/hash-2/link", {"other_hash": "hash-1"}),
+    ("delete", "/transactions/hash-2/link", None),
 ]
 
 
@@ -206,7 +208,8 @@ class UnauthenticatedTests(ApiDataTestCase):
     def test_write_endpoints_require_auth(self) -> None:
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
-                response = getattr(self.client, method)(path, json=body)
+                kwargs = {"json": body} if body is not None else {}
+                response = getattr(self.client, method)(path, **kwargs)
                 self.assertEqual(response.status_code, 401)
 
 
@@ -215,15 +218,17 @@ class CsrfTests(ApiDataTestCase):
         self._authed_client()
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
-                response = getattr(self.client, method)(path, json=body)
+                kwargs = {"json": body} if body is not None else {}
+                response = getattr(self.client, method)(path, **kwargs)
                 self.assertEqual(response.status_code, 403)
 
     def test_wrong_csrf_header_returns_403(self) -> None:
         self._authed_client()
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
+                kwargs = {"json": body} if body is not None else {}
                 response = getattr(self.client, method)(
-                    path, json=body, headers={"X-CSRF-Token": "not-the-right-token"}
+                    path, headers={"X-CSRF-Token": "not-the-right-token"}, **kwargs
                 )
                 self.assertEqual(response.status_code, 403)
 
@@ -231,8 +236,9 @@ class CsrfTests(ApiDataTestCase):
         self._authed_client()
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
+                kwargs = {"json": body} if body is not None else {}
                 response = getattr(self.client, method)(
-                    path, json=body, headers={"X-CSRF-Token": "csrf-token-value"}
+                    path, headers={"X-CSRF-Token": "csrf-token-value"}, **kwargs
                 )
                 # The category endpoint returns 200 + {"backfilled_count": ...} (Phase 18);
                 # every other write endpoint is still a bare 204.
@@ -327,6 +333,40 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         )
         self.assertEqual(response.status_code, 204)
         self.mock_db.update_transaction_duplicate.assert_called_once_with("hash-2", True)
+
+    def test_link_calls_link_transactions_and_invalidates_cache(self) -> None:
+        response = self.client.post(
+            "/transactions/hash-2/link", json={"other_hash": "hash-1"}, headers=self._headers()
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.link_transactions.assert_called_once_with("hash-2", "hash-1")
+
+    def test_link_returns_400_on_value_error(self) -> None:
+        """POST /transactions/{hash}/link returns 400 with error message when
+        db.link_transactions raises ValueError."""
+        self.mock_db.link_transactions.side_effect = ValueError("Cannot link a transaction to itself.")
+        response = self.client.post(
+            "/transactions/hash-2/link", json={"other_hash": "hash-2"}, headers=self._headers()
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Cannot link a transaction to itself", response.json()["detail"])
+
+    def test_link_error_does_not_invalidate_cache(self) -> None:
+        """When db.link_transactions raises ValueError, cache should not be invalidated."""
+        with patch("api.routers.data.invalidate_cache") as mock_invalidate:
+            self.mock_db.link_transactions.side_effect = ValueError("already linked")
+            response = self.client.post(
+                "/transactions/hash-2/link", json={"other_hash": "hash-3"}, headers=self._headers()
+            )
+            self.assertEqual(response.status_code, 400)
+            mock_invalidate.assert_not_called()
+
+    def test_unlink_calls_unlink_transaction_and_invalidates_cache(self) -> None:
+        response = self.client.delete(
+            "/transactions/hash-2/link", headers=self._headers()
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.unlink_transaction.assert_called_once_with("hash-2")
 
 
 class ReadEndpointShapeTests(ApiDataTestCase):

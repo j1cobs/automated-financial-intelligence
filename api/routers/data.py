@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel
 
 from analytics.categorizer import merchant_key
@@ -518,6 +518,10 @@ class DuplicateUpdate(BaseModel):
     duplicate: bool
 
 
+class LinkTransactionRequest(BaseModel):
+    other_hash: str
+
+
 # ---------------------------------------------------------------------------
 # Write endpoints
 # ---------------------------------------------------------------------------
@@ -586,5 +590,33 @@ def update_transaction_duplicate(
     db: DbDep,
 ) -> Response:
     db.update_transaction_duplicate(transaction_hash, body.duplicate)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/transactions/{transaction_hash}/link", status_code=status.HTTP_204_NO_CONTENT)
+def link_transaction(
+    transaction_hash: str,
+    body: LinkTransactionRequest,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    try:
+        db.link_transactions(transaction_hash, body.other_hash)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/transactions/{transaction_hash}/link", status_code=status.HTTP_204_NO_CONTENT)
+def unlink_transaction(
+    transaction_hash: str,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    db.unlink_transaction(transaction_hash)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
