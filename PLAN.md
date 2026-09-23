@@ -2162,7 +2162,17 @@ If ever adopted:
 
 ---
 
-## Phase 7 — DEFERRED: ML activation
+## Phase 7 — DEFERRED: ML activation — SUPERSEDED
+
+> **Superseded, both halves — do not revive this phase.** The *classifier* half was resolved by
+> **Phase 18** (Plaid PFC + merchant-memory cascade), which replaced the TF-IDF/SVM plan with a
+> deterministic three-layer cascade. The *outlier* half is resolved by **Phase 34**, which retires
+> `analytics/outlier_detector.py` rather than wiring it up: an Isolation Forest with a fixed
+> `contamination=0.03` flags ~3% of rows no matter how normal the month was, and its score cannot be
+> explained to the user. Phase 34 replaces it with explainable rules (category drift via MAD, recurring
+> price creep) plus a period-scoped feedback memory. See `docs/adr/0007-anomaly-detection-without-ml.md`.
+>
+> The checklist below is kept for the historical record only.
 
 Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo is public.
 
@@ -4911,3 +4921,202 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
     x-axis label per account holder, and a reachable keyboard-only tooltip on every KPI tile. Diffing it
     against `streamlit run streamlit_app.py` at matching filters shows **only** the five intended
     divergences tabulated at the end of Phase 15.
+
+---
+
+## Phase 26-35 — Budget as the central tool, recurring streams, explainable anomalies
+
+> **Status:** designed, not yet implemented. Produced by a `/grill-with-docs` interview followed by a
+> second `/grilling` pass run against the resulting plan itself. That second pass found three defects in
+> the first draft (a migration that resurrected deleted caps, a dismissal rule that silenced future
+> periods, and a drift statistic that fired a false alert at the start of every month) plus one
+> data-loss path (mirroring budget caps into a table Streamlit writes). All four are corrected below.
+>
+> Phases 26-35 are commit-sized and **degrade rather than hard-block**, so a delayed Phase 30 does not
+> stall the work behind it.
+
+### Why this work
+
+Three problem areas surfaced from direct use of the live dashboard:
+
+1. **Transversal UI defects.** No shared `Button` component, so ~12 inline-Tailwind buttons lack
+   `cursor-pointer`/hover; "Clear all" renders twice simultaneously on desktop; the "More filters"
+   popover has Escape handling but no outside-click dismissal; ledger columns overlap when the Plaid
+   category-detail column is shown.
+2. **The Budget tab cannot structurally become the central tool.** `budgets` is one row per category with
+   a single `monthly_limit` and **no month dimension** — "budget for October" is inexpressible. The goal
+   is for Budget to be the primary instrument for anyone controlling their finances, including planning a
+   property purchase — but generalised, so any goal works the same way.
+3. **Recurring and anomaly detection are hollow.** `is_recurring` is a bare per-row boolean with no series
+   concept. `analytics/outlier_detector.py` has been written and unwired since Phase 1.
+
+### Decisions locked
+
+| Question | Decision |
+|---|---|
+| Budget model | Per-month caps with history + forward cash-flow forecast. **No** envelope/YNAB rollover. |
+| Unset month | Inherits the most recent month with an explicit cap (carry-forward). |
+| Cap granularity | Canonical categories only; rows expand to show `pfc_detailed` breakdown. |
+| Cap key set | Constrained to the **18 canonical names** in migration 023. `user_category` gains validation. |
+| Unmappable free text | Preserved untouched and **reported**, never rewritten or moved to `OTHER`. |
+| Forecast basis | Recurring streams + trailing median per category. Cap-based line as a dashed comparison. |
+| Forecast starting balance | `account_type == 'depository'` only. Credit and investment excluded. |
+| Statistical window | Adaptive up to 6 months; **minimum 3 complete months** before emitting anything. |
+| Goals | Generic savings goals, **not** house-specific. Multiple concurrent. Section inside Budget. |
+| Goal progress | Linked account balances minus a baseline captured at goal start. |
+| Goal pace basis | **Hard switch** at 12 weeks of snapshots, always labelled with its basis. |
+| Goal account overlap | Allowed, but flagged, with contested amounts shown per goal. |
+| Recurring source of truth | Plaid `/transactions/recurring/get`, local `merchant_key()` derivation as fallback. |
+| Existing `is_recurring` flags | Preserved as manual overrides that win over Plaid. Pipeline never clears a user flag. |
+| Anomaly approach | Deterministic rules + user-feedback memory. **Isolation Forest retired, not wired up.** |
+| Drift statistic | Same-day-of-month cumulative vs prior months. **No projection-to-EOM.** |
+| Dismissal scope | Keyed `(kind, subject, period)` — this period only. |
+| Severity rule | Drift >=2.5 MAD medium, >=4 MAD high. Creep >=10%/$3 medium, >=25%/$15 high. |
+| Streamlit compatibility | Mirror `is_outlier` only. **`budgets` left entirely alone** — Streamlit writes it. |
+| Extra Plaid | Balance refresh only. Enrich, Liabilities, Assets, Income all out of scope. |
+
+### Why no ML
+
+**Rules plus a feedback memory, not a model.** The Isolation Forest has three disqualifying properties on
+this data: it produces a score that cannot be explained ("0.83" is not actionable); it is unsupervised
+with a fixed `contamination=0.03`, so it flags ~3% of rows no matter how normal the month was; and on
+personal finance it converges on permanently flagging rent and large legitimate purchases. Category drift
+is a robust z-score against a trailing median and price creep is a subtraction — both explain themselves
+in a sentence.
+
+Where learning belongs is the **feedback loop**: a dismissed alert stays dismissed for that period. This
+mirrors Phase 18's categorizer, where `merchant_categories` is a user-correction memory feeding a
+deterministic cascade. **This supersedes the outlier half of Phase 7**; the classifier half was already
+resolved by Phase 18.
+
+### Constraints discovered during grilling
+
+Four facts that invalidated parts of the first draft:
+
+- **`app/dashboard.py` reads AND writes `budgets`** (`:1116` reads, **`:1186` calls `db.upsert_budget`**).
+  Mirroring caps into it would have silently discarded any budget saved from Streamlit on the next
+  pipeline run. It is left alone entirely.
+- **Streamlit also reads `is_outlier`/`outlier_score`** (`:339`, `:787`, `:1195-1209`). Retiring the
+  detector without a shim would leave its anomalies view permanently empty.
+- **The effective category is `COALESCE(t.user_category, t.category)`** (`app/dashboard.py:339`) and
+  `update_transaction_category` accepts **arbitrary free text** — no enum, no validation. "Primary PFC
+  categories" was not a closed set.
+- **`days_back` defaults to 90** (`pipeline/runner.py:50`). A "trailing 6-month median" had no guarantee
+  of six months behind it.
+
+One assumption held: `activeFilterChips` and `countActiveFilters` (`web/src/lib/filters.ts:217`, `:319`)
+fire under identical conditions, so removing one "Clear all" leaves nothing unclearable.
+
+### Plaid product research (verified 2026-09-23)
+
+| Product | Existing tokens work? | Canada | Verdict |
+|---|---|---|---|
+| `/transactions/recurring/get` | Yes — add-on to Transactions | Yes | **Adopt** (entitlement unverified — probe first) |
+| `/accounts/balance/get` | Yes — add-on to any product | Yes | **Adopt** (Phase 35) |
+| `/liabilities/get` | No — update-mode consent per Item | "Canada coverage is limited" | Out of scope |
+| `/transactions/enrich` | Yes — stateless | n/a | Out of scope (billed per transaction) |
+| Assets / Bank Income / Payroll Income / Statements | No | Unconfirmed; US lending stack | **Out of scope** |
+
+Plaid will not supply lender-grade asset or income reports in Canada, so the goal tracker is built from
+our own transaction and balance history.
+
+### Phase 26 — UI affordance pass
+
+Pure frontend. Create `web/src/components/Button.tsx` (variants `primary|secondary|ghost|danger`, each
+with `cursor-pointer`, hover, `focus-visible`, `disabled:cursor-not-allowed`), migrate the ~12 call sites
+in `FilterBar.tsx`, `TransactionsTab.tsx`, `BudgetTab.tsx` and `MetricTile.tsx`. Delete the duplicate
+"Clear all" in the controls row, keeping the chip-row one. Port the `containerRef`-scoped `mousedown`
+listener from `MultiSelectPopover.tsx` to the More-filters popover — the same port Phase 25 made for
+`MetricInfoBadge`.
+
+### Phase 27 — Ledger column isolation
+
+Two distinct bugs behind one symptom. **(A)** the plain table (`TransactionsTab.tsx:916`, used whenever
+the ledger is under 50 rows) has no `colgroup` and no fixed layout at all. **(B)** `LedgerColgroup`
+declares widths summing to **103%** normally and **114%** with the Plaid-detail column, so fixed layout
+silently shrinks every column ~12% when detail is enabled. Fix with one exported column spec (two width
+sets, each summing to exactly 100%) applied to **both** tables, `truncate` plus `title` on every cell, and
+horizontal scroll below the `sm` breakpoint rather than crushing columns on a phone.
+
+### Phase 28 — Budget schema: per-month caps with carry-forward
+
+Migration `026_budget_periods.sql` adds `budget_periods (category, period, monthly_limit)` with
+`UNIQUE (category, period)`. **The seed must be guarded on an empty table** — every `.sql` re-runs on
+every `ensure_schema()` call, so an unguarded seed resurrects a cap the user deliberately cleared.
+`analytics/budget_periods.py::resolve_caps` is pure and DB-free; **absent != 0** (absent means "no budget
+set", 0 means "committed to spending nothing"). `CategoryUpdate.category` becomes a `Literal` over the 18
+canonical names, with a companion pass that maps unambiguous free text and **reports rather than
+rewrites** everything else.
+
+### Phase 29 — Budget tab UI
+
+Month selector driving `?period=`; rows are canonical categories expanding to their `pfc_detailed`
+breakdown (there is no primary-to-detailed table; group on the column already on `transactions`);
+inherited caps visually distinct and naming their source month. No emojis.
+
+### Phase 30 — Recurring streams
+
+`scripts/probe_plaid_recurring.py` first, honouring the **scrubbed-logging rule** (`status_code` /
+`error_type` / `error_code` only, never `response.text`, never an account mask). Migration
+`027_recurring_streams.sql`. `PlaidIngestor.fetch_recurring_streams()` is a new method **alongside** the
+`BaseIngestor` seam, not a change to it (Phase 17 discipline); if the probe fails,
+`analytics/recurring.py::derive_streams` produces the identical table shape from `merchant_key()`.
+
+### Phase 31 — Upcoming recurring + the duplicate-flag fix
+
+Precedence: user override > stream membership > not recurring. The pipeline never clears a user flag.
+Checking recurring on a row in a stream toggles the **stream**; the two cases must **look different before
+you click**. Upcoming Recurring Charges reads `predicted_next_date` instead of guessing from median gaps.
+
+### Phase 32 — Forward cash-flow forecast
+
+`analytics/forecast.py`, pure. Behaviour series (streams + trailing medians) solid, cap-held series
+dashed — the gap between them is the value of sticking to budget. Starting balance is **depository only**.
+Refuses to project below 3 complete months of history.
+
+### Phase 33 — Savings goals
+
+Migration `028_savings_goals.sql`. Progress is linked-account balances minus a baseline captured at goal
+start. `pace()` returns `(amount, basis, weeks_of_history)` and **hard-switches** from `cashflow` to
+`balance` at 12 weeks — `account_balance_snapshots` only began collecting ~2026-08-25, so `cashflow` is
+the live answer today. **Never surface a pace without its basis.** Account overlap between goals is
+allowed but flagged with contested amounts.
+
+### Phase 34 — Anomaly detection: explainable rules + feedback memory
+
+Migration `029_anomalies.sql` adds `anomalies` (`UNIQUE (kind, subject, period)`, idempotent by the same
+discipline as `transaction_hash`) and `anomaly_feedback` (period-scoped). Two pure detectors: category
+drift via **MAD against the same day-of-month** in prior months, and price creep on a dual
+percent-and-dollar threshold. Re-detection updates severity and explanation while preserving
+`detected_at`. The Isolation Forest and its tests are deleted; a **compatibility shim keeps `is_outlier`
+written** (top 3 contributors per drift anomaly, latest transaction per creep stream) because the frozen
+Streamlit app reads it and may not be edited.
+
+### Phase 35 — On-demand balance refresh
+
+`PlaidIngestor.refresh_balances()` via `/accounts/balance/get` — no re-link, existing tokens work. Upserts
+today's `account_balance_snapshots` row in place.
+
+### Documentation
+
+Four ADRs (`0005` budget periods, `0006` recurring streams, `0007` anomaly detection without ML,
+`0008` goal progress from balances); `CONTEXT.md` glossary additions; `CLAUDE.md` corrections — including
+that the migration count is already **025** before this work, not 023 as currently stated, and that
+`budgets` is now Streamlit-owned and must not be written by the new path.
+
+### Verification
+
+Per phase, the named test file and its cases must exist and pass, then `python -m unittest discover -s
+tests -v` and `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`.
+
+1. `python main.py` — clean run; one `pipeline_runs` row; streams and anomalies populate.
+2. Every button shows a pointer and hover; exactly one "Clear all"; More-filters closes on outside click.
+3. Toggle category detail — no column overlap on either ledger path; horizontal scroll on a narrow viewport.
+4. Set October's cap, confirm September unchanged; clear a cap and confirm it falls back to inherited, not $0.
+5. Run the pipeline twice — the 026 seed does not resurrect a cleared cap.
+6. A hand-flagged charge still reads recurring; Upcoming lists each stream exactly once.
+7. Two goals with different target dates — horizon extends to the furthest; pace is labelled `cashflow`;
+   a shared account shows the contested warning on both.
+8. Dismiss an anomaly, re-run `python main.py` — it stays dismissed **for that period** and returns the next.
+9. The Streamlit dashboard still shows anomalies via the shim.
+10. Refresh balances — today's snapshot updates in place rather than adding a second row.
