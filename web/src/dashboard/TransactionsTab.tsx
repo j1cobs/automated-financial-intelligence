@@ -35,6 +35,7 @@ import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { directionOf, toneFor, toneLabel, DIRECTION_GLYPH, TONE_TOKENS } from '../lib/polarity';
 import type { TabId } from './tabs';
+import { Button } from '../components/Button';
 
 /**
  * Transactions tab -- ledger + anomaly scatter (PLAN.md Phase 15, Fix 10).
@@ -248,10 +249,11 @@ function SortButton({
   align?: 'left' | 'right';
 }) {
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="sm"
       onClick={onClick}
-      className={`flex w-full items-center gap-1 font-semibold text-ink-secondary hover:text-ink ${
+      className={`min-h-0 w-full px-0 py-0 font-semibold ${
         align === 'right' ? 'justify-end' : 'justify-start'
       }`}
       aria-label={`Sort by ${label}`}
@@ -260,7 +262,7 @@ function SortButton({
       <span aria-hidden="true" className={active ? 'text-ink' : 'text-ink-muted'}>
         {active ? (dir === 'asc' ? '▲' : '▼') : '↕'}
       </span>
-    </button>
+    </Button>
   );
 }
 
@@ -409,14 +411,15 @@ function LedgerRow({
             ))}
           </select>
         ) : (
-          <button
+          <Button
+            variant="ghost"
             onClick={() => onStartEdit(tx.hash, tx.category || 'UNCATEGORIZED')}
-            className="flex min-h-9 w-full items-center rounded px-2 py-1 text-left text-ink hover:bg-surface-3"
+            className="w-full justify-start px-2 text-ink hover:bg-surface-3"
           >
             <span className="truncate">
               {tx.category ? formatCategory(tx.category) : <span className="text-ink-muted">—</span>}
             </span>
-          </button>
+          </Button>
         )}
       </td>
       {showPfcDetail && (
@@ -491,22 +494,22 @@ function LedgerRow({
                   ))}
                 </select>
                 {candidates.length > 0 && selectedLinkedHash && (
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
                     onClick={() => onLink(tx.hash, selectedLinkedHash)}
                     disabled={isLinkPending}
-                    className="rounded border border-hairline px-1.5 py-0.5 text-xs font-medium text-ink hover:bg-surface-3 disabled:opacity-50 sm:text-sm"
+                    className="min-h-0 px-1.5 py-0.5 hover:bg-surface-3 sm:text-sm"
                   >
                     Confirm
-                  </button>
+                  </Button>
                 )}
-                <button
-                  type="button"
+                <Button
+                  size="sm"
                   onClick={() => onStartLinking(null)}
-                  className="rounded border border-hairline px-1.5 py-0.5 text-xs font-medium text-ink-secondary hover:text-ink sm:text-sm"
+                  className="min-h-0 px-1.5 py-0.5 text-ink-secondary sm:text-sm"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             );
           })()
@@ -514,25 +517,25 @@ function LedgerRow({
           // Linked state: show "Linked" label and "Unlink" button
           <div className="flex flex-col items-center gap-1">
             <span className="text-xs font-medium text-ink-secondary">Linked</span>
-            <button
-              type="button"
+            <Button
+              size="sm"
               onClick={() => onUnlink(tx.hash)}
               disabled={isLinkPending}
-              className="rounded border border-hairline px-1.5 py-0.5 text-xs font-medium text-ink hover:bg-surface-3 disabled:opacity-50 sm:text-sm"
+              className="min-h-0 px-1.5 py-0.5 hover:bg-surface-3 sm:text-sm"
             >
               Unlink
-            </button>
+            </Button>
           </div>
         ) : (
           // Unlinked state: show "Link" button
-          <button
-            type="button"
+          <Button
+            size="sm"
             onClick={() => onStartLinking(tx.hash)}
             disabled={isLinkPending}
-            className="rounded border border-hairline px-2 py-1 text-xs font-medium text-ink hover:bg-surface-3 disabled:opacity-50 sm:text-sm"
+            className="min-h-0 hover:bg-surface-3 sm:text-sm"
           >
             Link
-          </button>
+          </Button>
         )}
       </td>
     </tr>

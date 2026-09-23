@@ -25,6 +25,7 @@ import { metricInfoFor, type MetricInfo } from '../lib/metricInfo';
 import { toneFor, polarityOf, directionOf, DIRECTION_GLYPH, toneLabel, TONE_TOKENS } from '../lib/polarity';
 import { positiveColor, negativeColor, neutralColor } from './chartTheme';
 import { strings } from '../lib/strings';
+import { Button } from '../components/Button';
 
 export type MetricFormat = 'currency' | 'percent' | 'number';
 
@@ -77,17 +78,17 @@ export function MetricInfoBadge({ metricKey }: { metricKey: string }) {
 
   return (
     <span ref={containerRef} className="relative inline-block">
-      <button
+      <Button
         ref={buttonRef}
-        type="button"
+        size="sm"
         aria-expanded={open}
         aria-controls={popoverId}
         aria-label={strings.metricTile.infoButtonLabel(info.label)}
         onClick={() => setOpen((prev) => !prev)}
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline text-[10px] font-semibold text-ink-muted hover:text-ink hover:border-strong"
+        className="h-5 min-h-0 w-5 shrink-0 rounded-full px-0 py-0 text-[10px] font-semibold text-ink-muted hover:border-strong hover:text-ink"
       >
         ?
-      </button>
+      </Button>
       {open && <MetricInfoPopover id={popoverId} info={info} />}
     </span>
   );

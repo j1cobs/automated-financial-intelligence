@@ -27,6 +27,7 @@ import { LINE_PROPS, inkMutedColor, negativeColor, useChartTheme } from './chart
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { DIRECTION_GLYPH, type Tone } from '../lib/polarity';
 import { formatCategory } from '../lib/categories';
+import { Button } from '../components/Button';
 
 /** How many trailing months the per-category sparkline shows. */
 const SPARKLINE_MONTHS = 6;
@@ -280,28 +281,26 @@ function BudgetItemRow({
       <div className="flex gap-2 sm:w-auto">
         {isEditing ? (
           <>
-            <button
+            <Button
+              variant="primary"
               onClick={onSave}
               disabled={isLoading}
-              className="flex-1 sm:flex-auto px-3 py-2 bg-cat-1 text-white text-xs sm:text-sm rounded-md hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity min-h-9 font-medium"
+              className="flex-1 sm:flex-auto"
             >
               {isLoading ? 'Saving...' : 'Save'}
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={onCancel}
               disabled={isLoading}
-              className="flex-1 sm:flex-auto px-3 py-2 bg-surface-3 text-ink text-xs sm:text-sm rounded-md hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors min-h-9 font-medium"
+              className="flex-1 bg-surface-3 sm:flex-auto"
             >
               Cancel
-            </button>
+            </Button>
           </>
         ) : (
-          <button
-            onClick={onEdit}
-            className="flex-1 sm:flex-auto px-3 py-2 bg-surface-3 text-ink text-xs sm:text-sm rounded-md hover:bg-surface-2 transition-colors min-h-9 font-medium"
-          >
+          <Button onClick={onEdit} className="flex-1 bg-surface-3 sm:flex-auto">
             Edit
-          </button>
+          </Button>
         )}
       </div>
     </div>
