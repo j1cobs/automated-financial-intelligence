@@ -773,8 +773,11 @@ def build_overview(
         if avg_monthly_expenses > 0:
             emergency_fund_months = float(liquid_assets / avg_monthly_expenses)
 
+    # Trailing 12 months (`bounded_all_time`), same window as Top Merchants/Top
+    # Categories/Month-over-Month, not the period filter -- keeps every "top N"
+    # card on this tab answering the same question regardless of the active filter.
     income_src_df = (
-        df[df["tx_type"] == "income"]
+        bounded_all_time[bounded_all_time["tx_type"] == "income"]
         .groupby("description", as_index=False)["adjusted_amount"]
         .sum()
         .nlargest(8, "adjusted_amount")

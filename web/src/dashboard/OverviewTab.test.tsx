@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
-import { OverviewTab } from './OverviewTab';
+import { OverviewTab, renderDriftLabel } from './OverviewTab';
 import { FilterProvider } from '../lib/FilterContext';
-import type { OverviewResponse } from '../lib/types';
+import type { OverviewResponse, MonthOverMonthItem } from '../lib/types';
 import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
 
 // OverviewTab reads `useFilters()` directly (Fix 14 cross-filtering), so it
@@ -808,6 +808,88 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Usual')).toBeInTheDocument();
     expect(screen.getByText('This month')).toBeInTheDocument();
     expect(screen.getByText('Last month')).toBeInTheDocument();
+  });
+
+  describe('renderDriftLabel', () => {
+    // Regression coverage for a real bug: Recharts v3's `LabelList` `content`
+    // callback does NOT forward a `payload` field (only x/y/width/height/value/
+    // index/viewBox survive its internal SVG-attribute filter), so an earlier
+    // version of this function that read `props.payload` silently returned
+    // `null` for every single row -- the drift percentages never rendered at
+    // all, with no error, in any browser. These tests exercise the function
+    // directly (bypassing Recharts entirely) so a future regression back to a
+    // `payload`-based lookup fails loudly here instead of shipping invisible.
+    const rows: MonthOverMonthItem[] = [
+      {
+        category: 'Groceries',
+        this_month: 1200,
+        last_month: 1100,
+        usual: 1000,
+        this_month_drift_pct: 0.2,
+        last_month_drift_pct: -0.05,
+      },
+      {
+        category: 'Utilities',
+        this_month: 300,
+        last_month: 280,
+        usual: null,
+        this_month_drift_pct: null,
+        last_month_drift_pct: null,
+      },
+    ];
+
+    it('looks the row up by index and renders a signed, rounded percentage', () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 0 },
+        rows,
+        'this_month_drift_pct',
+        '#123456',
+      );
+      expect(label).not.toBeNull();
+      render(<svg>{label}</svg>);
+      expect(screen.getByText('+20%')).toBeInTheDocument();
+    });
+
+    it('renders a negative percentage without a leading plus sign', () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 0 },
+        rows,
+        'last_month_drift_pct',
+        '#123456',
+      );
+      render(<svg>{label}</svg>);
+      expect(screen.getByText('-5%')).toBeInTheDocument();
+    });
+
+    it("positions the label past the bar's end, not centered inside it", () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 0 },
+        rows,
+        'this_month_drift_pct',
+        '#123456',
+      );
+      // x + width + gap, not x + width / 2 -- past the bar, not inside it.
+      expect(label?.props.x).toBeGreaterThan(10 + 100);
+    });
+
+    it('renders nothing for a row with no baseline (null drift)', () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 1 },
+        rows,
+        'this_month_drift_pct',
+        '#123456',
+      );
+      expect(label).toBeNull();
+    });
+
+    it('renders nothing when geometry or index is missing (mid-transition Recharts call)', () => {
+      expect(
+        renderDriftLabel({ width: 100, height: 24, index: 0 }, rows, 'this_month_drift_pct', '#123'),
+      ).toBeNull();
+      expect(
+        renderDriftLabel({ x: 10, y: 20, width: 100, height: 24 }, rows, 'this_month_drift_pct', '#123'),
+      ).toBeNull();
+    });
   });
 
   it('renders the 5th KPI tile (Projected Month-End Spend) when a cash flow projection is present', () => {

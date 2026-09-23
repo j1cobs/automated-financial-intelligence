@@ -626,6 +626,26 @@ class OverviewHomeInsightsTests(unittest.TestCase):
             {"description": "Amazon", "amount": 100.0},
         )
 
+    def test_income_breakdown_uses_trailing_12_months_not_the_period_filter(self) -> None:
+        # Income Sources used to read the period-filtered `df` while its sibling cards
+        # (Top Merchants/Top Categories/Month-over-Month) all use the trailing-12-month
+        # `all_time_df` window -- it now matches them. `df` here has no income at all
+        # (simulating a narrow active period filter); `all_time_df` has income within
+        # the last 12 months, which must still show up.
+        within_window = _month_start(2)
+        outside_window = _month_start(20)
+        period_df = _frame([_tx(within_window.isoformat(), 10.0, _EXPENSE, description="Groceries")])
+        all_time_df = _frame(
+            [
+                _tx(within_window.isoformat(), 10.0, _EXPENSE, description="Groceries"),
+                _tx(within_window.isoformat(), 2500.0, _INCOME, description="Employer Inc"),
+                # Older than the trailing-12-month window -- must be excluded.
+                _tx(outside_window.isoformat(), 900.0, _INCOME, description="Old Freelance Gig"),
+            ]
+        )
+        result = build_overview(period_df, pd.DataFrame([]), all_time_df, [])
+        self.assertEqual(result["income_breakdown"], [{"description": "Employer Inc", "amount": 2500.0}])
+
     def test_cash_flow_projection_present_only_for_the_current_month(self) -> None:
         today = date.today()
         df = _frame(

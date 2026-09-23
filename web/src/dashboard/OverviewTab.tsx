@@ -11,6 +11,7 @@ import type {
 } from '../lib/types';
 import { MetricTile, MetricInfoBadge } from './MetricTile';
 import { NetWorthTrendChart } from './NetWorthTrendChart';
+import { MasonryColumns } from './MasonryColumns';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { formatCategory } from '../lib/categories';
@@ -424,43 +425,54 @@ interface DriftLabelProps {
   y?: number;
   width?: number;
   height?: number;
-  payload?: MonthOverMonthItem;
+  index?: number;
 }
 
-/** Minimum bar-segment width (px) that can hold a short "+18%" style label
- *  without overlapping its neighbours -- mirrors `renderAssetMixSegmentLabel`'s
- *  narrow-segment guard, just with a smaller threshold since this label is
- *  shorter than "Savings 12%". */
-const DRIFT_LABEL_MIN_WIDTH = 32;
+/** Horizontal gap (px) between a bar's end and its drift-percentage label. */
+const DRIFT_LABEL_GAP = 6;
 
-/** Bar-top "vs usual" percentage label for the Month-over-Month chart's
- *  `this_month`/`last_month` bars -- reads the matching drift field off the
- *  row `LabelList`'s `content` callback hands back via `payload`, and renders
- *  nothing when there's no baseline (`null`) or the segment is too narrow to
- *  hold text. */
-function renderDriftLabel(
+/** "vs usual" percentage label for the Month-over-Month chart's
+ *  `this_month`/`last_month` bars. Reads the matching drift field off `rows`
+ *  by `index` -- NOT off a `payload` field, despite that being the more
+ *  obvious-looking approach and what an earlier version of this function did.
+ *  Recharts v3's `LabelList` `content` callback only forwards `x`/`y`/`width`/
+ *  `height`/`value`/`index`/`viewBox` (see `LabelList.js`'s
+ *  `svgPropertiesAndEvents(entry)` -- `payload` isn't a valid SVG attribute,
+ *  so it never survives that filter) -- reading `props.payload` here is
+ *  always `undefined`, which silently no-ops this label instead of throwing,
+ *  so the bug is easy to ship without noticing. `index` DOES survive (it's
+ *  set explicitly, not filtered), and lines up with `rows` because Recharts
+ *  builds the LabelList context data from the same array this chart passed
+ *  as `data`. Rendered just past the bar's end (not centered inside it) so
+ *  it's legible regardless of the bar's length -- a category with a small
+ *  dollar amount still gets a short bar, and centering the label inside that
+ *  bar would either overflow it or have to be suppressed entirely. Colored to
+ *  match its series (`fill`) so it still reads as "belonging" to that bar.
+ *  Renders nothing only when there's no baseline (`null`) to compare against. */
+export function renderDriftLabel(
   props: DriftLabelProps,
+  rows: MonthOverMonthItem[],
   field: 'this_month_drift_pct' | 'last_month_drift_pct',
   fill: string,
 ) {
-  const { x, y, width, height, payload } = props;
-  if (x == null || y == null || width == null || height == null || payload == null) {
+  const { x, y, width, height, index } = props;
+  if (x == null || y == null || width == null || height == null || index == null) {
     return null;
   }
-  const driftPct = payload[field];
-  if (driftPct == null || width < DRIFT_LABEL_MIN_WIDTH) {
+  const driftPct = rows[index]?.[field];
+  if (driftPct == null) {
     return null;
   }
   const sign = driftPct >= 0 ? '+' : '';
   return (
     <text
-      x={x + width / 2}
+      x={x + width + DRIFT_LABEL_GAP}
       y={y + height / 2}
-      textAnchor="middle"
+      textAnchor="start"
       dominantBaseline="central"
       fontSize={AXIS_FONT_SIZE}
       fontWeight={600}
-      fill={onFillTextColor(fill)}
+      fill={fill}
     >
       {`${sign}${Math.round(driftPct * 100)}%`}
     </text>
@@ -649,9 +661,32 @@ export function OverviewTab() {
         netWorthMomDelta={ov.net_worth_mom_delta}
       />
 
-      {/* Biggest Expense This Month / Upcoming Recurring Charges -- former
-          Home tab content (Phase 23). */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+      {/* Credit Utilization + limit editor — mirrors app/dashboard.py:604-675.
+          Full-width, fixed above the masonry pool below (not part of it) --
+          its own row count varies with card count, not with the pool's other
+          cards, so it doesn't belong in their height-balancing pool. */}
+      {nw.credit_utilization.length > 0 && (
+        <Card title="Credit Utilization" caption="Current balance against each card's limit.">
+          <div className="divide-y divide-hairline">
+            {nw.credit_utilization.map((item) => (
+              <CreditUtilizationRow key={item.account_key} item={item} />
+            ))}
+          </div>
+          <CreditLimitEditor items={nw.credit_utilization} />
+        </Card>
+      )}
+
+      {/* Balanced two-column masonry pool (see `MasonryColumns`) -- every
+          card below used to be locked into a `grid-cols-2` row with a fixed
+          partner (Biggest Expense/Upcoming Recurring, Top Merchants/
+          Committed Spend, Emergency Fund/Asset Mix, Top Categories/
+          Month-over-Month, Owner Balances/Income Sources). Those pairings
+          mismatched badly whenever one card's content ran much longer than
+          its row partner's (e.g. Owner Balances' small-multiples list next to
+          Income Sources' short one), leaving dead whitespace under the
+          shorter card. Treating all 10 as one pool lets the layout balance by
+          actual rendered height instead of by row position. */}
+      <MasonryColumns>
         <Card title="Biggest Expense This Month">
           {ov.biggest_expense_this_month ? (
             <div className="flex items-center justify-between text-sm">
@@ -668,7 +703,10 @@ export function OverviewTab() {
           )}
         </Card>
 
-        <Card title="Upcoming Recurring Charges">
+        <Card
+          title="Upcoming Recurring Charges"
+          caption="Projected next charge date, based on your typical interval between charges."
+        >
           {ov.upcoming_recurring.length > 0 ? (
             <ul className="space-y-1.5">
               {ov.upcoming_recurring.map((row) => (
@@ -685,11 +723,7 @@ export function OverviewTab() {
             <p className="text-sm text-ink-muted">No recurring charges with a predictable cadence yet.</p>
           )}
         </Card>
-      </div>
 
-      {/* Top Merchants / Committed Recurring Spend -- former Home tab content
-          (Phase 23). */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
         <Card title="Top Merchants (Trailing 12 Months)">
           {ov.top_merchants.length > 0 ? (
             <ul className="space-y-1.5">
@@ -705,7 +739,7 @@ export function OverviewTab() {
           )}
         </Card>
 
-        <Card title="Committed / Recurring Spend">
+        <Card title="Committed / Recurring Spend" caption="All-time total per recurring item.">
           {ov.recurring_items.length > 0 ? (
             <ul className="space-y-1.5">
               {ov.recurring_items.map((row) => (
@@ -721,33 +755,12 @@ export function OverviewTab() {
             </p>
           )}
         </Card>
-      </div>
 
-      {/* Emergency Fund and Asset Mix -- paired because both are short, fixed
-          -height cards (a few text lines + meter; a single 120px stacked bar).
-          Item 2: both card wrappers share an explicit `min-h-56` (224px) so
-          neither reads as top-aligned-with-blank-space -- Asset Mix's realistic
-          rendered height is ASSET_MIX_HEIGHT (120px chart) + ~28px title line +
-          ~24px vertical padding (p-3/p-4) + ~24px legend row underneath the
-          chart (`Legend` renders below via `verticalAlign="bottom"`, inside the
-          same ResponsiveContainer height, so no extra allowance needed there)
-          -- comfortably under 224px with margin for the mb-4 gap. Emergency
-          Fund's own content (number + meter + caption) is shorter, so it is
-          vertically centered within the same reserved height via `flex
-          flex-col justify-center` on its content wrapper, rather than reading
-          as merely top-aligned. Owner Balances and Income Sources (below,
-          after Credit Utilization and the Top Categories/Month-over-Month
-          row) are the tall/variable pair instead -- regrouped by actual
-          content height, not by adding more `items-start` CSS to a mismatched
-          pairing. */}
-      <div className="grid grid-cols-1 items-stretch gap-4 sm:gap-6 lg:grid-cols-2">
         {ov.emergency_fund_months !== null && (
           <Card
             title="Emergency Fund"
             caption="Liquid savings ÷ average monthly expenses."
             metricKey="emergency_fund_months"
-            className="min-h-56"
-            contentClassName="flex flex-1 flex-col justify-center"
           >
             <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
             <div className="mt-3">
@@ -762,7 +775,7 @@ export function OverviewTab() {
             part-to-whole data. Same color assignment as before
             (`categoricalScale(n)[index]`), just a different mark. */}
         {nw?.asset_mix && nw.asset_mix.length > 0 && (
-          <div className="min-h-56 rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
+          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Asset Mix</h3>
             <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
               <BarChart
@@ -804,23 +817,8 @@ export function OverviewTab() {
             </ResponsiveContainer>
           </div>
         )}
-      </div>
 
-      {/* Credit Utilization + limit editor — mirrors app/dashboard.py:604-675 */}
-      {nw.credit_utilization.length > 0 && (
-        <Card title="Credit Utilization" caption="Current balance against each card's limit.">
-          <div className="divide-y divide-hairline">
-            {nw.credit_utilization.map((item) => (
-              <CreditUtilizationRow key={item.account_key} item={item} />
-            ))}
-          </div>
-          <CreditLimitEditor items={nw.credit_utilization} />
-        </Card>
-      )}
-
-      {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) and
-          Month-over-month by category (app/dashboard.py:891-912) */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+        {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) */}
         {ov?.top_categories && ov.top_categories.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
@@ -858,6 +856,7 @@ export function OverviewTab() {
           </div>
         )}
 
+        {/* Month-over-month by category (app/dashboard.py:891-912) */}
         {monthOverMonthRows.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Month-over-Month by Category</h3>
@@ -866,9 +865,21 @@ export function OverviewTab() {
               height={Math.max(250, monthOverMonthRows.length * 32)}
               minWidth="100%"
             >
-              <BarChart data={monthOverMonthRows} layout="vertical" margin={CHART_MARGIN.default}>
+              <BarChart
+                data={monthOverMonthRows}
+                layout="vertical"
+                margin={{ ...CHART_MARGIN.default, right: 56 }}
+              >
                 <CartesianGrid {...gridProps()} />
-                <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
+                <XAxis
+                  type="number"
+                  {...xAxisProps()}
+                  // Headroom past the data max so a drift-% label past the longest
+                  // bar's end (rendered outside the bar -- see renderDriftLabel)
+                  // never gets clipped by the plot's right edge.
+                  domain={[0, (dataMax: number) => dataMax * 1.2]}
+                  tickFormatter={(value) => formatCurrency(value)}
+                />
                 <YAxis
                   dataKey="category"
                   type="category"
@@ -891,7 +902,12 @@ export function OverviewTab() {
                   <LabelList
                     dataKey="last_month"
                     content={(props: object) =>
-                      renderDriftLabel(props as DriftLabelProps, 'last_month_drift_pct', categoricalColor(1))
+                      renderDriftLabel(
+                        props as DriftLabelProps,
+                        monthOverMonthRows,
+                        'last_month_drift_pct',
+                        categoricalColor(1),
+                      )
                     }
                   />
                 </Bar>
@@ -905,7 +921,12 @@ export function OverviewTab() {
                   <LabelList
                     dataKey="this_month"
                     content={(props: object) =>
-                      renderDriftLabel(props as DriftLabelProps, 'this_month_drift_pct', categoricalColor(0))
+                      renderDriftLabel(
+                        props as DriftLabelProps,
+                        monthOverMonthRows,
+                        'this_month_drift_pct',
+                        categoricalColor(0),
+                      )
                     }
                   />
                 </Bar>
@@ -920,20 +941,7 @@ export function OverviewTab() {
             </ResponsiveContainer>
           </div>
         )}
-      </div>
 
-      {/* Owner Balances and Income Sources -- paired because both are
-          genuinely data-driven with no fixed ceiling (small multiples that
-          grow with owner/account count; a list that grows with income-source
-          count), so no pairing strategy makes them match at every data
-          volume. Item 3: both cards instead share a fixed `max-h-[420px]
-          overflow-y-auto` on their CONTENT area only -- the outer card box
-          stays a constant height regardless of data volume, and whichever
-          side has more content than fits gets its own internal scrollbar.
-          420px comfortably shows several owners/accounts or income rows
-          before scrolling is needed. See the Emergency Fund/Asset Mix grid
-          above for the short/fixed-height pair this was split from. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
         {/* Owner Balances -- small multiples: one plain-HTML mini list per
             owner (Item 4 -- see `OwnerBalanceMiniList`), account short name on
             the left, one row per account with a direct value label so every
@@ -941,7 +949,11 @@ export function OverviewTab() {
             dimension (account type via `categoricalScale`) per the `dataviz`
             skill's categorical-hue rule -- owner is disambiguated by spatial
             separation, not a second hue. One shared legend covers account
-            type for the whole group instead of repeating per list. */}
+            type for the whole group instead of repeating per list. Content
+            still caps at `max-h-[420px] overflow-y-auto` -- masonry balances
+            by real measured height regardless, but a cap still protects
+            against one card becoming absurdly tall on a household with many
+            accounts. */}
         {nw?.owner_balances && nw.owner_balances.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
             <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
@@ -966,13 +978,15 @@ export function OverviewTab() {
 
         {/* Income Sources -- built from the same `LabeledBarRow` as Owner
             Balances (aligned label column, same row height, same `title`
-            hover-for-full-name behavior, same `max-h-[420px]` scroll cap) so
-            the two paired cards read as the same size instead of a plain-HTML
-            list next to a Recharts chart with its own independent sizing. */}
+            hover-for-full-name behavior). Trailing 12 months, same window as
+            Top Merchants/Top Categories/Month-over-Month -- it used to follow
+            the active period filter instead, which was inconsistent with
+            every other "top N" card on this tab. */}
         {sortedIncomeBreakdown.length > 0 && (
           <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Income Sources</h3>
-            <div className="max-h-[420px] space-y-1.5 overflow-y-auto">
+            <h3 className="text-base sm:text-lg font-semibold text-ink">Income Sources</h3>
+            <p className="mb-4 text-xs text-ink-muted">Trailing 12 Months</p>
+            <div className="space-y-1.5">
               {sortedIncomeBreakdown.map((source, index) => (
                 <LabeledBarRow
                   key={`${source.description}-${index}`}
@@ -986,7 +1000,7 @@ export function OverviewTab() {
             </div>
           </div>
         )}
-      </div>
+      </MasonryColumns>
 
       {/* Sync Health Warning */}
       {nw?.stale_accounts && nw.stale_accounts.length > 0 && (

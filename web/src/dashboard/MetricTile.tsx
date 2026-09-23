@@ -48,25 +48,35 @@ function formatValue(value: number, format: MetricFormat): string {
 export function MetricInfoBadge({ metricKey }: { metricKey: string }) {
   const info = metricInfoFor(metricKey);
   const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLSpanElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
 
   useEffect(() => {
     if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         setOpen(false);
         buttonRef.current?.focus();
       }
     }
+    document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, [open]);
 
   if (!info) return null;
 
   return (
-    <span className="relative inline-block">
+    <span ref={containerRef} className="relative inline-block">
       <button
         ref={buttonRef}
         type="button"

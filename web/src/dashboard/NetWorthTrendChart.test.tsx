@@ -51,20 +51,13 @@ const monthlyData: NetWorthTrendMonthlyItem[] = [
 ];
 
 describe('NetWorthTrendChart', () => {
-  it('defaults to the Monthly tab and renders monthly series', () => {
+  it('defaults to the Net Worth tab and renders the net worth line only', () => {
     render(<NetWorthTrendChart daily={dailyData} monthly={monthlyData} netWorthMomDelta={500} />);
 
-    expect(screen.getByRole('button', { name: 'Monthly' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: 'Net Worth' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('button', { name: 'Daily' })).not.toHaveAttribute('aria-current');
-    // Legend renders every line's name regardless of hidden state.
-    expect(screen.getByText('Net Worth')).toBeInTheDocument();
-    expect(screen.getByText('Savings Rate')).toBeInTheDocument();
-    expect(screen.getByText('Credit Utilization %')).toBeInTheDocument();
-    expect(screen.getByText('Emergency Fund Months')).toBeInTheDocument();
-  });
-
-  it('shows the net-worth-since-last-month caption only on the Monthly tab', () => {
-    render(<NetWorthTrendChart daily={dailyData} monthly={monthlyData} netWorthMomDelta={500} />);
+    expect(screen.getByRole('button', { name: 'Rates' })).not.toHaveAttribute('aria-current');
+    // No legend on this single-line tab, but the mom-delta caption confirms it rendered.
     expect(screen.getByText(/since last month/)).toBeInTheDocument();
   });
 
@@ -80,7 +73,8 @@ describe('NetWorthTrendChart', () => {
     await user.click(screen.getByRole('button', { name: 'Daily' }));
 
     expect(screen.getByRole('button', { name: 'Daily' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getByText('Net Worth')).toBeInTheDocument();
+    // 'Net Worth' also matches the (now-inactive) tab button, so scope to the legend.
+    expect(screen.getByText('Net Worth', { selector: '.recharts-legend-item-text' })).toBeInTheDocument();
     expect(screen.getByText('Total Assets')).toBeInTheDocument();
     expect(screen.getByText('Total Liabilities')).toBeInTheDocument();
     expect(screen.getByText('Liquid Cash')).toBeInTheDocument();
@@ -88,10 +82,27 @@ describe('NetWorthTrendChart', () => {
     expect(screen.queryByText(/since last month/)).not.toBeInTheDocument();
   });
 
-  it('clicking a legend entry does not throw and toggles that line without removing it from the legend', async () => {
+  it('switches to the Rates tab and renders savings rate + credit utilization in the legend', async () => {
     const user = userEvent.setup();
     render(<NetWorthTrendChart daily={dailyData} monthly={monthlyData} netWorthMomDelta={500} />);
 
+    await user.click(screen.getByRole('button', { name: 'Rates' }));
+
+    expect(screen.getByRole('button', { name: 'Rates' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByText('Savings Rate')).toBeInTheDocument();
+    expect(screen.getByText('Credit Utilization %')).toBeInTheDocument();
+    // Emergency Fund Months is intentionally dropped from this chart entirely
+    // (it has its own live-value card elsewhere on the Overview tab).
+    expect(screen.queryByText('Emergency Fund Months')).not.toBeInTheDocument();
+    // No mom-delta caption on the Rates tab.
+    expect(screen.queryByText(/since last month/)).not.toBeInTheDocument();
+  });
+
+  it('clicking a legend entry on the Rates tab does not throw and keeps the line in the legend', async () => {
+    const user = userEvent.setup();
+    render(<NetWorthTrendChart daily={dailyData} monthly={monthlyData} netWorthMomDelta={500} />);
+
+    await user.click(screen.getByRole('button', { name: 'Rates' }));
     const savingsRateLegendItem = screen.getByText('Savings Rate');
     await user.click(savingsRateLegendItem);
 
@@ -99,8 +110,16 @@ describe('NetWorthTrendChart', () => {
     expect(screen.getByText('Savings Rate')).toBeInTheDocument();
   });
 
-  it('renders a graceful empty state for an empty monthly array on the Monthly tab', () => {
+  it('renders a graceful empty state for an empty monthly array on the Net Worth tab', () => {
     render(<NetWorthTrendChart daily={dailyData} monthly={[]} netWorthMomDelta={null} />);
+    expect(screen.getByText(/Not enough monthly history yet/)).toBeInTheDocument();
+  });
+
+  it('renders a graceful empty state for an empty monthly array on the Rates tab', async () => {
+    const user = userEvent.setup();
+    render(<NetWorthTrendChart daily={dailyData} monthly={[]} netWorthMomDelta={null} />);
+
+    await user.click(screen.getByRole('button', { name: 'Rates' }));
     expect(screen.getByText(/Not enough monthly history yet/)).toBeInTheDocument();
   });
 
