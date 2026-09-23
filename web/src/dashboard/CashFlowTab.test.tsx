@@ -125,6 +125,7 @@ const baseMockData: CashFlowResponse = {
   transfer_count: 5,
   flagged_count: 2,
   savings_rate: 0.4,
+  reimbursed: 250,
   month_over_month: [
     { month: '2024-01', income: 5000, expenses: 3000, net: 2000 },
     { month: '2024-02', income: 5200, expenses: 3100, net: 2100 },
@@ -379,47 +380,47 @@ describe('CashFlowTab', () => {
     expect(bars.length).toBe(4);
   });
 
-  it('renders the monthly expense breakdown by category chart with a stacked bar per category', () => {
+  it('renders the monthly expense breakdown by category as a heatmap with a row per category', () => {
     mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
     const heading = screen.getByText('Monthly expense breakdown by category');
-    expect(screen.getByText('Groceries')).toBeInTheDocument();
-    expect(screen.getByText('Dining')).toBeInTheDocument();
     const card = heading.closest('.rounded-lg') as HTMLElement;
-    // 2 categories x 2 months = 4 rectangles.
-    const bars = card.querySelectorAll('.recharts-bar-rectangle');
-    expect(bars.length).toBe(4);
+    expect(within(card).getByText('Groceries')).toBeInTheDocument();
+    expect(within(card).getByText('Dining')).toBeInTheDocument();
+    // 2 categories x 2 months = 4 amount cells, each identified by its
+    // "<category> · <month>: <amount>" title (text content collides across
+    // cells vs. row totals, e.g. Dining's total equals Groceries' Feb cell).
+    expect(card.querySelector('td[title="Groceries · 2024-01: $400"]')).not.toBeNull();
+    expect(card.querySelector('td[title="Groceries · 2024-02: $350"]')).not.toBeNull();
+    expect(card.querySelector('td[title="Dining · 2024-01: $150"]')).not.toBeNull();
+    expect(card.querySelector('td[title="Dining · 2024-02: $200"]')).not.toBeNull();
   });
 
-  it('folds categories past the 8 categorical slots into "Other" instead of cycling the palette', () => {
+  it('folds categories past the heatmap row cap into "Other"', () => {
     const manyCategories: CashFlowResponse = {
       ...baseMockData,
-      category_distribution: [
-        { month: '2024-01', category: 'Groceries', amount: 900 },
-        { month: '2024-01', category: 'Dining', amount: 800 },
-        { month: '2024-01', category: 'Rent', amount: 700 },
-        { month: '2024-01', category: 'Utilities', amount: 600 },
-        { month: '2024-01', category: 'Insurance', amount: 500 },
-        { month: '2024-01', category: 'Subscriptions', amount: 400 },
-        { month: '2024-01', category: 'Travel', amount: 300 },
-        { month: '2024-01', category: 'Shopping', amount: 200 },
-        { month: '2024-01', category: 'Healthcare', amount: 100 },
-        { month: '2024-01', category: 'Pets', amount: 50 },
-      ],
+      category_distribution: Array.from({ length: 19 }, (_, index) => ({
+        month: '2024-01',
+        category: `Category ${index}`,
+        // Descending amounts so the fold-away set (the two smallest) is deterministic.
+        amount: 1000 - index * 10,
+      })),
     };
     mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(manyCategories));
 
     renderCashFlowTab();
 
-    // 10 distinct categories fold to 7 kept (highest spend) + "Other" = 8 series.
-    expect(screen.getByText('Other')).toBeInTheDocument();
-    expect(screen.getByText('Groceries')).toBeInTheDocument();
-    // The two smallest categories (Healthcare, Pets) are folded away and no
-    // longer appear as their own legend entries.
-    expect(screen.queryByText('Healthcare')).not.toBeInTheDocument();
-    expect(screen.queryByText('Pets')).not.toBeInTheDocument();
+    const heading = screen.getByText('Monthly expense breakdown by category');
+    const card = heading.closest('.rounded-lg') as HTMLElement;
+    // 19 distinct categories fold to 17 kept (highest spend) + "Other" = 18 rows.
+    expect(within(card).getByText('Other')).toBeInTheDocument();
+    expect(within(card).getByText('Category 0')).toBeInTheDocument();
+    // The two smallest categories are folded away and no longer appear as
+    // their own row.
+    expect(within(card).queryByText('Category 17')).not.toBeInTheDocument();
+    expect(within(card).queryByText('Category 18')).not.toBeInTheDocument();
   });
 
   it('does not fold categories when there are 8 or fewer', () => {
@@ -444,28 +445,42 @@ describe('CashFlowTab', () => {
     expect(screen.getByText('Shopping')).toBeInTheDocument();
   });
 
-  it('patches the category filter in the URL when a category bar is clicked (Fix 14)', () => {
+  it('opens the transactions preview filtered to category and month when a heatmap cell is clicked', async () => {
+    mockedApiFetch.mockReset();
+    mockedApiFetch.mockResolvedValue({ transactions: [] });
     mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     const { container } = renderCashFlowTab();
 
     const heading = screen.getByText('Monthly expense breakdown by category');
     const card = heading.closest('.rounded-lg') as HTMLElement;
-    const firstBar = card.querySelectorAll('.recharts-bar-rectangle')[0];
-    expect(firstBar).toBeTruthy();
-    fireEvent.click(firstBar!);
+    const cell = card.querySelector('td[title="Groceries · 2024-01: $400"]');
+    expect(cell).not.toBeNull();
+    fireEvent.click(cell!);
 
-    expect(new URLSearchParams(window.location.search).getAll('categories')).toContain('Groceries');
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByText('Groceries – January 2024')).toBeInTheDocument();
+
+    expect(mockedApiFetch).toHaveBeenCalledTimes(1);
+    const requestedPath = mockedApiFetch.mock.calls[0][0] as string;
+    const [, qs] = requestedPath.split('?');
+    const params = new URLSearchParams(qs);
+    expect(params.getAll('categories')).toEqual(['Groceries']);
+    expect(params.get('date_from')).toBe('2024-01-01');
+    expect(params.get('date_to')).toBe('2024-01-31');
+
     // Sanity: the click landed inside this render, not a stray leftover DOM node.
     expect(container).toContainElement(card);
   });
 
-  it('renders a discoverability hint above the category chart', () => {
+  it('renders a discoverability hint above the category heatmap', () => {
     mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 
     renderCashFlowTab();
 
-    expect(screen.getByText('Click a bar to add that category to your filters.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Darker cells mean more spent that month. Click a cell to see those transactions.'),
+    ).toBeInTheDocument();
   });
 
   describe('weekly bar click -> transactions preview', () => {

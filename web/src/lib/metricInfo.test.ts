@@ -24,6 +24,7 @@ const RENDERED_METRIC_KEYS = [
   'emergency_fund_months',
   'flagged_count',
   'transfer_count',
+  'reimbursed',
   'recurring_monthly_spend',
   'projected_month_end_expenses',
 ] as const;

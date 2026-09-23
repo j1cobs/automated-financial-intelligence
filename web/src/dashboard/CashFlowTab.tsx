@@ -14,13 +14,11 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from 'recharts';
-import type { TooltipContentProps } from 'recharts';
+import type { TooltipContentProps, MouseHandlerDataParam } from 'recharts';
 import { useCashFlow } from '../lib/queries';
-import { useFilters } from '../lib/FilterContext';
 import { MetricInfoBadge } from './MetricTile';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { PeriodTransactionsPreview } from './PeriodTransactionsPreview';
-import { strings } from '../lib/strings';
 import { daysBefore, parseWeekRange, parseMonthRange } from '../lib/dateRanges';
 import { formatCategory } from '../lib/categories';
 import type {
@@ -36,8 +34,8 @@ import {
   incomeColor,
   expenseColor,
   positiveColor,
-  neutralColor,
   onFillTextColor,
+  sequentialColor,
   gridProps,
   xAxisProps,
   yAxisProps,
@@ -52,7 +50,6 @@ import {
   BAR_RADIUS,
   LINE_PROPS,
   activeDotProps,
-  CATEGORICAL_SLOTS,
 } from './chartTheme';
 
 /**
@@ -85,12 +82,8 @@ function brushProps() {
   } as const;
 }
 
-/** "Other" bucket for the categorical tail — see `pivotCategoryDistribution`. */
+/** "Other" bucket for the categorical tail — see `pivotCategoryHeatmap`. */
 const OTHER_LABEL = 'Other';
-
-/** Square corners for a stacked segment that isn't the topmost one -- only the
- *  last-drawn (topmost) segment gets `BAR_RADIUS`'s rounded data-end. */
-const STACK_SEGMENT_RADIUS: [number, number, number, number] = [0, 0, 0, 0];
 
 /** Categorical slots 3-5 (index 2-4: aqua, yellow, magenta) fall below 3:1 on the
  *  light surface. The `dataviz` skill's relief for that is a visible direct label,
@@ -119,6 +112,22 @@ function shortMoney(value: number): string {
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
+}
+
+/** Resolves a `YYYY-MM` month key to its date range plus a human label
+ *  ("August 2026", matching `FilterOptions.months`'s format elsewhere in the
+ *  UI). Shared by every chart that opens `PeriodTransactionsPreview` for a
+ *  clicked month -- the monthly bar chart, the owner chart, and the category
+ *  heatmap. Returns `null` for an unparseable month key, meaning "no
+ *  drill-down available" rather than opening a preview with an error. */
+function resolveMonthPeriod(month: string): { dateFrom: string; dateTo: string; monthLabel: string } | null {
+  const range = parseMonthRange(month);
+  if (!range) return null;
+  const monthLabel = new Date(`${range.from}T00:00:00`).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+  return { dateFrom: range.from, dateTo: range.to, monthLabel };
 }
 
 /** Direct-label props for a `<Bar>` landing on a low-contrast categorical slot.
@@ -183,40 +192,134 @@ function pivotByOwner(items: MonthlyNetByOwnerItem[]): {
   return { rows, owners };
 }
 
+/** Row cap for the category heatmap. Higher than `CATEGORICAL_SLOTS` (8):
+ *  that limit exists to keep a *legend* with distinct per-category hues
+ *  readable, but the heatmap uses one sequential intensity scale instead of
+ *  per-category colours, so there's no legend-crowding reason to fold this
+ *  early -- more rows means more signal for spotting which category spiked. */
+const HEATMAP_ROW_CAP = 18;
+
+interface CategoryHeatmapRow {
+  category: string;
+  total: number;
+  cells: Record<string, number>;
+}
+
 /**
- * Pivots `category_distribution` (one row per `{month, category}`) into wide
- * rows keyed by category, for a stacked bar. The categorical palette has
- * exactly `CATEGORICAL_SLOTS` (8) slots, but the category list is unbounded, so
- * once there are more than 8 distinct categories the smallest ones (by total
- * spend across the whole window) are folded into an `"Other"` bucket rather
- * than cycling the palette onto a 9th hue.
+ * Pivots `category_distribution` (one row per `{month, category}`) into
+ * category-major rows for the heatmap: one row per category (sorted by total
+ * spend descending), one cell per month. Categories past `HEATMAP_ROW_CAP`
+ * (by total spend across the whole window) are folded into an `"Other"` row.
  */
-function pivotCategoryDistribution(items: CategoryDistributionItem[]): {
-  rows: Record<string, number | string>[];
-  categories: string[];
+function pivotCategoryHeatmap(items: CategoryDistributionItem[]): {
+  rows: CategoryHeatmapRow[];
+  months: string[];
+  maxAmount: number;
 } {
   const totals = new Map<string, number>();
+  const monthSet = new Set<string>();
   for (const item of items) {
     totals.set(item.category, (totals.get(item.category) ?? 0) + item.amount);
+    monthSet.add(item.month);
   }
   const bySpendDesc = Array.from(totals.keys()).sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
-  const folded = bySpendDesc.length > CATEGORICAL_SLOTS;
-  const kept = new Set(folded ? bySpendDesc.slice(0, CATEGORICAL_SLOTS - 1) : bySpendDesc);
-  const categories = folded ? [...bySpendDesc.slice(0, CATEGORICAL_SLOTS - 1), OTHER_LABEL] : bySpendDesc;
+  const folded = bySpendDesc.length > HEATMAP_ROW_CAP;
+  const kept = new Set(folded ? bySpendDesc.slice(0, HEATMAP_ROW_CAP - 1) : bySpendDesc);
+  const orderedCategories = folded
+    ? [...bySpendDesc.slice(0, HEATMAP_ROW_CAP - 1), OTHER_LABEL]
+    : bySpendDesc;
 
-  const byMonth = new Map<string, Record<string, number | string>>();
+  const cellsByCategory = new Map<string, Record<string, number>>();
+  const rowTotals = new Map<string, number>();
+  orderedCategories.forEach((category) => cellsByCategory.set(category, {}));
+
   for (const item of items) {
     const key = kept.has(item.category) ? item.category : OTHER_LABEL;
-    let row = byMonth.get(item.month);
-    if (!row) {
-      row = { month: item.month };
-      categories.forEach((category) => (row![category] = 0));
-      byMonth.set(item.month, row);
-    }
-    row[key] = (Number(row[key]) || 0) + item.amount;
+    const cells = cellsByCategory.get(key)!;
+    cells[item.month] = (cells[item.month] ?? 0) + item.amount;
+    rowTotals.set(key, (rowTotals.get(key) ?? 0) + item.amount);
   }
-  const rows = Array.from(byMonth.values()).sort((a, b) => String(a.month).localeCompare(String(b.month)));
-  return { rows, categories };
+
+  const rows: CategoryHeatmapRow[] = orderedCategories.map((category) => ({
+    category,
+    total: rowTotals.get(category) ?? 0,
+    cells: cellsByCategory.get(category) ?? {},
+  }));
+  const maxAmount = rows.reduce((max, row) => Math.max(max, ...Object.values(row.cells), 0), 0);
+
+  return { rows, months: Array.from(monthSet).sort(), maxAmount };
+}
+
+/**
+ * Category x month heatmap. Cell fill uses the shared sequential intensity
+ * scale (`sequentialColor`, `chartTheme.ts`) rather than per-category hues --
+ * the `dataviz` skill requires a scale like this to never rely on colour
+ * alone, so every cell also shows its exact amount as text. Cells fold into
+ * an `"Other"` row past `HEATMAP_ROW_CAP` and that row is never clickable,
+ * mirroring the categorical charts elsewhere on this tab.
+ */
+function CategoryHeatmap({
+  rows,
+  months,
+  maxAmount,
+  onCellClick,
+}: {
+  rows: CategoryHeatmapRow[];
+  months: string[];
+  maxAmount: number;
+  onCellClick: (category: string, month: string) => void;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-max border-collapse text-xs sm:text-sm">
+        <thead>
+          <tr>
+            <th className="sticky left-0 z-10 bg-surface-1 p-1 text-left font-medium text-ink-secondary sm:p-2">
+              Category
+            </th>
+            {months.map((month) => (
+              <th key={month} className="p-1 text-right font-medium text-ink-secondary sm:p-2">
+                {month}
+              </th>
+            ))}
+            <th className="p-1 text-right font-medium text-ink-secondary sm:p-2">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.category}>
+              <th
+                scope="row"
+                className="sticky left-0 z-10 whitespace-nowrap bg-surface-1 p-1 text-left font-normal text-ink sm:p-2"
+              >
+                {formatCategory(row.category)}
+              </th>
+              {months.map((month) => {
+                const amount = row.cells[month] ?? 0;
+                const fill =
+                  amount > 0 ? sequentialColor(maxAmount > 0 ? amount / maxAmount : 0) : 'transparent';
+                const clickable = amount > 0 && row.category !== OTHER_LABEL;
+                return (
+                  <td
+                    key={month}
+                    className="p-1 text-right tabular-nums sm:p-2"
+                    style={{ backgroundColor: fill, cursor: clickable ? 'pointer' : 'default' }}
+                    onClick={clickable ? () => onCellClick(row.category, month) : undefined}
+                    title={`${formatCategory(row.category)} · ${month}: ${money(amount)}`}
+                  >
+                    {amount > 0 && <span style={{ color: onFillTextColor(fill) }}>{shortMoney(amount)}</span>}
+                  </td>
+                );
+              })}
+              <td className="p-1 text-right font-medium tabular-nums text-ink sm:p-2">
+                {shortMoney(row.total)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 type Tone = 'income' | 'expense' | 'pos-neg' | 'warn' | 'neutral';
@@ -356,13 +459,14 @@ export function CashFlowTab({
   onDrillDownToTransactions?: (dateFrom: string, dateTo: string) => void;
 }) {
   const { data, isLoading, error, refetch } = useCashFlow();
-  const { filters, patchFilters } = useFilters();
   const themeEpoch = useChartTheme();
   const showBrush = useShowBrush();
   const [previewPeriod, setPreviewPeriod] = useState<{
     label: string;
     dateFrom: string;
     dateTo: string;
+    owner?: string;
+    category?: string;
   } | null>(null);
 
   // Weekly/monthly bar click -> open PeriodTransactionsPreview for the
@@ -381,26 +485,38 @@ export function CashFlowTab({
   }
 
   function handleMonthBarClick(row: CashFlowSeriesItem) {
-    const range = parseMonthRange(row.month);
-    if (!range) return;
-    // "August 2026", not the raw date range -- matches the month-label
-    // format `FilterOptions.months` already uses elsewhere in the UI.
-    const label = new Date(`${range.from}T00:00:00`).toLocaleDateString('en-US', {
-      month: 'long',
-      year: 'numeric',
-    });
-    setPreviewPeriod({ label, dateFrom: range.from, dateTo: range.to });
+    const period = resolveMonthPeriod(row.month);
+    if (!period) return;
+    setPreviewPeriod({ label: period.monthLabel, dateFrom: period.dateFrom, dateTo: period.dateTo });
   }
 
-  // Cross-filtering (Fix 14): clicking a category segment adds it to the
-  // active filters via the shared FilterContext. `OTHER_LABEL` is a
-  // synthetic aggregate (categories past the 8 categorical slots), not a
-  // real category, so it is never filterable.
-  function addCategoryFilter(category: string) {
+  // "Monthly net cash flow by holder" bar click -> open the preview filtered
+  // to both the clicked month AND the clicked owner's segment, since that's
+  // the whole point of breaking this chart down by holder in the first place.
+  function handleOwnerBarClick(month: string, owner: string) {
+    const period = resolveMonthPeriod(month);
+    if (!period) return;
+    setPreviewPeriod({
+      label: `${owner} – ${period.monthLabel}`,
+      dateFrom: period.dateFrom,
+      dateTo: period.dateTo,
+      owner,
+    });
+  }
+
+  // Category heatmap cell click -> open the preview filtered to that
+  // category + month. `OTHER_LABEL` is a synthetic aggregate, never clickable
+  // (mirrors the old stacked-bar chart's rule).
+  function handleCategoryCellClick(category: string, month: string) {
     if (category === OTHER_LABEL) return;
-    const current = filters.categories ?? [];
-    if (current.includes(category)) return;
-    patchFilters({ categories: [...current, category] });
+    const period = resolveMonthPeriod(month);
+    if (!period) return;
+    setPreviewPeriod({
+      label: `${formatCategory(category)} – ${period.monthLabel}`,
+      dateFrom: period.dateFrom,
+      dateTo: period.dateTo,
+      category,
+    });
   }
 
   // Rolling-30-day-spend point click. Each point's `date` is the *last* day
@@ -441,7 +557,11 @@ export function CashFlowTab({
   }
 
   const { rows: ownerRows, owners } = pivotByOwner(data.monthly_net_by_owner);
-  const { rows: categoryRows, categories } = pivotCategoryDistribution(data.category_distribution);
+  const {
+    rows: heatmapRows,
+    months: heatmapMonths,
+    maxAmount: heatmapMaxAmount,
+  } = pivotCategoryHeatmap(data.category_distribution);
 
   return (
     <div className="space-y-6">
@@ -450,7 +570,7 @@ export function CashFlowTab({
       </div>
 
       {/* Key metrics stat tiles */}
-      <div className="grid grid-cols-2 gap-2 sm:gap-4 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-2 sm:gap-4 sm:grid-cols-3 lg:grid-cols-7">
         <StatTile
           label="Total Income"
           value={data.income}
@@ -479,6 +599,13 @@ export function CashFlowTab({
           tone="pos-neg"
           sign={data.net_flow}
           metricKey="savings_rate"
+        />
+        <StatTile
+          label="Reimbursed"
+          value={data.reimbursed}
+          format="currency"
+          tone="neutral"
+          metricKey="reimbursed"
         />
         <StatTile
           label="Transfers"
@@ -530,9 +657,26 @@ export function CashFlowTab({
           <p className="mb-4 text-xs text-ink-muted">
             total spent in the 30 days ending on each date — hover for the daily average
           </p>
-          <div className="h-48 sm:h-64 w-full" data-testid="rolling-spend-chart">
+          <div
+            className="h-48 sm:h-64 w-full"
+            data-testid="rolling-spend-chart"
+            style={onDrillDownToTransactions ? { cursor: 'pointer' } : undefined}
+          >
             <ResponsiveContainer key={themeEpoch} width="100%" height="100%">
-              <LineChart data={data.rolling_30d_spend} margin={{ ...CHART_MARGIN.default }}>
+              <LineChart
+                data={data.rolling_30d_spend}
+                margin={{ ...CHART_MARGIN.default }}
+                onClick={
+                  onDrillDownToTransactions
+                    ? (state: MouseHandlerDataParam) => {
+                        const label = state?.activeLabel;
+                        if (typeof label !== 'string') return;
+                        const row = data.rolling_30d_spend.find((item) => item.date === label);
+                        if (row) handleRollingSpendClick(row);
+                      }
+                    : undefined
+                }
+              >
                 <CartesianGrid {...gridProps()} />
                 <XAxis dataKey="date" {...xAxisProps()} />
                 {/* Deliberately ONE y-axis. `daily_avg` is `amount / 30`, so plotting it
@@ -548,41 +692,10 @@ export function CashFlowTab({
                   name="30-day total"
                   stroke={expenseColor()}
                   strokeWidth={2}
-                  dot={
-                    onDrillDownToTransactions
-                      ? (dotProps: {
-                          cx?: number;
-                          cy?: number;
-                          index?: number;
-                          payload?: RollingSpendItem;
-                        }) => {
-                          const { cx, cy, index, payload } = dotProps;
-                          if (cx === undefined || cy === undefined || !payload) {
-                            return <g key={`rolling-spend-dot-${index}`} />;
-                          }
-                          return (
-                            // Invisible click target -- the point itself stays
-                            // undrawn (a dot per day would be noise); only
-                            // `activeDotProps()` below draws a visible marker,
-                            // on hover. r=14 (28px hit diameter) clears the
-                            // `dataviz` skill's 24px minimum tap-target guidance;
-                            // r=8 (16px) previously did not.
-                            <circle
-                              key={`rolling-spend-dot-${index}`}
-                              data-testid={`rolling-spend-point-${index}`}
-                              cx={cx}
-                              cy={cy}
-                              r={14}
-                              fill="transparent"
-                              style={{ cursor: 'pointer' }}
-                              onClick={() => handleRollingSpendClick(payload)}
-                            />
-                          );
-                        }
-                      : false
-                  }
+                  dot={false}
                   activeDot={activeDotProps()}
                 />
+                {showBrush && <Brush dataKey="date" {...brushProps()} />}
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -615,6 +728,11 @@ export function CashFlowTab({
                       maxBarSize={BAR_MAX_SIZE}
                       radius={BAR_RADIUS}
                       label={directLabelProps(index, fill)}
+                      cursor="pointer"
+                      onClick={(bar: { payload?: Record<string, number | string> }) => {
+                        const month = bar.payload?.month;
+                        if (typeof month === 'string') handleOwnerBarClick(month, owner);
+                      }}
                       {...surfaceGapProps()}
                     />
                   );
@@ -626,41 +744,20 @@ export function CashFlowTab({
       )}
 
       {/* Monthly expense breakdown by category */}
-      {categoryRows.length > 0 && (
+      {heatmapRows.length > 0 && (
         <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
           <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">
             Monthly expense breakdown by category
           </h3>
-          <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>
-          <div className="h-56 sm:h-80 w-full">
-            <ResponsiveContainer key={themeEpoch} width="100%" height="100%">
-              <BarChart data={categoryRows} margin={{ ...CHART_MARGIN.default }}>
-                <CartesianGrid {...gridProps()} />
-                <XAxis dataKey="month" {...xAxisProps()} />
-                <YAxis {...yAxisProps()} tickFormatter={(value) => shortMoney(Number(value))} />
-                <Tooltip {...tooltipProps()} formatter={(value) => money(Number(value))} />
-                <Legend {...legendProps()} />
-                {categories.map((category, index) => {
-                  const fill = index < CATEGORICAL_SLOTS ? categoricalColor(index) : neutralColor();
-                  return (
-                    <Bar
-                      key={category}
-                      dataKey={category}
-                      name={formatCategory(category)}
-                      stackId="expenses"
-                      fill={fill}
-                      maxBarSize={BAR_MAX_SIZE}
-                      radius={index === categories.length - 1 ? BAR_RADIUS : STACK_SEGMENT_RADIUS}
-                      label={directLabelProps(index, fill)}
-                      cursor={category === OTHER_LABEL ? 'default' : 'pointer'}
-                      onClick={() => addCategoryFilter(category)}
-                      {...surfaceGapProps()}
-                    />
-                  );
-                })}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <p className="mb-4 text-xs text-ink-muted">
+            Darker cells mean more spent that month. Click a cell to see those transactions.
+          </p>
+          <CategoryHeatmap
+            rows={heatmapRows}
+            months={heatmapMonths}
+            maxAmount={heatmapMaxAmount}
+            onCellClick={handleCategoryCellClick}
+          />
         </div>
       )}
 
@@ -669,6 +766,8 @@ export function CashFlowTab({
           label={previewPeriod.label}
           dateFrom={previewPeriod.dateFrom}
           dateTo={previewPeriod.dateTo}
+          owner={previewPeriod.owner}
+          category={previewPeriod.category}
           onClose={() => setPreviewPeriod(null)}
         />
       )}

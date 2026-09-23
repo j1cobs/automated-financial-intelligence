@@ -382,6 +382,7 @@ describe('BudgetTab', () => {
           transfer_count: 0,
           flagged_count: 0,
           savings_rate: 0,
+          reimbursed: 0,
           month_over_month: [],
           weekly_trend: [],
           rolling_30d_spend: [],

@@ -24,6 +24,13 @@ vi.mock('../auth/AuthContext', () => ({
 
 // Same rationale as CashFlowTab.test.tsx: jsdom has no ResizeObserver, so
 // Recharts' ResponsiveContainer never sees a nonzero size without this.
+//
+// `LineChart` is also stubbed with one hidden per-point button when an
+// `onClick` prop is present: real Recharts resolves a click's nearest data
+// point from pixel coordinates (via `getBoundingClientRect`/axis scales),
+// which jsdom's layout-less environment can't reproduce, so `fireEvent.click`
+// on the real chart surface never reaches `onClick`. The rolling-spend chart
+// is the only `LineChart` user that passes `onClick`, so this only affects it.
 vi.mock('recharts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('recharts')>();
   return {
@@ -33,6 +40,30 @@ vi.mock('recharts', async (importOriginal) => {
     }: {
       children: React.ReactElement<{ width?: number; height?: number }>;
     }) => React.cloneElement(children, { width: 800, height: 400 }),
+    LineChart: (props: React.ComponentProps<typeof actual.LineChart> & { data?: { date?: string }[] }) => {
+      const handleClick = props.onClick;
+      const rows: { date?: string }[] = props.data ?? [];
+      return (
+        <>
+          {handleClick &&
+            rows.map((row, index) => (
+              <button
+                key={index}
+                type="button"
+                data-testid={`rolling-spend-point-${index}`}
+                style={{ display: 'none' }}
+                onClick={() =>
+                  handleClick(
+                    { activeLabel: row.date } as Parameters<NonNullable<typeof handleClick>>[0],
+                    {} as never,
+                  )
+                }
+              />
+            ))}
+          <actual.LineChart {...props} />
+        </>
+      );
+    },
   };
 });
 
@@ -213,6 +244,7 @@ const cashFlowData: CashFlowResponse = {
   transfer_count: 0,
   flagged_count: 0,
   savings_rate: 0.4,
+  reimbursed: 0,
   month_over_month: [],
   weekly_trend: [],
   rolling_30d_spend: [

@@ -61,6 +61,12 @@ interface PeriodTransactionsPreviewProps {
   label: string;
   dateFrom: string;
   dateTo: string;
+  /** Narrow the preview to one owner's transactions (e.g. a "Monthly net cash
+   *  flow by holder" bar click) -- overrides the ambient owner filter. */
+  owner?: string;
+  /** Narrow the preview to one category's transactions (e.g. a category
+   *  heatmap cell click) -- overrides the ambient category filter. */
+  category?: string;
   onClose: () => void;
 }
 
@@ -147,6 +153,8 @@ export function PeriodTransactionsPreview({
   label,
   dateFrom,
   dateTo,
+  owner,
+  category,
   onClose,
 }: PeriodTransactionsPreviewProps) {
   const { filters } = useFilters();
@@ -182,10 +190,12 @@ export function PeriodTransactionsPreview({
     months: monthsCoveringRange(dateFrom, dateTo),
     date_from: dateFrom,
     date_to: dateTo,
+    owners: owner ? [owner] : filters.owners,
+    categories: category ? [category] : filters.categories,
   };
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['ledger-preview', `${dateFrom}_${dateTo}`],
+    queryKey: ['ledger-preview', `${dateFrom}_${dateTo}`, owner ?? '', category ?? ''],
     queryFn: () => {
       const qs = toSearchParams(overrideFilters).toString();
       return apiFetch<LedgerResponse>(qs ? `/ledger?${qs}` : '/ledger');
@@ -203,7 +213,7 @@ export function PeriodTransactionsPreview({
         ref={containerRef}
         role="dialog"
         aria-label={`Transactions for ${label}`}
-        className="max-h-[85vh] w-full max-w-4xl overflow-auto rounded-lg border border-hairline bg-surface-1 p-4 shadow-lg sm:p-6"
+        className="max-h-[95vh] w-full max-w-[95vw] overflow-auto rounded-lg border border-hairline bg-surface-1 p-4 shadow-lg sm:p-6"
       >
         <div className="mb-3 flex items-start justify-between gap-4">
           <h3 className="text-base font-semibold text-ink sm:text-lg">{label}</h3>

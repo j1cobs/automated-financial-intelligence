@@ -136,6 +136,13 @@ export const METRIC_INFO: Readonly<Record<string, MetricInfo>> = Object.freeze({
     window: 'Selected period',
     excludes: [],
   },
+  reimbursed: {
+    label: 'Reimbursed',
+    definition: 'How much a linked reimbursement (e.g. an insurance payout) reduced an expense by.',
+    formula: 'sum of the expense reduction across linked expense + reimbursement pairs',
+    window: 'Selected period',
+    excludes: ['Transactions you have not linked to a reimbursement'],
+  },
   recurring_monthly_spend: {
     label: 'Committed Monthly Spend',
     definition: 'What you’ve marked recurring, averaged over complete months.',

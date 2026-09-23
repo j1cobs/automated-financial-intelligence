@@ -1190,6 +1190,94 @@ class NetLinkedTransactionsUnitTests(unittest.TestCase):
         # Result should have the netted value
         self.assertAlmostEqual(result[result["transaction_hash"] == "h-expense"]["amount"].iloc[0], 1000.0)
 
+    def test_income_leg_larger_than_expense_leg_still_anchors_on_expense(self) -> None:
+        """A reimbursement larger in magnitude than its linked expense must not flip
+        the anchor to the income leg -- that would silently drop real income and
+        inflate expenses (the root cause of the -1935.5% savings-rate bug).
+        """
+        # Expense: 50 outflow. Reimbursement: -3000 inflow (larger magnitude).
+        expense = _tx("2026-05-01", 50.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 3000.0, _INCOME, transaction_hash="h-reimbursement")
+        df = _frame([expense, reimbursement])
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        result = net_linked_transactions(df)
+
+        # The expense leg is clamped to 0 (fully covered), not left as a large
+        # positive "expense" carrying the reimbursement's magnitude.
+        anchor = result[result["transaction_hash"] == "h-expense"].iloc[0]
+        self.assertEqual(anchor["tx_type"], "expense")
+        self.assertAlmostEqual(anchor["amount"], 0.0)
+        self.assertAlmostEqual(anchor["adjusted_amount"], 0.0)
+
+        # The excess (3000 - 50 = 2950) survives as income, not lost or
+        # miscounted as expense.
+        income_rows = result[result["tx_type"] == "income"]
+        self.assertEqual(len(income_rows), 1)
+        self.assertAlmostEqual(income_rows.iloc[0]["amount"], -2950.0)
+        self.assertAlmostEqual(income_rows.iloc[0]["adjusted_amount"], 2950.0)
+
+    def test_over_reimbursement_excess_is_dated_to_the_reimbursement_not_the_expense(self) -> None:
+        """The synthetic excess-income row keeps the reimbursement's own date, since
+        that's when the extra cash actually arrived."""
+        expense = _tx("2026-05-01", 50.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-06-15", 3000.0, _INCOME, transaction_hash="h-reimbursement")
+        df = _frame([expense, reimbursement])
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        result = net_linked_transactions(df)
+
+        income_row = result[result["tx_type"] == "income"].iloc[0]
+        self.assertEqual(income_row["date"].strftime("%Y-%m-%d"), "2026-06-15")
+        self.assertEqual(income_row["month"], "2026-06")
+
+    def test_reimbursed_total_attr_reflects_expense_reduction(self) -> None:
+        """`reimbursed_total` (via `.attrs`) is the amount actually applied to
+        reduce expenses -- the full reimbursement when it's smaller than the
+        expense, or the full expense amount when the reimbursement over-covers it.
+        """
+        # Normal case: 2000 expense reduced by an 800 reimbursement.
+        expense1 = _tx("2026-05-01", 2000.0, _EXPENSE, transaction_hash="h-exp1")
+        reimb1 = _tx("2026-05-02", 800.0, _INCOME, transaction_hash="h-reimb1")
+        # Over-reimbursed case: 50 expense fully covered by a 3000 reimbursement.
+        expense2 = _tx("2026-05-03", 50.0, _EXPENSE, transaction_hash="h-exp2")
+        reimb2 = _tx("2026-05-04", 3000.0, _INCOME, transaction_hash="h-reimb2")
+
+        df = _frame([expense1, reimb1, expense2, reimb2])
+        df.loc[df["transaction_hash"] == "h-exp1", "linked_transaction_hash"] = "h-reimb1"
+        df.loc[df["transaction_hash"] == "h-reimb1", "linked_transaction_hash"] = "h-exp1"
+        df.loc[df["transaction_hash"] == "h-exp2", "linked_transaction_hash"] = "h-reimb2"
+        df.loc[df["transaction_hash"] == "h-reimb2", "linked_transaction_hash"] = "h-exp2"
+
+        result = net_linked_transactions(df)
+
+        # 800 (fully applied) + 50 (expense fully covered) = 850
+        self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 850.0)
+
+    def test_reimbursed_total_attr_is_zero_when_nothing_linked(self) -> None:
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE, transaction_hash="h1")])
+        result = net_linked_transactions(df)
+        self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 0.0)
+
+    def test_same_tx_type_pair_still_uses_magnitude_based_anchor(self) -> None:
+        """Two linked rows of the same tx_type (outside the reimbursement use case)
+        keep the original magnitude-based anchor selection -- this fix only changes
+        behavior for expense+income pairs."""
+        big_expense = _tx("2026-05-01", 500.0, _EXPENSE, transaction_hash="h-big")
+        small_expense = _tx("2026-05-02", 100.0, _EXPENSE, transaction_hash="h-small")
+        df = _frame([big_expense, small_expense])
+        df.loc[df["transaction_hash"] == "h-big", "linked_transaction_hash"] = "h-small"
+        df.loc[df["transaction_hash"] == "h-small", "linked_transaction_hash"] = "h-big"
+
+        result = net_linked_transactions(df)
+
+        self.assertEqual(len(result), 1)
+        anchor = result.iloc[0]
+        self.assertEqual(anchor["transaction_hash"], "h-big")
+        self.assertAlmostEqual(anchor["amount"], 600.0)
+
 
 class BuildLedgerLinkedTransactionHashTests(unittest.TestCase):
     """Test that `build_ledger` includes the `linked_transaction_hash` field."""

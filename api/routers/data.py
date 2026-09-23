@@ -286,6 +286,8 @@ class CashFlowResponse(BaseModel):
     flagged_count: int
     savings_rate: float
     """Fraction (0.6 = 60%), not percentage points."""
+    reimbursed: float
+    """Total amount netted out of expenses this period via linked reimbursement pairs."""
     month_over_month: list[CashFlowSeriesItem]
     weekly_trend: list[WeeklyTrendItem]
     rolling_30d_spend: list[RollingSpendItem]

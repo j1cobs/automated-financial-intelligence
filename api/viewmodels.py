@@ -82,32 +82,49 @@ def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
     For each pair where BOTH legs are present in `df` (a leg whose partner isn't in this
     frame -- e.g. filtered out by date range, or excluded as a duplicate upstream by
     `exclude_duplicate_rows` -- is left completely untouched, as if unlinked; this is a
-    deliberate fallback, not a bug): the leg with the larger `amount` (Plaid's outflow-
-    positive convention -- the real expense) is the anchor. Its `amount`/`adjusted_amount`
-    are overwritten with the pair's summed net value (summing raw `amount` works directly:
-    a +3000 expense + a -2000 reimbursement = +1000 net, per Plaid's sign convention), and
-    the other leg's row is dropped entirely. The anchor's own date/category are kept as-is
-    -- the net is attributed to when/what the money was actually spent on.
+    deliberate fallback, not a bug):
+
+    - **expense + income pair** (the reimbursement use case this feature exists for): the
+      expense leg is ALWAYS the anchor, regardless of which leg's raw `amount` is larger.
+      Anchoring on magnitude instead of `tx_type` was the original bug -- Plaid's outflow-
+      positive sign convention means a reimbursement larger than its linked expense (e.g. a
+      paycheck accidentally linked to a small purchase) would flip the anchor to the income
+      leg while it kept the *expense* row's `tx_type`, silently deleting real income and
+      inflating expenses by nearly the reimbursement's full amount. The net amount
+      (expense - reimbursement magnitude) is clamped at zero: if the reimbursement exceeds
+      the expense, the expense leg is zeroed out and the excess survives as a new synthetic
+      income row (`tx_type="income"`), dated to the *reimbursement's* own date -- that's
+      when the extra cash actually arrived, not when the original expense happened. The
+      total amount actually applied to reduce an expense (never the synthetic-income
+      excess) is accumulated and exposed via `result.attrs["reimbursed_total"]`, read by
+      `build_cash_flow` for the "Reimbursed" stat tile.
+    - **any other pairing** (both legs the same `tx_type`, e.g. two expenses linked
+      together): unchanged fallback -- the leg with the larger `amount` is the anchor, and
+      its `amount`/`adjusted_amount` are overwritten with the pair's summed net value. This
+      case is outside the reimbursement use case this feature was built for.
+
+    The anchor's own date/category are kept as-is -- the net is attributed to when/what the
+    money was actually spent on.
 
     Called selectively, alongside `exclude_duplicate_rows`, by the aggregate-building
     endpoints in api/routers/data.py -- NOT by build_ledger, which always shows each
     transaction's real, individual amount.
     """
-    if "linked_transaction_hash" not in df.columns:
-        return df
-    linked_mask = df["linked_transaction_hash"].notna()
-    if not linked_mask.any():
+    if "linked_transaction_hash" not in df.columns or not df["linked_transaction_hash"].notna().any():
+        df.attrs.setdefault("reimbursed_total", 0.0)
         return df
 
     result = df.copy()
     hash_to_index = {h: i for i, h in zip(result.index, result["transaction_hash"])}
     drop_indices: set = set()
     processed: set = set()
+    synthetic_rows: list[dict] = []
+    reimbursed_total = 0.0
+    linked_mask = result["linked_transaction_hash"].notna()
 
     for idx in result.index[linked_mask]:
         if idx in processed or idx in drop_indices:
             continue
-        this_hash = result.at[idx, "transaction_hash"]
         partner_hash = result.at[idx, "linked_transaction_hash"]
         partner_idx = hash_to_index.get(partner_hash)
         if partner_idx is None or partner_idx == idx:
@@ -118,15 +135,44 @@ def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
 
         this_amount = result.at[idx, "amount"]
         partner_amount = result.at[partner_idx, "amount"]
-        net_amount = this_amount + partner_amount
+        this_type = result.at[idx, "tx_type"]
+        partner_type = result.at[partner_idx, "tx_type"]
 
-        anchor_idx, dropped_idx = (idx, partner_idx) if this_amount >= partner_amount else (partner_idx, idx)
-        result.at[anchor_idx, "amount"] = net_amount
-        result.at[anchor_idx, "adjusted_amount"] = -net_amount
-        drop_indices.add(dropped_idx)
+        if {this_type, partner_type} == {"expense", "income"}:
+            expense_idx = idx if this_type == "expense" else partner_idx
+            income_idx = partner_idx if this_type == "expense" else idx
+            expense_amount = result.at[expense_idx, "amount"]
+            income_amount = result.at[income_idx, "amount"]  # negative (Plaid inflow)
+            net_amount = expense_amount + income_amount
+
+            if net_amount >= 0:
+                result.at[expense_idx, "amount"] = net_amount
+                result.at[expense_idx, "adjusted_amount"] = -net_amount
+                reimbursed_total += expense_amount - net_amount
+            else:
+                excess = -net_amount
+                result.at[expense_idx, "amount"] = 0.0
+                result.at[expense_idx, "adjusted_amount"] = 0.0
+                reimbursed_total += expense_amount
+                synthetic = result.loc[income_idx].to_dict()
+                synthetic["transaction_hash"] = f"{result.at[income_idx, 'transaction_hash']}-excess"
+                synthetic["linked_transaction_hash"] = None
+                synthetic["amount"] = -excess
+                synthetic["adjusted_amount"] = excess
+                synthetic_rows.append(synthetic)
+            drop_indices.add(income_idx)
+        else:
+            net_amount = this_amount + partner_amount
+            anchor_idx, dropped_idx = (idx, partner_idx) if this_amount >= partner_amount else (partner_idx, idx)
+            result.at[anchor_idx, "amount"] = net_amount
+            result.at[anchor_idx, "adjusted_amount"] = -net_amount
+            drop_indices.add(dropped_idx)
 
     if drop_indices:
         result = result.drop(index=list(drop_indices))
+    if synthetic_rows:
+        result = pd.concat([result, pd.DataFrame(synthetic_rows)], ignore_index=True)
+    result.attrs["reimbursed_total"] = reimbursed_total
     return result
 
 
@@ -977,6 +1023,7 @@ def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
         "transfer_count": 0,
         "flagged_count": 0,
         "savings_rate": 0.0,
+        "reimbursed": 0.0,
         "month_over_month": [],
         "weekly_trend": [],
         "rolling_30d_spend": [],
@@ -996,6 +1043,7 @@ def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
     transfer_count = int((df["tx_type"] == "transfer").sum())
     flagged_count = int(df["is_outlier"].sum())
     savings_rate = (net_flow / income) if income > 0 else 0.0
+    reimbursed = float(df.attrs.get("reimbursed_total", 0.0))
 
     month_over_month = _wide_flow_series(df, "month")
     weekly_trend = _wide_flow_series(df, "week")
@@ -1052,6 +1100,7 @@ def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
         "transfer_count": transfer_count,
         "flagged_count": flagged_count,
         "savings_rate": savings_rate,
+        "reimbursed": reimbursed,
         "month_over_month": month_over_month,
         "weekly_trend": weekly_trend,
         "rolling_30d_spend": rolling_30d_spend,

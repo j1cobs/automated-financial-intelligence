@@ -262,6 +262,7 @@ export interface CashFlowResponse {
   transfer_count: number;
   flagged_count: number;
   savings_rate: number;
+  reimbursed: number;
   month_over_month: CashFlowSeriesItem[];
   weekly_trend: WeeklyTrendItem[];
   rolling_30d_spend: RollingSpendItem[];
