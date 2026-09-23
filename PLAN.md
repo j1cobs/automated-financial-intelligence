@@ -4665,6 +4665,86 @@ backfill limitation, and why layer 3 is deferred).
 
 ---
 
+## Phase 25 — Overview tab: masonry layout + trends/drift-label bug fixes — DONE (2026-09-23)
+
+> **Numbering note:** this file's last logged phase was 18, but `OverviewTab.tsx`/`NetWorthTrendChart.tsx` code
+> comments already referenced Phase 23 (Home tab retirement, folded into `build_overview`) and Phase 24 (the
+> former "Net Worth Trend" chart retitled "Financial Trends") as shipped, undocumented here. This entry is
+> numbered 25 to stay consistent with that existing code-comment sequence rather than pretend Phases 19-24 don't
+> exist; their actual content is not reconstructed here.
+
+Driven by direct use of the live dashboard (`/grill-with-docs` interview + a Chrome pass against the real deployed
+data), not a design brief. Six independent fixes to `OverviewTab.tsx` and its two closest collaborators:
+
+1. **Financial Trends chart split into 3 single-axis tabs** (`NetWorthTrendChart.tsx`): Daily / Net Worth / Rates,
+   replacing the old Daily/Monthly toggle whose Monthly tab overlaid 4 metrics on 3 simultaneous y-axes (dollars,
+   percent, a month-count) — an axis for a currently-hidden line stayed rendered regardless, and overlaying a
+   dollar *level* (net worth) against *rates* (savings rate, credit utilization) on shared gridlines implied a
+   comparability that isn't real. Normalizing/indexing all 4 onto one axis was considered and explicitly rejected
+   (see decisions below) in favor of keeping every axis honest. `emergency_fund_months` is dropped from this chart
+   entirely — it already has its own live-value card elsewhere on the tab.
+2. **Month-over-Month drift-percentage labels fixed — a real, total-failure bug, not a display nuance.**
+   `renderDriftLabel`'s `content` callback on `<LabelList>` read `props.payload`, which Recharts v3 never
+   populates for custom `content` callbacks (only `x`/`y`/`width`/`height`/`value`/`index`/`viewBox` survive its
+   internal SVG-attribute filter — `payload` isn't a valid SVG attribute name, so it's silently dropped, no error).
+   The result: the "+18%"/"-5%" vs-usual labels never rendered, for any category, on any real data, ever — confirmed
+   live before the fix (zero `<text>` nodes for the values, despite non-null `drift_pct` in the API response) and
+   after (every bar shows its label). Fixed by looking the row up via `index` into the chart's own `data` array
+   instead. Labels also moved from centered-inside-the-bar (suppressed under a width threshold) to just past the
+   bar's end, so a short bar (a small-dollar category) still gets a visible label. 5 new unit tests exercise
+   `renderDriftLabel` directly, bypassing Recharts, so a regression back to `payload` fails loudly instead of
+   shipping invisible again.
+3. **`MetricInfoBadge` (`MetricTile.tsx`) now closes on outside click** — previously only closed via its own
+   toggle button or Escape; a `containerRef`-scoped `mousedown` listener was ported from the identical pattern
+   already used in `MultiSelectPopover.tsx`.
+4. **Income Sources now reads the trailing-12-month window** (`api/viewmodels.py::build_overview`,
+   `income_src_df`), matching its sibling "top N" cards (Top Merchants, Top Categories, Month-over-Month). It
+   previously read the period-filtered `df`, silently following whatever the FilterBar's period picker was set
+   to (default: last 3 months) while every other card on the row ignored the filter — confirmed live: switching
+   this fixed the card from 3 rows to 7.
+5. **Committed/Recurring Spend and Upcoming Recurring Charges got clarifying subtitles** — they read as
+   near-duplicates from their titles alone; the former is an all-time total per description, the latter a
+   forward-looking next-charge-date projection from the median gap between past occurrences. (The related
+   `recurring_monthly_spend` metric definition in `metricInfo.ts`/`polarity.ts` is dead scaffolding from a
+   pre-Phase-23 Home-tab tile that was deliberately dropped as a product feature, not revived here — left as-is,
+   out of scope.)
+6. **New `MasonryColumns.tsx` layout component** — the 10 non-full-width cards (Biggest Expense, Upcoming
+   Recurring, Top Merchants, Committed/Recurring Spend, Emergency Fund, Asset Mix, Top Categories,
+   Month-over-Month, Owner Balances, Income Sources) no longer sit in fixed `grid-cols-2` row pairs; they flow
+   into a single pool balanced across two columns by real measured height (`ResizeObserver`-driven, greedy
+   assignment to whichever column's running total is currently smaller), so an unrelated pairing (e.g. Owner
+   Balances' 11+ rows next to Income Sources' 3) no longer leaves a block of dead whitespace under the shorter
+   card. Credit Utilization moved out of its old spot mid-list to sit full-width directly under Financial Trends,
+   ahead of the masonry pool, so the pool stays one unbroken sequence instead of splitting around it.
+
+**Decisions locked (from the `/grilling` interview):**
+
+| Question | Decision |
+|---|---|
+| Fix the drift labels' width threshold, or the whole rendering path? | The threshold wasn't the real bug — `payload` was always `undefined`; fixed via `index` lookup instead |
+| Combine all 4 trend metrics on one normalized/indexed axis? | **Rejected** — normalization solves the technical axis-conflation problem but sacrifices at-a-glance readability (the axis stops meaning "dollars"/"percent"), which is worse for a casual personal dashboard than the problem it fixes |
+| Equal-height row pairs (`items-stretch`) for every masonry-pool pair? | **Rejected** — user wants columns to end at the same total height without stretching/shrinking individual cards; solved via a balancing layout, not per-pair stretching |
+| Masonry balance implementation: CSS multi-column vs. JS-measured? | **JS-measured, greedy-by-running-height** — CSS `columns` fills the left column fully before spilling into the right (column-major), which would visually separate related cards (e.g. Biggest Expense from Upcoming Recurring) more than the row layout it replaces |
+| Wire up the dead `recurring_monthly_spend` metric while touching this area? | **No** — it requires new backend aggregation logic (no existing computation to surface), out of scope for a layout/clarity pass |
+
+### Verification
+
+- Python: `python -m unittest discover -s tests -v` — 434/434 passing, including a new
+  `test_income_breakdown_uses_trailing_12_months_not_the_period_filter` in `tests/test_api_viewmodels.py`.
+- Web: `cd web && npm run test -- --run` passes cleanly per file (308 tests across 21 files, including 5 new
+  `renderDriftLabel` regression tests in `OverviewTab.test.tsx`); the full-suite parallel run has pre-existing
+  5-second-timeout flakiness under machine load, reproduced identically on `dev` before this phase's changes —
+  not introduced here.
+- `npx tsc -b` and `npm run lint` — clean except pre-existing `CashFlowTab.tsx` unused-variable errors and
+  `AuthContext.tsx`/`TransactionsTab.tsx` warnings, all unrelated to and untouched by this phase.
+- `npm run format:check` — clean except pre-existing `package.json`/`package-lock.json` warnings, untouched here.
+- Live-verified in Chrome against the real dashboard: Financial Trends' 3 tabs render correctly with single
+  axes; Month-over-Month bars show visible signed percentages on every row; Credit Utilization sits directly
+  under Financial Trends; Income Sources shows 7 rows with a "Trailing 12 Months" subtitle (was 3, filter-driven,
+  before the fix); the masonry pool balances into two columns with no large dead-space gap.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
