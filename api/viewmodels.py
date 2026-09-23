@@ -111,8 +111,13 @@ def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
     transaction's real, individual amount.
     """
     if "linked_transaction_hash" not in df.columns or not df["linked_transaction_hash"].notna().any():
-        df.attrs.setdefault("reimbursed_total", 0.0)
-        return df
+        # Copy before mutating `.attrs` -- an empty/no-op upstream filter (`apply_filters`,
+        # `exclude_duplicate_rows`) can return the exact same frame object it was given,
+        # which may be the object backing `dataload.load_frames()`'s 60-second cache.
+        # Mutating it in place here would leak into that shared, supposedly read-only frame.
+        result = df.copy()
+        result.attrs = {**df.attrs, "reimbursed_total": df.attrs.get("reimbursed_total", 0.0)}
+        return result
 
     result = df.copy()
     hash_to_index = {h: i for i, h in zip(result.index, result["transaction_hash"])}
@@ -176,22 +181,48 @@ def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-_CATEGORY_TX_TYPE_OVERRIDES = {"INCOME": "income", "TRANSFER_IN": "transfer", "TRANSFER_OUT": "transfer"}
-
-
 def _apply_category_driven_tx_type(df: pd.DataFrame) -> pd.DataFrame:
     """Override `tx_type` for the categories where cash-flow direction is unambiguous
-    from the category alone: INCOME, TRANSFER_IN, TRANSFER_OUT. Every other category
-    (including LOAN_PAYMENTS, OTHER, UNCATEGORIZED, and all spend categories) keeps
-    whatever `_enrich_transactions`/`_classify_tx_type` (app/dashboard.py, frozen)
-    already computed from account_type + amount sign + description keywords.
+    from the category alone. Every other category (including LOAN_PAYMENTS, OTHER,
+    UNCATEGORIZED, and all spend categories) keeps whatever
+    `_enrich_transactions`/`_classify_tx_type` (app/dashboard.py, frozen) already
+    computed from account_type + amount sign + description keywords.
+
+    INCOME always overrides to "income", regardless of `category_source` -- pulling a
+    transaction *into* income on Plaid's say-so is low-risk (it only ever adds to
+    income, never silently removes real money from it).
+
+    TRANSFER_IN/TRANSFER_OUT only override to "transfer" when `category_source ==
+    "merchant"` -- i.e. the category traces back to a user's own correction via
+    merchant memory (`CascadeCategorizer`, `analytics/categorizer.py`; merchant memory
+    is only ever populated by `update_transaction_category`, `database/db.py`), not
+    when `category_source == "plaid"` (Plaid's own unverified automatic guess). Plaid
+    defaults an e-Transfer's category to TRANSFER_IN whenever the sender isn't a
+    recognized institution, with no way to tell "your own account" from "someone
+    else's money" -- trusting that guess unconditionally silently deletes real income.
+    Genuine self-transfers are still caught independently by
+    `_detect_internal_transfers` (app/dashboard.py), which matches on
+    amount/date/account rather than Plaid's category guess. `category_source` may be
+    absent (older test fixtures, or a caller that hasn't merged it in) -- treated the
+    same as "not merchant-sourced", i.e. no transfer override.
 
     This is also a working manual lever: recategorizing a transaction to TRANSFER_IN
-    (e.g. an insurance reimbursement) pulls it out of income without any new UI.
+    (e.g. an insurance reimbursement) pulls it out of income -- that correction is
+    exactly what sets `category_source = "merchant"` going forward.
     """
     result = df.copy()
-    override = result["category"].map(_CATEGORY_TX_TYPE_OVERRIDES)
-    result["tx_type"] = override.fillna(result["tx_type"])
+    category = result["category"]
+    category_source = result["category_source"] if "category_source" in result.columns else None
+
+    result.loc[category == "INCOME", "tx_type"] = "income"
+
+    user_driven_transfer = category.isin(["TRANSFER_IN", "TRANSFER_OUT"])
+    if category_source is not None:
+        user_driven_transfer &= category_source == "merchant"
+    else:
+        user_driven_transfer &= False
+    result.loc[user_driven_transfer, "tx_type"] = "transfer"
+
     return result
 
 

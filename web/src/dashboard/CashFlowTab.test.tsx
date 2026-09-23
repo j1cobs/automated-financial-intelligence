@@ -274,28 +274,6 @@ describe('CashFlowTab', () => {
     expect(chart.querySelectorAll('.recharts-line-curve').length).toBeGreaterThan(0);
   });
 
-  it('renders a brush/zoom control on the rolling spend chart at desktop widths (Fix 14)', () => {
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
-
-    renderCashFlowTab();
-
-    const chart = screen.getByTestId('rolling-spend-chart');
-    expect(chart.querySelector('.recharts-brush')).not.toBeNull();
-  });
-
-  it('omits the brush on narrow viewports', () => {
-    const originalWidth = window.innerWidth;
-    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 375 });
-    mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
-
-    renderCashFlowTab();
-
-    const chart = screen.getByTestId('rolling-spend-chart');
-    expect(chart.querySelector('.recharts-brush')).toBeNull();
-
-    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: originalWidth });
-  });
-
   it('displays formatted currency values', () => {
     mockUseCashFlow.mockReturnValue(mockQuerySuccess<CashFlowResponse>(baseMockData));
 

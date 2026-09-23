@@ -70,6 +70,15 @@ def _frame(rows) -> pd.DataFrame:
     return prepare_transactions(pd.DataFrame(rows))
 
 
+def _frame_with_category_source(rows, source: str | None) -> pd.DataFrame:
+    """Like `_frame`, but sets `category_source` on the raw frame BEFORE
+    `prepare_transactions` runs `_apply_category_driven_tx_type` -- setting it on
+    `_frame`'s already-computed output would be too late to affect `tx_type`."""
+    raw = pd.DataFrame(rows)
+    raw["category_source"] = source
+    return prepare_transactions(raw)
+
+
 def _account(key: str, owner: str, acct_type: str, balance: float, **overrides):
     row = {
         "account_key": key,
@@ -783,19 +792,74 @@ class ApplyCategoryDrivenTxTypeTests(unittest.TestCase):
         result = df.iloc[0]
         self.assertEqual(result["tx_type"], "income")
 
-    def test_transfer_in_category_overrides_to_transfer(self) -> None:
-        # TRANSFER_IN category always becomes "transfer", regardless of amount sign.
+    def test_transfer_in_category_overrides_to_transfer_when_merchant_sourced(self) -> None:
+        # TRANSFER_IN becomes "transfer" when category_source == "merchant" -- the
+        # category traces back to a user's own correction (CascadeCategorizer's
+        # merchant-memory layer), so it's a genuine, deliberate exclusion.
         row = _tx("2026-05-01", 100.0, _EXPENSE, category="TRANSFER_IN", transaction_hash="h1")
-        df = _frame([row])
+        df = _frame_with_category_source([row], "merchant")
         result = df.iloc[0]
         self.assertEqual(result["tx_type"], "transfer")
 
-    def test_transfer_out_category_overrides_to_transfer(self) -> None:
-        # TRANSFER_OUT category always becomes "transfer", regardless of amount sign.
+    def test_transfer_out_category_overrides_to_transfer_when_merchant_sourced(self) -> None:
+        # Same as above, for TRANSFER_OUT.
         row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_OUT", transaction_hash="h1")
-        df = _frame([row])
+        df = _frame_with_category_source([row], "merchant")
         result = df.iloc[0]
         self.assertEqual(result["tx_type"], "transfer")
+
+    def test_transfer_in_category_does_not_override_when_plaid_sourced(self) -> None:
+        # Regression test for the root cause of the -1935.5% savings-rate bug: Plaid's
+        # own unverified TRANSFER_IN guess (e.g. an unlabeled e-Transfer) must NOT
+        # silently delete real income. A negative amount on a depository account stays
+        # "income" per the heuristic, since nothing here confirms it's actually a
+        # transfer between the user's own accounts.
+        row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_IN", transaction_hash="h1")
+        df = _frame_with_category_source([row], "plaid")
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "income")
+
+    def test_transfer_out_category_does_not_override_when_plaid_sourced(self) -> None:
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="TRANSFER_OUT", transaction_hash="h1")
+        df = _frame_with_category_source([row], "plaid")
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_transfer_in_category_does_not_override_when_category_source_missing(self) -> None:
+        # `category_source` may be absent entirely (older fixtures, or a caller that
+        # hasn't merged it in) -- treated the same as "not merchant-sourced", i.e. no
+        # transfer override, not a KeyError.
+        row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_IN", transaction_hash="h1")
+        df = _frame([row])
+        self.assertNotIn("category_source", df.columns)
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "income")
+
+    def test_transfer_in_category_still_caught_by_internal_transfer_detection(self) -> None:
+        # Even with a Plaid-sourced (unverified) TRANSFER_IN guess that this override
+        # now leaves alone, a GENUINE self-transfer is still independently caught by
+        # _detect_internal_transfers (matching amount/date across the user's own
+        # accounts) -- this override being narrower doesn't weaken that detection.
+        outflow = _tx(
+            "2026-05-01",
+            500.0,
+            _EXPENSE,
+            category="TRANSFER_OUT",
+            transaction_hash="h-out",
+            account_name="Chequing",
+        )
+        inflow = _tx(
+            "2026-05-02",
+            500.0,
+            _INCOME,
+            category="TRANSFER_IN",
+            transaction_hash="h-in",
+            account_name="Savings",
+        )
+        df = _frame_with_category_source([outflow, inflow], "plaid")
+        result = df.set_index("transaction_hash")
+        self.assertEqual(result.loc["h-out", "tx_type"], "transfer")
+        self.assertEqual(result.loc["h-in", "tx_type"], "transfer")
 
     def test_medical_category_does_not_override_heuristic(self) -> None:
         # MEDICAL is a spend category, NOT in the override map. A positive amount
@@ -1260,6 +1324,19 @@ class NetLinkedTransactionsUnitTests(unittest.TestCase):
         df = _frame([_tx("2026-05-01", 100.0, _EXPENSE, transaction_hash="h1")])
         result = net_linked_transactions(df)
         self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 0.0)
+
+    def test_no_op_path_does_not_mutate_input_frames_attrs(self) -> None:
+        """The early-return "nothing linked" path must copy before setting `.attrs` --
+        an empty/no-op upstream filter can hand back the exact same frame object that
+        backs dataload.load_frames()'s shared 60-second cache, and mutating a shared
+        frame's `.attrs` in place would leak into that cache."""
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE, transaction_hash="h1")])
+        self.assertNotIn("reimbursed_total", df.attrs)
+
+        result = net_linked_transactions(df)
+
+        self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 0.0)
+        self.assertNotIn("reimbursed_total", df.attrs)
 
     def test_same_tx_type_pair_still_uses_magnitude_based_anchor(self) -> None:
         """Two linked rows of the same tx_type (outside the reimbursement use case)

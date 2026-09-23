@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   ComposedChart,
   BarChart,
   Bar,
-  Brush,
   Line,
   LineChart,
   XAxis,
@@ -43,44 +42,12 @@ import {
   legendProps,
   referenceLineProps,
   surfaceGapProps,
-  surfaceColor,
-  axisColor,
   CHART_MARGIN,
   BAR_MAX_SIZE,
   BAR_RADIUS,
   LINE_PROPS,
   activeDotProps,
 } from './chartTheme';
-
-/**
- * Whether the viewport is wide enough for a brush/zoom control to earn its space --
- * below the `sm` breakpoint (640px) it competes with the chart itself for a narrow
- * strip of height, so it's omitted rather than shrunk further (PLAN.md Phase 15,
- * Fix 14: "keep it out of the way on small viewports").
- */
-function useShowBrush(): boolean {
-  const [show, setShow] = useState(() => typeof window === 'undefined' || window.innerWidth >= 640);
-  useEffect(() => {
-    function onResize() {
-      setShow(window.innerWidth >= 640);
-    }
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  return show;
-}
-
-/** Tokenized styling for a Recharts `<Brush>` -- the traveller handles and
- *  selection window read from the same chart chrome tokens as the axes. */
-function brushProps() {
-  return {
-    stroke: axisColor(),
-    fill: surfaceColor(),
-    travellerWidth: 8,
-    height: 20,
-    tickFormatter: () => '',
-  } as const;
-}
 
 /** "Other" bucket for the categorical tail — see `pivotCategoryHeatmap`. */
 const OTHER_LABEL = 'Other';
@@ -460,7 +427,6 @@ export function CashFlowTab({
 }) {
   const { data, isLoading, error, refetch } = useCashFlow();
   const themeEpoch = useChartTheme();
-  const showBrush = useShowBrush();
   const [previewPeriod, setPreviewPeriod] = useState<{
     label: string;
     dateFrom: string;
@@ -695,7 +661,6 @@ export function CashFlowTab({
                   dot={false}
                   activeDot={activeDotProps()}
                 />
-                {showBrush && <Brush dataKey="date" {...brushProps()} />}
               </LineChart>
             </ResponsiveContainer>
           </div>
