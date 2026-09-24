@@ -233,3 +233,106 @@ class BudgetPeriodDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildBudgetPeriodTests(unittest.TestCase):
+    """build_budget's contract at the boundary the UI depends on."""
+
+    def _frame(self, rows):
+        import pandas as pd
+
+        return pd.DataFrame(rows)
+
+    def _rows(self, month="2026-09"):
+        return [
+            {
+                "month": month,
+                "tx_type": "expense",
+                "category": "FOOD_AND_DRINK",
+                "adjusted_amount": -120.0,
+                "pfc_detailed": "FOOD_AND_DRINK_GROCERIES",
+            },
+            {
+                "month": month,
+                "tx_type": "expense",
+                "category": "FOOD_AND_DRINK",
+                "adjusted_amount": -80.0,
+                "pfc_detailed": "FOOD_AND_DRINK_RESTAURANT",
+            },
+        ]
+
+    def test_absent_cap_is_none_not_zero(self):
+        from api.viewmodels import build_budget
+
+        result = build_budget(self._frame(self._rows()), [], period="2026-09")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertIsNone(item["limit"])
+        self.assertIsNone(item["pct"])
+        self.assertFalse(item["is_over_budget"])
+
+    def test_zero_cap_is_a_real_cap_and_is_breached_by_any_spend(self):
+        from api.viewmodels import build_budget
+
+        caps = [{"category": "FOOD_AND_DRINK", "period": "2026-09", "monthly_limit": 0}]
+        result = build_budget(self._frame(self._rows()), caps, period="2026-09")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertEqual(item["limit"], 0.0)
+        self.assertTrue(item["is_over_budget"])
+        self.assertEqual(item["pct"], 1.0)
+
+    def test_inherited_cap_names_its_source_month(self):
+        from api.viewmodels import build_budget
+
+        caps = [{"category": "FOOD_AND_DRINK", "period": "2026-07", "monthly_limit": 400}]
+        result = build_budget(self._frame(self._rows()), caps, period="2026-09")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertTrue(item["is_inherited"])
+        self.assertEqual(item["inherited_from"], "2026-07")
+
+    def test_explicit_cap_is_not_marked_inherited(self):
+        from api.viewmodels import build_budget
+
+        caps = [{"category": "FOOD_AND_DRINK", "period": "2026-09", "monthly_limit": 400}]
+        result = build_budget(self._frame(self._rows()), caps, period="2026-09")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertFalse(item["is_inherited"])
+        self.assertIsNone(item["inherited_from"])
+
+    def test_detail_breakdown_sums_to_the_category_total(self):
+        from api.viewmodels import build_budget
+
+        result = build_budget(self._frame(self._rows()), [], period="2026-09")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertEqual(
+            sorted(d["pfc_detailed"] for d in item["details"]),
+            ["FOOD_AND_DRINK_GROCERIES", "FOOD_AND_DRINK_RESTAURANT"],
+        )
+        self.assertAlmostEqual(sum(d["amount"] for d in item["details"]), item["spent"])
+
+    def test_detail_breakdown_keeps_rows_with_no_plaid_detail(self):
+        """Otherwise the parts silently stop summing to the whole."""
+        from api.viewmodels import build_budget
+
+        rows = self._rows()
+        rows.append(
+            {
+                "month": "2026-09",
+                "tx_type": "expense",
+                "category": "FOOD_AND_DRINK",
+                "adjusted_amount": -20.0,
+                "pfc_detailed": None,
+            }
+        )
+        result = build_budget(self._frame(rows), [], period="2026-09")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertIn(None, [d["pfc_detailed"] for d in item["details"]])
+        self.assertAlmostEqual(sum(d["amount"] for d in item["details"]), item["spent"])
+
+    def test_requested_month_selects_that_month_not_the_latest(self):
+        from api.viewmodels import build_budget
+
+        rows = self._rows("2026-08") + self._rows("2026-09")
+        result = build_budget(self._frame(rows), [], period="2026-08")
+        self.assertEqual(result["month"], "2026-08")
+        item = next(i for i in result["items"] if i["category"] == "FOOD_AND_DRINK")
+        self.assertAlmostEqual(item["spent"], 200.0)

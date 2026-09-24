@@ -298,6 +298,16 @@ class CashFlowResponse(BaseModel):
     category_distribution: list[CategoryDistributionItem]
 
 
+class BudgetDetail(BaseModel):
+    """One `pfc_detailed` value's spend inside a category, for the drill-down.
+    `pfc_detailed` is None for rows Plaid never gave a detail for (seed data,
+    manual corrections); those are kept rather than dropped so the parts sum to
+    the category total."""
+
+    pfc_detailed: str | None
+    amount: float
+
+
 class BudgetItem(BaseModel):
     category: str
     spent: float
@@ -313,6 +323,7 @@ class BudgetItem(BaseModel):
     period: str | None
     is_inherited: bool
     inherited_from: str | None
+    details: list[BudgetDetail] = []
 
 
 class BudgetResponse(BaseModel):

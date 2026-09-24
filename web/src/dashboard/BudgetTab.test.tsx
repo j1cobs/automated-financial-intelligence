@@ -80,6 +80,20 @@ const createMockMutationResult = (
     ...overrides,
   }) as unknown as UseMutationResult<void, Error, { category: string; monthlyLimit: number }>;
 
+/** Mirrors BudgetTab's own month helpers; the tab defaults to this month. */
+function currentMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function currentMonthLabel(): string {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
 const mockBudgetData: BudgetResponse = {
   month: 'August 2026',
   items: [
@@ -97,6 +111,8 @@ const mockBudgetData: BudgetResponse = {
       is_inherited: false,
 
       inherited_from: null,
+
+      details: [],
     },
     {
       category: 'Dining Out',
@@ -112,6 +128,8 @@ const mockBudgetData: BudgetResponse = {
       is_inherited: false,
 
       inherited_from: null,
+
+      details: [],
     },
     {
       category: 'Entertainment',
@@ -127,6 +145,8 @@ const mockBudgetData: BudgetResponse = {
       is_inherited: false,
 
       inherited_from: null,
+
+      details: [],
     },
   ],
 };
@@ -222,7 +242,10 @@ describe('BudgetTab', () => {
 
     renderWithQueryClient(<BudgetTab />);
 
-    expect(screen.getByText('August 2026')).toBeInTheDocument();
+    // The header shows the month the user has selected, not an echo of
+    // `data.month`: the selector drives the request, so showing the selection
+    // keeps the label steady instead of flickering while the fetch resolves.
+    expect(screen.getByText(currentMonthLabel())).toBeInTheDocument();
     expect(screen.getByText('Groceries')).toBeInTheDocument();
     expect(screen.getByText('Dining Out')).toBeInTheDocument();
     expect(screen.getByText('Entertainment')).toBeInTheDocument();
@@ -261,6 +284,8 @@ describe('BudgetTab', () => {
           is_inherited: false,
 
           inherited_from: null,
+
+          details: [],
         },
       ],
     };
@@ -361,9 +386,12 @@ describe('BudgetTab', () => {
     await userEvent.click(saveButton);
 
     await waitFor(() => {
+      // The month is always named, so editing an inherited cap writes an
+      // explicit row for the displayed month and leaves other months alone.
       expect(mockMutateAsync).toHaveBeenCalledWith({
         category: 'Groceries',
         monthlyLimit: 500,
+        month: currentMonthKey(),
       });
     });
   });
@@ -426,5 +454,104 @@ describe('BudgetTab', () => {
 
     expect(container.querySelector('.recharts-line')).not.toBeNull();
     expect(screen.queryAllByText('No trend').length).toBeGreaterThan(0); // other rows still lack history
+  });
+
+  // ---- Phase 29: month navigation, inheritance labelling, drill-down ----
+
+  it('asks the API for the selected month, and moves a month at a time', async () => {
+    mockHappyPath();
+    renderWithQueryClient(<BudgetTab />);
+
+    expect(vi.mocked(useBudget)).toHaveBeenLastCalledWith(currentMonthKey());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Previous month' }));
+
+    const [year, month] = currentMonthKey().split('-').map(Number);
+    const previous = new Date(year, month - 2, 1);
+    const expected = `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`;
+    expect(vi.mocked(useBudget)).toHaveBeenLastCalledWith(expected);
+  });
+
+  it('disables "This month" only while the current month is shown', async () => {
+    mockHappyPath();
+    renderWithQueryClient(<BudgetTab />);
+
+    expect(screen.getByRole('button', { name: 'This month' })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Previous month' }));
+    expect(screen.getByRole('button', { name: 'This month' })).toBeEnabled();
+  });
+
+  it('says where an inherited cap came from', () => {
+    mockHappyPath({
+      month: currentMonthKey(),
+      items: [
+        {
+          category: 'Groceries',
+          spent: 250,
+          limit: 400,
+          pct: 0.625,
+          is_over_budget: false,
+          projected_eom: 350,
+          is_current_month: true,
+          period: currentMonthKey(),
+          is_inherited: true,
+          inherited_from: '2026-03',
+          details: [],
+        },
+      ],
+    });
+    renderWithQueryClient(<BudgetTab />);
+
+    expect(screen.getByText(/inherited from March 2026/)).toBeInTheDocument();
+  });
+
+  it('does not label an explicitly-set cap as inherited', () => {
+    mockHappyPath();
+    renderWithQueryClient(<BudgetTab />);
+
+    expect(screen.queryByText(/inherited from/)).not.toBeInTheDocument();
+  });
+
+  it('expands a category to its sub-category breakdown', async () => {
+    mockHappyPath({
+      month: currentMonthKey(),
+      items: [
+        {
+          category: 'FOOD_AND_DRINK',
+          spent: 200,
+          limit: 400,
+          pct: 0.5,
+          is_over_budget: false,
+          projected_eom: 250,
+          is_current_month: true,
+          period: currentMonthKey(),
+          is_inherited: false,
+          inherited_from: null,
+          details: [
+            { pfc_detailed: 'FOOD_AND_DRINK_GROCERIES', amount: 120 },
+            { pfc_detailed: null, amount: 80 },
+          ],
+        },
+      ],
+    });
+    renderWithQueryClient(<BudgetTab />);
+
+    expect(screen.queryByText('$120.00')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /breakdown \(2\)/i }));
+
+    expect(screen.getByText('$120.00')).toBeInTheDocument();
+    // A row with no Plaid detail is shown rather than dropped, so the parts
+    // still sum to the category total.
+    expect(screen.getByText('Unspecified')).toBeInTheDocument();
+    expect(screen.getByText('$80.00')).toBeInTheDocument();
+  });
+
+  it('offers no breakdown control when there is nothing to break down', () => {
+    mockHappyPath();
+    renderWithQueryClient(<BudgetTab />);
+
+    expect(screen.queryByRole('button', { name: /breakdown/i })).not.toBeInTheDocument();
   });
 });

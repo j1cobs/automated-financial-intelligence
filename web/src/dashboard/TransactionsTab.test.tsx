@@ -1471,9 +1471,7 @@ describe('LEDGER_COLUMN_WIDTHS', () => {
   });
 
   it('adds exactly one column when detail is shown', () => {
-    expect(LEDGER_COLUMN_WIDTHS.withDetail).toHaveLength(
-      LEDGER_COLUMN_WIDTHS.withoutDetail.length + 1,
-    );
+    expect(LEDGER_COLUMN_WIDTHS.withDetail).toHaveLength(LEDGER_COLUMN_WIDTHS.withoutDetail.length + 1);
   });
 
   it('gives every column a positive width', () => {
@@ -1535,10 +1533,7 @@ describe('plain ledger table column discipline', () => {
     // Detail column is off by default, so the 8-column set applies.
     expect(cols).toHaveLength(LEDGER_COLUMN_WIDTHS.withoutDetail.length);
 
-    const total = cols.reduce(
-      (sum, col) => sum + Number.parseFloat((col as HTMLElement).style.width),
-      0,
-    );
+    const total = cols.reduce((sum, col) => sum + Number.parseFloat((col as HTMLElement).style.width), 0);
     expect(total).toBeCloseTo(100, 5);
   });
 });

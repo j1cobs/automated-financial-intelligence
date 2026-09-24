@@ -61,11 +61,19 @@ export function useCashFlow() {
   });
 }
 
-export function useBudget() {
+/** `month` ('YYYY-MM') selects the budget month; omitted means the latest month
+ *  in the filtered data. The parameter is `month`, not `period`, because the
+ *  filter bar already owns `period` and its values are presets like 'all_time'. */
+export function useBudget(month?: string | null) {
   const { filters } = useFilters();
   return useQuery({
-    queryKey: [...budgetQueryKey, filters],
-    queryFn: () => apiFetch<BudgetResponse>(withFilters('/budget', filters)),
+    queryKey: [...budgetQueryKey, filters, month ?? null],
+    queryFn: () => {
+      const base = withFilters('/budget', filters);
+      if (!month) return apiFetch<BudgetResponse>(base);
+      const separator = base.includes('?') ? '&' : '?';
+      return apiFetch<BudgetResponse>(`${base}${separator}month=${encodeURIComponent(month)}`);
+    },
   });
 }
 

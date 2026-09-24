@@ -1173,16 +1173,42 @@ def build_budget(
         resolve_caps_detailed(budget_rows, month_str) if month_str else {}
     )
 
+    details_by_category: dict[str, list[dict[str, Any]]] = {}
     if df.empty or month_str is None:
         period_expenses: dict[str, float] = {}
     else:
+        month_expenses = df[(df["month"] == month_str) & (df["tx_type"] == "expense")]
         period_expenses = (
-            df[(df["month"] == month_str) & (df["tx_type"] == "expense")]
-            .groupby("category")["adjusted_amount"]
-            .sum()
-            .abs()
-            .to_dict()
+            month_expenses.groupby("category")["adjusted_amount"].sum().abs().to_dict()
         )
+
+        # Sub-category breakdown for the drill-down. There is no
+        # pfc_primary -> pfc_detailed table anywhere; `pfc_detailed` is a column
+        # on the transaction (merged in by api/dataload.py), so the breakdown is
+        # whatever detail values actually occur under that category this month.
+        # Rows with no Plaid detail (seed data, manual corrections) group under
+        # None rather than being dropped, so the parts always sum to the whole.
+        if "pfc_detailed" in month_expenses.columns:
+            detail_frame = month_expenses.copy()
+            detail_frame["pfc_detailed"] = detail_frame["pfc_detailed"].where(
+                detail_frame["pfc_detailed"].notna(), None
+            )
+            grouped = (
+                detail_frame.groupby(["category", "pfc_detailed"], dropna=False)[
+                    "adjusted_amount"
+                ]
+                .sum()
+                .abs()
+            )
+            for (cat, detail), amount in grouped.items():
+                details_by_category.setdefault(cat, []).append(
+                    {
+                        "pfc_detailed": None if pd.isna(detail) else detail,
+                        "amount": float(amount),
+                    }
+                )
+            for entries in details_by_category.values():
+                entries.sort(key=lambda entry: entry["amount"], reverse=True)
 
     projection_factor = None
     if is_current_month:
@@ -1222,6 +1248,7 @@ def build_budget(
                 "inherited_from": (
                     source_period if source_period is not None and source_period != month_str else None
                 ),
+                "details": details_by_category.get(cat, []),
             }
         )
 

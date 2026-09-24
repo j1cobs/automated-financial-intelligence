@@ -274,6 +274,13 @@ export interface CashFlowResponse {
 // GET /budget
 // ---------------------------------------------------------------------------
 
+export interface BudgetDetail {
+  /** null for rows Plaid gave no detail for (seed data, manual corrections).
+   *  Kept rather than dropped so the parts sum to the category total. */
+  pfc_detailed: string | null;
+  amount: number;
+}
+
 export interface BudgetItem {
   category: string;
   spent: number;
@@ -291,6 +298,8 @@ export interface BudgetItem {
   is_inherited: boolean;
   /** The month the inherited cap was actually set in, else null. */
   inherited_from: string | null;
+  /** Sub-category spend for the drill-down, largest first. */
+  details: BudgetDetail[];
 }
 
 export interface BudgetResponse {

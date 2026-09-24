@@ -56,16 +56,43 @@ function emptyItem(category: string, isCurrentMonth: boolean, period: string | n
     period,
     is_inherited: false,
     inherited_from: null,
+
+    details: [],
   };
 }
 
+/** 'YYYY-MM' for the current calendar month, in local time. */
+function currentMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Step a 'YYYY-MM' key by whole months, wrapping across the year boundary. */
+function shiftMonth(key: string, delta: number): string {
+  const [year, month] = key.split('-').map(Number);
+  // Month is 0-indexed here, so `month - 1 + delta` lets Date normalise the
+  // year rollover for us rather than doing modular arithmetic by hand.
+  const shifted = new Date(year, month - 1 + delta, 1);
+  return `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function formatMonth(key: string): string {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
 export function BudgetTab() {
-  const { data, isPending, error, refetch } = useBudget();
+  const [month, setMonth] = useState<string>(currentMonthKey);
+  const { data, isPending, error, refetch } = useBudget(month);
   const { data: categoriesData } = useCategories();
   const { data: cashFlow } = useCashFlow();
   const upsertMutation = useUpsertBudget();
   const [editingCategory, setEditingCategory] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Record<string, number>>({});
+  const [expanded, setExpanded] = useState<string | null>(null);
   useChartTheme(); // re-render sparklines when the theme flips
 
   const budgetItems = useMemo(() => data?.items ?? [], [data]);
@@ -117,7 +144,9 @@ export function BudgetTab() {
     const newLimit = editValues[category];
     if (newLimit !== undefined) {
       try {
-        await upsertMutation.mutateAsync({ category, monthlyLimit: newLimit });
+        // Always names the displayed month: editing an inherited cap writes an
+        // explicit row here and leaves every other month alone.
+        await upsertMutation.mutateAsync({ category, monthlyLimit: newLimit, month });
         setEditingCategory(null);
         setEditValues({});
       } catch (err) {
@@ -133,9 +162,34 @@ export function BudgetTab() {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div>
-        <h2 className="text-base sm:text-lg font-semibold text-ink">Budget</h2>
-        {data?.month && <p className="text-xs sm:text-sm text-ink-muted mt-1">{data.month}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base sm:text-lg font-semibold text-ink">Budget</h2>
+          <p className="mt-1 text-xs text-ink-muted sm:text-sm">{formatMonth(month)}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => setMonth((current) => shiftMonth(current, -1))}
+            aria-label="Previous month"
+          >
+            Previous
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setMonth(currentMonthKey())}
+            disabled={month === currentMonthKey()}
+          >
+            This month
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setMonth((current) => shiftMonth(current, 1))}
+            aria-label="Next month"
+          >
+            Next
+          </Button>
+        </div>
       </div>
 
       {allItems.length === 0 ? (
@@ -156,6 +210,10 @@ export function BudgetTab() {
               onSave={() => handleSave(item.category)}
               onCancel={handleCancel}
               onValueChange={(value) => setEditValues({ ...editValues, [item.category]: value })}
+              isExpanded={expanded === item.category}
+              onToggleExpand={() =>
+                setExpanded((current) => (current === item.category ? null : item.category))
+              }
             />
           ))}
         </div>
@@ -174,6 +232,8 @@ interface BudgetItemRowProps {
   onSave: () => void;
   onCancel: () => void;
   onValueChange: (value: number) => void;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
 }
 
 /** Status badge — glyph + label, never colour alone (see `DIRECTION_GLYPH` / polarity.ts). */
@@ -197,6 +257,8 @@ function BudgetItemRow({
   onSave,
   onCancel,
   onValueChange,
+  isExpanded,
+  onToggleExpand,
 }: BudgetItemRowProps) {
   const progressPercent = item.pct != null ? Math.min(item.pct * 100, 100) : 0;
   const isOver = item.is_over_budget;
@@ -254,6 +316,41 @@ function BudgetItemRow({
               <span className="text-ink-muted"> · Projected EOM: {money(item.projected_eom)}</span>
             ) : (
               !item.is_current_month && <span className="text-ink-muted"> · Actual: {money(item.spent)}</span>
+            )}
+            {/* An inherited cap was never set for this month -- say so, and say
+                where it came from, rather than presenting it as a decision made
+                here. Editing it writes an explicit row for this month only. */}
+            {item.is_inherited && item.inherited_from && (
+              <span className="text-ink-muted"> · inherited from {formatMonth(item.inherited_from)}</span>
+            )}
+          </div>
+        )}
+
+        {item.details.length > 0 && !isEditing && (
+          <div className="mt-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onToggleExpand}
+              aria-expanded={isExpanded}
+              className="min-h-0 px-0 py-0"
+            >
+              {isExpanded ? 'Hide breakdown' : `Breakdown (${item.details.length})`}
+            </Button>
+            {isExpanded && (
+              <ul className="mt-1 space-y-0.5 border-l border-hairline pl-3">
+                {item.details.map((detail) => (
+                  <li
+                    key={detail.pfc_detailed ?? '__none__'}
+                    className="flex justify-between gap-4 text-xs text-ink-secondary tabular-nums"
+                  >
+                    <span className="truncate">
+                      {detail.pfc_detailed ? formatCategory(detail.pfc_detailed) : 'Unspecified'}
+                    </span>
+                    <span className="shrink-0">{money(detail.amount)}</span>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         )}
