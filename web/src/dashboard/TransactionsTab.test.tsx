@@ -21,7 +21,7 @@ vi.mock('recharts', async (importOriginal) => {
   };
 });
 
-import { TransactionsTab } from './TransactionsTab';
+import { TransactionsTab, LEDGER_COLUMN_WIDTHS } from './TransactionsTab';
 import type {
   LedgerResponse,
   AnomaliesResponse,
@@ -1452,5 +1452,93 @@ describe('TransactionsTab', () => {
         screen.getByText('Failed to save your change. It has been reverted — please try again.'),
       ).toBeInTheDocument();
     });
+  });
+});
+
+// Phase 27. The ledger's declared column widths used to sum to 103% normally
+// and 114% with the Plaid-detail column shown; `tableLayout: fixed` then
+// rescaled every column proportionally, so enabling detail silently shrank all
+// of them by ~12% and unconstrained cells spilled into their neighbours.
+describe('LEDGER_COLUMN_WIDTHS', () => {
+  it('sums to exactly 100% without the Plaid-detail column', () => {
+    const total = LEDGER_COLUMN_WIDTHS.withoutDetail.reduce((sum, width) => sum + width, 0);
+    expect(total).toBe(100);
+  });
+
+  it('sums to exactly 100% with the Plaid-detail column', () => {
+    const total = LEDGER_COLUMN_WIDTHS.withDetail.reduce((sum, width) => sum + width, 0);
+    expect(total).toBe(100);
+  });
+
+  it('adds exactly one column when detail is shown', () => {
+    expect(LEDGER_COLUMN_WIDTHS.withDetail).toHaveLength(
+      LEDGER_COLUMN_WIDTHS.withoutDetail.length + 1,
+    );
+  });
+
+  it('gives every column a positive width', () => {
+    for (const width of [...LEDGER_COLUMN_WIDTHS.withDetail, ...LEDGER_COLUMN_WIDTHS.withoutDetail]) {
+      expect(width).toBeGreaterThan(0);
+    }
+  });
+});
+
+// Regression for Phase 27 Bug A: the plain (<50-row) table had no `<colgroup>`
+// and no fixed layout at all, so its columns were sized by whatever content
+// happened to be in the rows. Only the virtualized path was constrained.
+describe('plain ledger table column discipline', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  function renderSmallLedger() {
+    const ledger: LedgerResponse = {
+      transactions: [
+        {
+          hash: 'tx-1',
+          date: '2024-01-15',
+          account_name: 'Checking',
+          owner_name: 'John Doe',
+          description: 'Grocery Store',
+          amount: -50.25,
+          category: 'FOOD_AND_DRINK',
+          tx_type: 'expense',
+          is_recurring: false,
+          is_duplicate: false,
+          pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
+          category_source: 'plaid',
+          linked_transaction_hash: null,
+        },
+      ],
+    };
+    mockedUseLedger.mockReturnValue(mockQuerySuccess(ledger));
+    mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+    mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['FOOD_AND_DRINK'] }));
+    setDefaultMutations();
+    return renderComponent();
+  }
+
+  it('renders a colgroup and fixed layout on the plain path', () => {
+    const { container } = renderSmallLedger();
+
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(table!.style.tableLayout).toBe('fixed');
+    expect(table!.querySelector('colgroup')).not.toBeNull();
+  });
+
+  it('declares one col per column, summing to 100%', () => {
+    const { container } = renderSmallLedger();
+
+    const cols = Array.from(container.querySelectorAll('colgroup col'));
+    // Detail column is off by default, so the 8-column set applies.
+    expect(cols).toHaveLength(LEDGER_COLUMN_WIDTHS.withoutDetail.length);
+
+    const total = cols.reduce(
+      (sum, col) => sum + Number.parseFloat((col as HTMLElement).style.width),
+      0,
+    );
+    expect(total).toBeCloseTo(100, 5);
   });
 });

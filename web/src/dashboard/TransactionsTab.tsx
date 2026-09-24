@@ -379,20 +379,37 @@ function LedgerRow({
         tx.is_duplicate ? 'bg-surface-2 text-ink-muted' : 'hover:bg-surface-2'
       }`}
     >
-      <td className="px-2 py-2 sm:px-4 sm:py-3">{formatDate(tx.date)}</td>
-      <td className="max-w-[7rem] px-2 py-2 sm:max-w-[11rem] sm:px-4 sm:py-3">
-        <div className="truncate">{tx.account_name}</div>
-        {tx.owner_name && <div className="truncate text-xs text-ink-muted">{tx.owner_name}</div>}
+      {/* Every cell clips rather than overflows. With `tableLayout: fixed` an
+          unconstrained cell renders past its column edge and over whatever sits
+          to its right, which is what made the Recurring and Duplicate controls
+          unreadable once the Plaid-detail column appeared. `title` keeps the
+          full value reachable on hover wherever it can be clipped. */}
+      <td className="truncate px-2 py-2 sm:px-4 sm:py-3" title={formatDate(tx.date)}>
+        {formatDate(tx.date)}
       </td>
-      <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.is_duplicate ? 'line-through' : ''}`}>
-        {tx.description}
-        {tx.is_duplicate && (
-          <span className="ml-2 rounded-full border border-hairline px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-muted">
-            Excluded
-          </span>
+      <td className="px-2 py-2 sm:px-4 sm:py-3">
+        <div className="truncate" title={tx.account_name}>
+          {tx.account_name}
+        </div>
+        {tx.owner_name && (
+          <div className="truncate text-xs text-ink-muted" title={tx.owner_name}>
+            {tx.owner_name}
+          </div>
         )}
       </td>
-      <td className="px-2 py-2 text-right sm:px-4 sm:py-3">
+      <td className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.is_duplicate ? 'line-through' : ''}`}>
+        <div className="flex items-center gap-2">
+          <span className="truncate" title={tx.description}>
+            {tx.description}
+          </span>
+          {tx.is_duplicate && (
+            <span className="shrink-0 rounded-full border border-hairline px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-muted">
+              Excluded
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="truncate px-2 py-2 text-right sm:px-4 sm:py-3">
         <AmountCell amount={tx.amount} />
       </td>
       <td className="px-2 py-2 sm:px-4 sm:py-3">
@@ -426,7 +443,12 @@ function LedgerRow({
         <td
           className={`px-2 py-2 sm:px-4 sm:py-3 ${tx.category_source === 'merchant' ? 'bg-surface-2' : ''}`}
         >
-          <span>{tx.pfc_detailed ? tx.pfc_detailed : <span className="text-ink-muted">—</span>}</span>
+          {/* The column this whole phase is about: `pfc_detailed` values are
+              long (`FOOD_AND_DRINK_FAST_FOOD`), so without clipping this cell
+              ran straight over Recurring and Duplicate. */}
+          <div className="truncate" title={tx.pfc_detailed ?? undefined}>
+            {tx.pfc_detailed ? tx.pfc_detailed : <span className="text-ink-muted">—</span>}
+          </div>
         </td>
       )}
       <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
@@ -542,23 +564,40 @@ function LedgerRow({
   );
 }
 
+/**
+ * The ledger's column widths, as percentages, in render order:
+ * Date, Account, Description, Amount, Category, [Plaid detail], Recurring,
+ * Duplicate, Link.
+ *
+ * Each set must sum to exactly 100 (pinned by a test). The previous sets
+ * summed to 103 and 114: with `tableLayout: fixed` the browser rescales an
+ * over-declared colgroup proportionally, so turning the Plaid-detail column on
+ * silently shrank every other column by ~12% and cells without `truncate`
+ * spilled into their neighbours. That is the "columns overlap when category
+ * detail is shown" bug -- it was arithmetic, not CSS.
+ */
+export const LEDGER_COLUMN_WIDTHS = {
+  withoutDetail: [10, 14, 26, 12, 13, 9, 8, 8],
+  withDetail: [9, 12, 22, 11, 12, 12, 8, 7, 7],
+} as const;
+
 /** Fixed column widths so a row scrolled out of the virtualized viewport
  *  doesn't shift the ones still mounted -- natural auto-layout sizes columns
  *  from whatever rows happen to be in the DOM, which changes every scroll
- *  frame once rows unmount. Only used on the virtualized (large-ledger)
- *  path; the plain path keeps natural auto-layout. */
+ *  frame once rows unmount. Applied to *both* ledger paths: the plain
+ *  (<50-row) table previously had no colgroup and no fixed layout at all, so
+ *  its columns were sized by whatever content happened to be present. */
 function LedgerColgroup({ showPfcDetail }: { showPfcDetail: boolean }) {
+  const widths = showPfcDetail
+    ? LEDGER_COLUMN_WIDTHS.withDetail
+    : LEDGER_COLUMN_WIDTHS.withoutDetail;
   return (
     <colgroup>
-      <col className="w-[10%]" />
-      <col className="w-[15%]" />
-      <col className="w-[26%]" />
-      <col className="w-[12%]" />
-      <col className="w-[13%]" />
-      {showPfcDetail && <col className="w-[11%]" />}
-      <col className="w-[9%]" />
-      <col className="w-[9%]" />
-      <col className="w-[9%]" />
+      {widths.map((width, index) => (
+        // Percentages are computed, so they go in `style`: Tailwind can only
+        // emit classes it can see as literals at build time.
+        <col key={index} style={{ width: `${width}%` }} />
+      ))}
     </colgroup>
   );
 }
@@ -601,7 +640,10 @@ function VirtualizedLedgerTable({
 
   return (
     <div ref={scrollRef} className="max-h-[70vh] overflow-auto rounded-lg border border-hairline">
-      <table className="w-full text-xs sm:text-sm" style={{ tableLayout: 'fixed' }}>
+      <table
+        className="w-full min-w-[720px] text-xs sm:text-sm"
+        style={{ tableLayout: 'fixed' }}
+      >
         <LedgerColgroup showPfcDetail={showPfcDetail} />
         <thead className="sticky top-0 z-10">
           <LedgerTheadRow
@@ -916,7 +958,15 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
               />
             ) : (
               <div className="overflow-x-auto rounded-lg border border-hairline">
-                <table className="min-w-full text-xs sm:text-sm">
+                {/* `min-w-[720px]`: with 8-9 fixed-percentage columns, a phone
+                    viewport would squeeze each to a few characters. Scrolling
+                    the table sideways inside its container keeps every column
+                    readable instead. */}
+                <table
+                  className="w-full min-w-[720px] text-xs sm:text-sm"
+                  style={{ tableLayout: 'fixed' }}
+                >
+                  <LedgerColgroup showPfcDetail={showPfcDetail} />
                   <thead>
                     <LedgerTheadRow
                       sortKey={sortKey}
