@@ -9,6 +9,7 @@ import pandas as pd
 import psycopg
 
 from analytics.models import build_models
+from analytics.recurring import derive_streams
 from core.config import ConfigError, load_settings
 from database.db import DatabaseClient
 from ingestion.plaid_ingestor import PlaidIngestor
@@ -145,6 +146,18 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     removed = 0
     if result.full_refresh:
         removed = database.reconcile_transactions(transactions, start_date, end_date, full_refresh=True)
+
+    # Step 6b: detect recurring streams (Phase 30). Derived from our own history rather than
+    # Plaid's add-on; `scripts/probe_plaid_recurring.py` reports whether the entitlement exists,
+    # and `PlaidIngestor.fetch_recurring_streams` can take over without changing this table's
+    # shape. Failing here must not fail the run: streams are an enrichment, and the
+    # transactions they are derived from are already committed above.
+    try:
+        streams = derive_streams(transactions)
+        if streams:
+            database.upsert_recurring_streams(streams)
+    except Exception as error:  # noqa: BLE001 - enrichment must not sink the pipeline
+        LOGGER.warning("Recurring-stream detection skipped: %s", type(error).__name__)
 
     # Step 7: advance each Item's cursor only after every write above (upsert, delete, and any
     # reconcile) has committed. Advancing earlier would mean a crash between here and the writes

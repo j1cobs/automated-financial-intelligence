@@ -519,6 +519,87 @@ class DatabaseClient:
         """
         self._execute_many(sql, [(category, monthly_limit)])
 
+    def get_recurring_streams(self, active_only: bool = True) -> list[dict]:
+        """Return detected recurring streams (Phase 30)."""
+        sql = """
+        SELECT stream_id, merchant_key, description, category, cadence, direction,
+               last_amount::double precision, last_date, predicted_next_date,
+               status, source, is_active
+        FROM recurring_streams
+        """
+        if active_only:
+            sql += " WHERE is_active"
+        sql += " ORDER BY predicted_next_date NULLS LAST, description"
+
+        columns = (
+            "stream_id",
+            "merchant_key",
+            "description",
+            "category",
+            "cadence",
+            "direction",
+            "last_amount",
+            "last_date",
+            "predicted_next_date",
+            "status",
+            "source",
+            "is_active",
+        )
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [dict(zip(columns, row)) for row in rows]
+
+    def upsert_recurring_streams(self, streams: list[dict]) -> int:
+        """Insert or refresh detected streams, keyed on `stream_id`.
+
+        Idempotent across pipeline runs: re-detecting the same stream updates it
+        in place rather than adding a second row. That is why `stream_id` must be
+        stable — `analytics.recurring` derives it from `merchant_key`, and the
+        Plaid path uses Plaid's own id.
+        """
+        if not streams:
+            return 0
+        sql = """
+        INSERT INTO recurring_streams (
+            stream_id, merchant_key, description, category, cadence, direction,
+            last_amount, last_date, predicted_next_date, status, source, is_active
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (stream_id) DO UPDATE SET
+            merchant_key        = EXCLUDED.merchant_key,
+            description         = EXCLUDED.description,
+            category            = EXCLUDED.category,
+            cadence             = EXCLUDED.cadence,
+            direction           = EXCLUDED.direction,
+            last_amount         = EXCLUDED.last_amount,
+            last_date           = EXCLUDED.last_date,
+            predicted_next_date = EXCLUDED.predicted_next_date,
+            status              = EXCLUDED.status,
+            source              = EXCLUDED.source,
+            is_active           = EXCLUDED.is_active,
+            updated_at          = NOW()
+        """
+        params = [
+            (
+                s["stream_id"],
+                s["merchant_key"],
+                s["description"],
+                s.get("category"),
+                s.get("cadence"),
+                s["direction"],
+                s.get("last_amount"),
+                s.get("last_date"),
+                s.get("predicted_next_date"),
+                s.get("status"),
+                s.get("source", "local"),
+                s.get("is_active", True),
+            )
+            for s in streams
+        ]
+        self._execute_many(sql, params)
+        return len(params)
+
     def get_budget_periods(self) -> list[dict]:
         """Return every explicitly-set budget cap: {category, period, monthly_limit}.
 
