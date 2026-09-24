@@ -13,11 +13,13 @@ additionally requires `RequireCsrfDep` (api/deps.py::require_csrf).
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
+from analytics.budget_periods import PERIOD_PATTERN
 from analytics.categorizer import merchant_key
 
 from ..dataload import invalidate as invalidate_cache
@@ -298,11 +300,18 @@ class CashFlowResponse(BaseModel):
 class BudgetItem(BaseModel):
     category: str
     spent: float
+    # None means "no budget set". 0.0 means "budgeted to spend nothing" -- a
+    # real cap that any spend breaches. The UI must not collapse the two.
     limit: float | None
     pct: float | None
     is_over_budget: bool
     projected_eom: float | None
     is_current_month: bool
+    # Phase 28: which month this row describes, and whether its cap was set
+    # here or carried forward from an earlier month.
+    period: str | None
+    is_inherited: bool
+    inherited_from: str | None
 
 
 class BudgetResponse(BaseModel):
@@ -460,9 +469,30 @@ def get_cash_flow(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) 
 
 
 @router.get("/budget", response_model=BudgetResponse)
-def get_budget(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> BudgetResponse:
+def get_budget(
+    current_user: CurrentUserDep,
+    db: DbDep,
+    filters: FiltersDep,
+    month: str | None = Query(
+        None,
+        description="Month to budget, 'YYYY-MM'. Defaults to the latest month in the filtered data.",
+    ),
+) -> BudgetResponse:
+    """The budget month is `month`, NOT `period`: the filter bar already owns
+    `period` as a query parameter and its values are presets ('all_time',
+    'last_3_months'). A second `period` meaning 'YYYY-MM' would shadow it and
+    make every filtered budget request a 422. The storage column and the domain
+    term stay `period`; only the HTTP name differs, and only because of that."""
+    if month is not None and not PERIOD_PATTERN.match(month):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
-    return BudgetResponse(**build_budget(net_linked_transactions(exclude_duplicate_rows(filtered)), db.get_budgets()))
+    return BudgetResponse(
+        **build_budget(
+            net_linked_transactions(exclude_duplicate_rows(filtered)),
+            db.get_budget_periods(),
+            period=month,
+        )
+    )
 
 
 @router.get("/ledger", response_model=LedgerResponse)
@@ -504,6 +534,11 @@ class CreditLimitUpdate(BaseModel):
 
 class BudgetUpdate(BaseModel):
     monthly_limit: float
+    # Which month this cap applies from. Omitted means the current calendar
+    # month -- never "all months", since that is precisely the flat-table
+    # behaviour Phase 28 replaced. Named `month` to match the query parameter
+    # on GET /budget; see the note there on why it cannot be called `period`.
+    month: str | None = None
 
 
 class CategoryUpdate(BaseModel):
@@ -552,7 +587,32 @@ def update_budget(
     _csrf: RequireCsrfDep,
     db: DbDep,
 ) -> Response:
-    db.upsert_budget(category, body.monthly_limit)
+    """Set one category's cap for one month. Other months are untouched; they
+    keep whatever they inherit. Writes only `budget_periods` — the legacy
+    `budgets` table belongs to the frozen Streamlit dashboard, which writes it
+    itself, so touching it here would discard budgets saved from there."""
+    month = body.month or date.today().strftime("%Y-%m")
+    if not PERIOD_PATTERN.match(month):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
+    db.upsert_budget_period(category, month, body.monthly_limit)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/budgets/{category}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_budget(
+    category: str,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+    month: str | None = Query(None, description="Month to clear, 'YYYY-MM'."),
+) -> Response:
+    """Clear one month's explicit cap. The month then falls back to *inheriting*
+    the most recent earlier cap — which is not the same as being capped at 0."""
+    resolved = month or date.today().strftime("%Y-%m")
+    if not PERIOD_PATTERN.match(resolved):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
+    db.delete_budget_period(category, resolved)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

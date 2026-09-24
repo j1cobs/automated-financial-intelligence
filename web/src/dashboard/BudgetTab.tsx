@@ -42,15 +42,20 @@ function money(value: number): string {
 }
 
 /** A category with no API row yet (no spend, no limit) — still offered for editing. */
-function emptyItem(category: string, isCurrentMonth: boolean): BudgetItem {
+function emptyItem(category: string, isCurrentMonth: boolean, period: string | null): BudgetItem {
   return {
     category,
     spent: 0,
+    // `null`, not 0: this category has no budget set, which is a different
+    // state from being budgeted to spend nothing.
     limit: null,
     pct: null,
     is_over_budget: false,
     projected_eom: null,
     is_current_month: isCurrentMonth,
+    period,
+    is_inherited: false,
+    inherited_from: null,
   };
 }
 
@@ -65,6 +70,7 @@ export function BudgetTab() {
 
   const budgetItems = useMemo(() => data?.items ?? [], [data]);
   const isCurrentMonth = budgetItems[0]?.is_current_month ?? false;
+  const period = data?.month ?? null;
 
   // Canonical categories (GET /categories) ∪ whatever the budget response already
   // covers — a defensive union in case a category with a stored budget limit was
@@ -75,8 +81,8 @@ export function BudgetTab() {
     const names = new Set<string>([...(categoriesData?.categories ?? []), ...byCategory.keys()]);
     return Array.from(names)
       .sort((a, b) => a.localeCompare(b))
-      .map((cat) => byCategory.get(cat) ?? emptyItem(cat, isCurrentMonth));
-  }, [budgetItems, categoriesData, isCurrentMonth]);
+      .map((cat) => byCategory.get(cat) ?? emptyItem(cat, isCurrentMonth, period));
+  }, [budgetItems, categoriesData, isCurrentMonth, period]);
 
   const trendByCategory = useMemo(() => {
     const map = new Map<string, { month: string; amount: number }[]>();

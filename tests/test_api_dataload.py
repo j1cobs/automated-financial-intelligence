@@ -179,7 +179,7 @@ class SharedFrameIsNotMutatedTests(unittest.TestCase):
         build_net_worth(acct, tx)
         build_overview(real, acct, exclude_duplicate_rows(all_time))
         build_cash_flow(real)
-        build_budget(real, [{"category": "Shopping", "monthly_limit": 100.0}])
+        build_budget(real, [{"category": "Shopping", "period": "2020-01", "monthly_limit": 100.0}])
         build_anomalies(real)
         build_ledger(filtered)
 

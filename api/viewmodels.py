@@ -32,9 +32,12 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
+
+from analytics.budget_periods import resolve_caps_detailed
 
 from app.dashboard import (
     _effective_credit_limit,
@@ -1140,20 +1143,41 @@ def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def build_budget(df: pd.DataFrame, budget_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Port of `_section_budget`'s data. `df` must already be enriched and
-    duplicate-excluded. `budget_rows` is `DatabaseClient.get_budgets()`'s return value."""
-    budget_map = {r["category"]: r["monthly_limit"] for r in budget_rows}
+def build_budget(
+    df: pd.DataFrame,
+    budget_rows: list[dict[str, Any]],
+    period: str | None = None,
+) -> dict[str, Any]:
+    """Port of `_section_budget`'s data, extended to per-month caps (Phase 28).
 
-    current_month_str = None if df.empty else df["month"].max()
+    `df` must already be enriched and duplicate-excluded. `budget_rows` is
+    `DatabaseClient.get_budget_periods()`'s return value — rows for the months a
+    cap was *explicitly* set in; months in between inherit, per
+    `analytics.budget_periods.resolve_caps_detailed`.
+
+    `period` ('YYYY-MM') selects the month. When omitted it falls back to the
+    latest month in `df`, which is the pre-Phase-28 behaviour (the budget view
+    followed the period filter).
+
+    **An absent cap is not a cap of 0.** A category nobody has budgeted has
+    `limit=None` and renders as "No budget set"; a category deliberately capped
+    at 0 has `limit=0.0` and any spend against it is over budget. The old code
+    used `if limit` for both, so a 0 cap silently behaved like no cap at all.
+    """
+    month_str = period if period is not None else (None if df.empty else df["month"].max())
+
     today = date.today()
-    is_current_month = current_month_str == today.strftime("%Y-%m")
+    is_current_month = month_str == today.strftime("%Y-%m")
 
-    if df.empty:
+    caps: dict[str, tuple[Decimal, str]] = (
+        resolve_caps_detailed(budget_rows, month_str) if month_str else {}
+    )
+
+    if df.empty or month_str is None:
         period_expenses: dict[str, float] = {}
     else:
         period_expenses = (
-            df[(df["month"] == current_month_str) & (df["tx_type"] == "expense")]
+            df[(df["month"] == month_str) & (df["tx_type"] == "expense")]
             .groupby("category")["adjusted_amount"]
             .sum()
             .abs()
@@ -1166,27 +1190,42 @@ def build_budget(df: pd.DataFrame, budget_rows: list[dict[str, Any]]) -> dict[st
         days_elapsed = max(today.day, 1)
         projection_factor = days_in_month / days_elapsed
 
-    all_categories = sorted(set(period_expenses.keys()) | set(budget_map.keys()))
+    all_categories = sorted(set(period_expenses.keys()) | set(caps.keys()))
 
     items = []
     for cat in all_categories:
         spent = float(period_expenses.get(cat, 0.0))
-        limit = budget_map.get(cat)
+        cap = caps.get(cat)
+        limit = float(cap[0]) if cap is not None else None
+        source_period = cap[1] if cap is not None else None
         projected_eom = spent * projection_factor if projection_factor is not None else None
-        pct = min(spent / limit, 1.0) if limit else None
+
+        if limit is None:
+            pct = None
+        elif limit == 0:
+            # Any spend against a zero cap is fully consumed; no spend is 0%.
+            pct = 1.0 if spent > 0 else 0.0
+        else:
+            pct = min(spent / limit, 1.0)
+
         items.append(
             {
                 "category": cat,
                 "spent": spent,
-                "limit": float(limit) if limit is not None else None,
+                "limit": limit,
                 "pct": pct,
-                "is_over_budget": bool(limit and spent > limit),
+                "is_over_budget": limit is not None and spent > limit,
                 "projected_eom": projected_eom,
                 "is_current_month": is_current_month,
+                "period": month_str,
+                "is_inherited": source_period is not None and source_period != month_str,
+                "inherited_from": (
+                    source_period if source_period is not None and source_period != month_str else None
+                ),
             }
         )
 
-    return {"month": current_month_str, "items": items}
+    return {"month": month_str, "items": items}
 
 
 def build_anomalies(df: pd.DataFrame) -> list[dict[str, Any]]:

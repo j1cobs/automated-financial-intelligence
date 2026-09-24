@@ -277,11 +277,20 @@ export interface CashFlowResponse {
 export interface BudgetItem {
   category: string;
   spent: number;
+  /** `null` means "no budget set". `0` means "budgeted to spend nothing" — a
+   *  real cap that any spend breaches. Never collapse the two with a falsy
+   *  check; an unset category would render as instantly over budget. */
   limit: number | null;
   pct: number | null;
   is_over_budget: boolean;
   projected_eom: number | null;
   is_current_month: boolean;
+  /** Phase 28: the month this row describes ('YYYY-MM'). */
+  period: string | null;
+  /** True when the cap was carried forward rather than set for this month. */
+  is_inherited: boolean;
+  /** The month the inherited cap was actually set in, else null. */
+  inherited_from: string | null;
 }
 
 export interface BudgetResponse {

@@ -140,6 +140,12 @@ class ApiDataTestCase(unittest.TestCase):
         self.mock_db.database_url = self.settings.database_url
         self.mock_db.get_categories.return_value = ["Groceries", "Income", "Shopping"]
         self.mock_db.get_budgets.return_value = [{"category": "Shopping", "monthly_limit": 200.0}]
+        # Phase 28: the budget path reads per-month caps. The legacy flat
+        # `budgets` table is left to the frozen Streamlit dashboard, which owns
+        # both reading and writing it.
+        self.mock_db.get_budget_periods.return_value = [
+            {"category": "Shopping", "period": "2020-01", "monthly_limit": 200.0}
+        ]
         self.mock_db.get_net_worth_history.return_value = []
         self.mock_db.get_transaction_merchant_fields.return_value = ("Weird Purchase", "Weird Purchase")
         self.mock_db.update_transaction_category.return_value = 0
@@ -266,12 +272,48 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         self.assertEqual(response.status_code, 204)
         self.mock_db.set_manual_credit_limit.assert_called_once_with("plaid:acc1", None)
 
-    def test_budget_calls_upsert_budget(self) -> None:
+    def test_budget_write_targets_the_given_month(self) -> None:
+        response = self.client.put(
+            "/budgets/Shopping",
+            json={"monthly_limit": 300.0, "month": "2026-10"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.upsert_budget_period.assert_called_once_with("Shopping", "2026-10", 300.0)
+
+    def test_budget_write_defaults_to_the_current_month(self) -> None:
+        """Never "all months" -- that is the flat-table behaviour Phase 28 replaced."""
+        from datetime import date
+
         response = self.client.put(
             "/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers()
         )
         self.assertEqual(response.status_code, 204)
-        self.mock_db.upsert_budget.assert_called_once_with("Shopping", 300.0)
+        self.mock_db.upsert_budget_period.assert_called_once_with(
+            "Shopping", date.today().strftime("%Y-%m"), 300.0
+        )
+
+    def test_budget_write_never_touches_the_legacy_table(self) -> None:
+        self.client.put(
+            "/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers()
+        )
+        self.mock_db.upsert_budget.assert_not_called()
+
+    def test_budget_delete_clears_one_month(self) -> None:
+        response = self.client.request(
+            "DELETE", "/budgets/Shopping?month=2026-10", headers=self._headers()
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.delete_budget_period.assert_called_once_with("Shopping", "2026-10")
+
+    def test_budget_write_rejects_a_malformed_period(self) -> None:
+        response = self.client.put(
+            "/budgets/Shopping",
+            json={"monthly_limit": 300.0, "month": "October"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 422)
+        self.mock_db.upsert_budget_period.assert_not_called()
 
     def test_category_calls_update_transaction_category(self) -> None:
         # get_transaction_merchant_fields default (set in setUp) is
@@ -443,16 +485,31 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         self.assertEqual(body["income"], 1000.0)
         self.assertEqual(body["flagged_count"], 1)
 
-    def test_budget_shape_uses_get_budgets(self) -> None:
+    def test_budget_shape_uses_get_budget_periods(self) -> None:
         self._authed_client()
         with self._load_financial_data_patch():
             response = self.client.get("/budget")
         self.assertEqual(response.status_code, 200)
-        self.mock_db.get_budgets.assert_called()
+        self.mock_db.get_budget_periods.assert_called()
         body = response.json()
         cats = {item["category"]: item for item in body["items"]}
         self.assertIn("Shopping", cats)
         self.assertEqual(cats["Shopping"]["limit"], 200.0)
+        # Set in 2020-01 and read for a later month, so it is inherited.
+        self.assertTrue(cats["Shopping"]["is_inherited"])
+        self.assertEqual(cats["Shopping"]["inherited_from"], "2020-01")
+
+    def test_budget_never_reads_the_streamlit_owned_legacy_table(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            self.client.get("/budget")
+        self.mock_db.get_budgets.assert_not_called()
+
+    def test_budget_rejects_a_malformed_period(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            response = self.client.get("/budget?month=2026-9")
+        self.assertEqual(response.status_code, 422)
 
     def test_ledger_includes_hash_and_all_rows(self) -> None:
         self._authed_client()

@@ -519,6 +519,54 @@ class DatabaseClient:
         """
         self._execute_many(sql, [(category, monthly_limit)])
 
+    def get_budget_periods(self) -> list[dict]:
+        """Return every explicitly-set budget cap: {category, period, monthly_limit}.
+
+        Returns only the months a cap was actually set in -- months that merely
+        *inherit* one have no row. Resolving a given month is
+        `analytics.budget_periods.resolve_caps`'s job, not SQL's.
+        """
+        sql = """
+        SELECT category, period, monthly_limit::double precision
+        FROM budget_periods
+        ORDER BY category, period
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        # `period` is CHAR(7), which Postgres blank-pads; strip so string
+        # comparison in resolve_caps stays exact.
+        return [
+            {"category": r[0], "period": r[1].strip(), "monthly_limit": r[2]} for r in rows
+        ]
+
+    def upsert_budget_period(self, category: str, period: str, monthly_limit: float) -> None:
+        """Set the cap for one category in one month, leaving other months alone."""
+        sql = """
+        INSERT INTO budget_periods (category, period, monthly_limit)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (category, period) DO UPDATE
+        SET monthly_limit = EXCLUDED.monthly_limit,
+            updated_at    = NOW()
+        """
+        self._execute_many(sql, [(category, period, monthly_limit)])
+
+    def delete_budget_period(self, category: str, period: str) -> bool:
+        """Clear the explicit cap for one category in one month.
+
+        The month then falls back to *inheriting* the most recent earlier cap,
+        which is not the same as being capped at 0. Returns whether a row was
+        actually removed.
+        """
+        sql = "DELETE FROM budget_periods WHERE category = %s AND period = %s"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (category, period))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted > 0
+
     def set_manual_credit_limit(self, account_key: str, limit: float | None) -> None:
         """Set (or clear, with limit=None) the manually-entered credit limit for an
         account. Does not touch updated_at, which is used elsewhere as a Plaid balance

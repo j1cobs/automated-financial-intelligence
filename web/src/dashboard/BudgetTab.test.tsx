@@ -91,6 +91,12 @@ const mockBudgetData: BudgetResponse = {
       is_over_budget: false,
       projected_eom: 350,
       is_current_month: true,
+
+      period: '2026-08',
+
+      is_inherited: false,
+
+      inherited_from: null,
     },
     {
       category: 'Dining Out',
@@ -100,6 +106,12 @@ const mockBudgetData: BudgetResponse = {
       is_over_budget: true,
       projected_eom: 700,
       is_current_month: true,
+
+      period: '2026-08',
+
+      is_inherited: false,
+
+      inherited_from: null,
     },
     {
       category: 'Entertainment',
@@ -109,6 +121,12 @@ const mockBudgetData: BudgetResponse = {
       is_over_budget: false,
       projected_eom: null,
       is_current_month: true,
+
+      period: '2026-08',
+
+      is_inherited: false,
+
+      inherited_from: null,
     },
   ],
 };
@@ -237,6 +255,12 @@ describe('BudgetTab', () => {
           is_over_budget: false,
           projected_eom: 1200, // API happens to compute this, but it must not render
           is_current_month: false,
+
+          period: '2026-08',
+
+          is_inherited: false,
+
+          inherited_from: null,
         },
       ],
     };

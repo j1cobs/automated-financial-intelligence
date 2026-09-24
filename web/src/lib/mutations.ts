@@ -110,10 +110,22 @@ export function useSetCreditLimit() {
 export function useUpsertBudget() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ category, monthlyLimit }: { category: string; monthlyLimit: number }) =>
+    mutationFn: ({
+      category,
+      monthlyLimit,
+      month,
+    }: {
+      category: string;
+      monthlyLimit: number;
+      /** 'YYYY-MM'. Omitted means the current calendar month — never "all
+       *  months", which is the flat-table behaviour Phase 28 replaced. The
+       *  field is `month`, not `period`: the filter bar already owns `period`
+       *  and its values are presets like 'all_time'. */
+      month?: string;
+    }) =>
       apiFetch<void>(`/budgets/${encodeURIComponent(category)}`, {
         method: 'PUT',
-        body: { monthly_limit: monthlyLimit },
+        body: month ? { monthly_limit: monthlyLimit, month } : { monthly_limit: monthlyLimit },
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: budgetQueryKey });
