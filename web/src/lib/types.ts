@@ -436,3 +436,28 @@ export interface GoalItem {
 export interface GoalsResponse {
   goals: GoalItem[];
 }
+
+// ---------------------------------------------------------------------------
+// GET /forecast
+// ---------------------------------------------------------------------------
+
+export interface ForecastRow {
+  month: string;
+  /** What will probably happen: streams + trailing medians. */
+  projected_balance: number;
+  /** The same with every category held to its cap. The GAP between the two is
+   *  the value of sticking to budget. */
+  budget_balance: number;
+  income: number;
+  expenses: number;
+}
+
+export interface ForecastResponse {
+  rows: ForecastRow[];
+  /** False below 3 complete months — the UI says "building history" rather
+   *  than drawing a projection nobody should trust. */
+  has_enough_history: boolean;
+  has_recurring_data: boolean;
+  months_of_history: number;
+  starting_balance: number;
+}

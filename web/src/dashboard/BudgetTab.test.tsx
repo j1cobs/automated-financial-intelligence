@@ -13,6 +13,7 @@ vi.mock('../lib/queries', () => ({
   useCashFlow: vi.fn(),
   useAnomalies: vi.fn(() => ({ data: { anomalies: [] } })),
   useGoals: vi.fn(() => ({ data: { goals: [] }, isPending: false })),
+  useForecast: vi.fn(() => ({ data: undefined, isPending: true })),
 }));
 
 vi.mock('../lib/mutations', () => ({

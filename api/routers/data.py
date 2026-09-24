@@ -19,7 +19,12 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
-from analytics.budget_periods import PERIOD_PATTERN
+from analytics.budget_periods import PERIOD_PATTERN, resolve_caps
+from analytics.forecast import (
+    DEFAULT_HORIZON_MONTHS,
+    project as forecast_project,
+    starting_balance as forecast_starting_balance,
+)
 from analytics.categories import CANONICAL_CATEGORIES, canonicalize
 from analytics.categorizer import merchant_key
 from ingestion.plaid_ingestor import PlaidIngestor
@@ -1011,3 +1016,68 @@ def delete_goal(
     db.delete_savings_goal(goal_id)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Forward cash-flow forecast (Phase 32)
+# ---------------------------------------------------------------------------
+
+
+class ForecastRow(BaseModel):
+    month: str
+    projected_balance: float
+    """What will probably happen: recurring streams plus a trailing median per
+    category."""
+    budget_balance: float
+    """The same, but every category held to its cap. The GAP between the two is
+    the value of sticking to budget -- which is the point of carrying both."""
+    income: float
+    expenses: float
+
+
+class ForecastResponse(BaseModel):
+    rows: list[ForecastRow]
+    has_enough_history: bool
+    """False when there are fewer than 3 complete months. The UI shows
+    "building history" rather than a projection nobody should trust."""
+    has_recurring_data: bool
+    months_of_history: int
+    starting_balance: float
+
+
+@router.get("/forecast", response_model=ForecastResponse)
+def get_forecast(
+    current_user: CurrentUserDep,
+    db: DbDep,
+    filters: FiltersDep,
+    horizon: int = Query(DEFAULT_HORIZON_MONTHS, ge=1, le=36),
+) -> ForecastResponse:
+    """Projects forward from today's spendable cash.
+
+    Reads `all_time` rather than the filtered frame: a forecast is about the
+    user's actual behaviour, not the slice they happen to be looking at."""
+    _tx, _filtered, all_time, acct_df = _load_filtered(db, filters)
+    real = net_linked_transactions(exclude_duplicate_rows(all_time))
+
+    caps = resolve_caps(db.get_budget_periods(), date.today().strftime("%Y-%m"))
+
+    # A goal further out than the horizon extends it, so the goal is visible on
+    # the chart it is planned with.
+    goal_dates = [g["target_date"] for g in db.get_savings_goals() if g.get("target_date")]
+    furthest = max(goal_dates) if goal_dates else None
+
+    result = forecast_project(
+        real,
+        db.get_recurring_streams(),
+        caps,
+        starting=forecast_starting_balance(acct_df),
+        horizon_months=horizon,
+        furthest_goal_date=furthest,
+    )
+    return ForecastResponse(
+        rows=[ForecastRow(**row) for row in result["rows"]],
+        has_enough_history=result["has_enough_history"],
+        has_recurring_data=result["has_recurring_data"],
+        months_of_history=result["months_of_history"],
+        starting_balance=result["starting_balance"],
+    )

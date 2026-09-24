@@ -29,6 +29,7 @@ import { DIRECTION_GLYPH, type Tone } from '../lib/polarity';
 import { formatCategory } from '../lib/categories';
 import { Button } from '../components/Button';
 import { GoalsSection } from './GoalsSection';
+import { ForecastChart } from './ForecastChart';
 
 /** How many trailing months the per-category sparkline shows. */
 const SPARKLINE_MONTHS = 6;
@@ -203,6 +204,8 @@ export function BudgetTab() {
           </Button>
         </div>
       </div>
+
+      <ForecastChart />
 
       <GoalsSection />
 
