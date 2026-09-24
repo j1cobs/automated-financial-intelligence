@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
 from analytics.budget_periods import PERIOD_PATTERN
+from analytics.categories import CANONICAL_CATEGORIES, canonicalize
 from analytics.categorizer import merchant_key
 
 from ..dataload import invalidate as invalidate_cache
@@ -625,9 +626,26 @@ def update_transaction_category(
     _csrf: RequireCsrfDep,
     db: DbDep,
 ) -> CategoryUpdateResponse:
+    """The category set is closed (Phase 28c). This endpoint previously took
+    arbitrary free text, so budget caps -- which are keyed on category -- could
+    be orphaned by a typo and the category list grew without bound.
+
+    Input is normalised rather than merely rejected: 'Dining' and
+    'food and drink' both store FOOD_AND_DRINK. Only a value that cannot be
+    mapped *unambiguously* is refused, because guessing would silently rewrite
+    what the user meant."""
+    category = canonicalize(body.category)
+    if category is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown category {body.category!r}. "
+                f"Expected one of: {', '.join(CANONICAL_CATEGORIES)}"
+            ),
+        )
     fields = db.get_transaction_merchant_fields(transaction_hash)
     key = merchant_key(fields[0], fields[1]) if fields else None
-    backfilled_count = db.update_transaction_category(transaction_hash, body.category, key or None)
+    backfilled_count = db.update_transaction_category(transaction_hash, category, key or None)
     invalidate_cache(db.database_url)
     return CategoryUpdateResponse(backfilled_count=backfilled_count)
 

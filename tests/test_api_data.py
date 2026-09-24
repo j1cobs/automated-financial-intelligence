@@ -322,13 +322,26 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
 
         expected_key = merchant_key("Weird Purchase", "Weird Purchase")
 
+        # Phase 28c: a legacy name is accepted and stored in canonical form
+        # rather than written through verbatim, so the category set stays closed.
         response = self.client.patch(
             "/transactions/hash-2/category", json={"category": "Groceries"}, headers=self._headers()
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"backfilled_count": 0})
         self.mock_db.get_transaction_merchant_fields.assert_called_once_with("hash-2")
-        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "Groceries", expected_key)
+        self.mock_db.update_transaction_category.assert_called_once_with(
+            "hash-2", "FOOD_AND_DRINK", expected_key
+        )
+
+    def test_category_rejects_unmappable_free_text(self) -> None:
+        response = self.client.patch(
+            "/transactions/hash-2/category",
+            json={"category": "Alexie phone"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 422)
+        self.mock_db.update_transaction_category.assert_not_called()
 
     def test_category_endpoint_computes_merchant_key_and_returns_backfilled_count(self) -> None:
         """End-to-end (mocked DB) check of the endpoint's own composition: it fetches
@@ -361,7 +374,9 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "Groceries", None)
+        self.mock_db.update_transaction_category.assert_called_once_with(
+            "hash-2", "FOOD_AND_DRINK", None
+        )
 
     def test_recurring_calls_update_transaction_recurring(self) -> None:
         response = self.client.patch(
