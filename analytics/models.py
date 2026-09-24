@@ -23,12 +23,16 @@ def build_models(mode: str) -> PlaceholderModelBundle:
     """Select the categorization model bundle for `mode`.
 
     `"cascade"` returns a bundle whose `.classifier` is a `CascadeCategorizer` (Plaid PFC +
-    merchant memory) and whose `.outlier_detector` is the same `PlaceholderOutlierDetector`
-    used by the placeholder bundle, unchanged — outlier detection is out of scope for this
-    phase. `"placeholder"` returns `build_placeholder_models()` unchanged, for tests/back-compat.
+    merchant memory). `"placeholder"` returns `build_placeholder_models()` unchanged, for
+    tests/back-compat.
 
-    Wiring `core/config.py` / `pipeline/runner.py` to call this is a later wave; this function
-    is not yet called from production code.
+    `.outlier_detector` is `PlaceholderOutlierDetector` in **both** modes, and permanently so.
+    Phase 34 retired `analytics/outlier_detector.py` (an Isolation Forest, written in Phase 1
+    and never wired up) rather than activating it: its score cannot be explained, and a fixed
+    `contamination=0.03` flags ~3% of rows however ordinary the month was. Real anomaly
+    detection now lives in `analytics/anomalies.py` and writes its own table; the placeholder
+    survives only to zero the legacy `outlier_score`/`is_outlier` columns each run, which the
+    frozen Streamlit dashboard still reads. See docs/adr/0007-anomaly-detection-without-ml.md.
     """
     if mode == "cascade":
         return PlaceholderModelBundle(

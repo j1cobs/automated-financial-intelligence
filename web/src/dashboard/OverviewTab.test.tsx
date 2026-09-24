@@ -19,12 +19,14 @@ function renderOverviewTab() {
 // Mock the queries module
 vi.mock('../lib/queries', () => ({
   useOverview: vi.fn(),
+  useAnomalies: vi.fn(() => ({ data: { anomalies: [] }, isPending: false, isError: false })),
 }));
 
 // Mock the mutations module — useSetCreditLimit() is the credit-limit editor's
 // only dependency outside props.
 vi.mock('../lib/mutations', () => ({
   useSetCreditLimit: vi.fn(),
+  useDismissAnomaly: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }));
 
 // Recharts' ResponsiveContainer measures its parent via ResizeObserver, which

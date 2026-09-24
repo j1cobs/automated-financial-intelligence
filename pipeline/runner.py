@@ -9,6 +9,7 @@ import pandas as pd
 import psycopg
 
 from analytics.models import build_models
+from analytics.anomalies import detect_anomalies, suppress_dismissed
 from analytics.recurring import derive_streams
 from core.config import ConfigError, load_settings
 from database.db import DatabaseClient
@@ -46,6 +47,52 @@ def _build_ingestor(settings):
         access_tokens=settings.plaid_access_tokens,
         base_url=settings.plaid_base_url,
     )
+
+
+def _detect_and_store_anomalies(
+    database: DatabaseClient,
+    transactions: pd.DataFrame,
+    streams: list[dict],
+) -> None:
+    """Detect anomalies for the current month, persist them, and refresh the
+    legacy `is_outlier` flags the frozen Streamlit dashboard still reads.
+
+    The frame here is what the pipeline just ingested. `_enrich_transactions`'s
+    derived columns (`month`, `tx_type`, `adjusted_amount`) belong to the API's
+    read path, so the few this needs are derived locally rather than importing
+    the frozen dashboard module into the pipeline.
+    """
+    if transactions is None or transactions.empty:
+        return
+
+    frame = transactions.copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date"])
+    if frame.empty:
+        return
+
+    frame["month"] = frame["date"].dt.strftime("%Y-%m")
+    # Plaid's sign convention: a positive amount is money leaving the account.
+    frame["adjusted_amount"] = -frame["amount"].astype(float)
+    frame["tx_type"] = frame["adjusted_amount"].map(
+        lambda value: "expense" if value < 0 else "income"
+    )
+
+    period = date.today().strftime("%Y-%m")
+    found = detect_anomalies(frame, streams, period)
+    found = suppress_dismissed(found, database.get_anomaly_feedback())
+
+    database.upsert_anomalies(
+        [{k: v for k, v in row.items() if k != "contributing_hashes"} for row in found]
+    )
+
+    # Compatibility shim, not a feature -- see DatabaseClient.set_outlier_flags.
+    hashes: list[str] = []
+    for row in found:
+        hashes.extend(row.get("contributing_hashes", []))
+    database.set_outlier_flags(sorted(set(hashes)))
+
+    LOGGER.info("Anomaly detection: %d active anomal%s.", len(found), "y" if len(found) == 1 else "ies")
 
 
 def run_pipeline(days_back: int = 90) -> PipelineResult:
@@ -152,12 +199,22 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # and `PlaidIngestor.fetch_recurring_streams` can take over without changing this table's
     # shape. Failing here must not fail the run: streams are an enrichment, and the
     # transactions they are derived from are already committed above.
+    streams: list[dict] = []
     try:
         streams = derive_streams(transactions)
         if streams:
             database.upsert_recurring_streams(streams)
     except Exception as error:  # noqa: BLE001 - enrichment must not sink the pipeline
         LOGGER.warning("Recurring-stream detection skipped: %s", type(error).__name__)
+
+    # Step 6c: anomaly detection (Phase 34). Same reasoning as streams -- an enrichment over
+    # already-committed rows, so a failure here is logged and the run still succeeds. Nothing
+    # transaction-identifying is logged: only the exception class, per the scrubbed-logging
+    # rule that applies to everything the daily pipeline prints.
+    try:
+        _detect_and_store_anomalies(database, transactions, streams)
+    except Exception as error:  # noqa: BLE001 - enrichment must not sink the pipeline
+        LOGGER.warning("Anomaly detection skipped: %s", type(error).__name__)
 
     # Step 7: advance each Item's cursor only after every write above (upsert, delete, and any
     # reconcile) has committed. Advancing earlier would mean a crash between here and the writes

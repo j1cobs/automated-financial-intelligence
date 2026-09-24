@@ -20,7 +20,7 @@
 
 import { useMemo, useState } from 'react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
-import { useBudget, useCategories, useCashFlow } from '../lib/queries';
+import { useBudget, useCategories, useCashFlow, useAnomalies } from '../lib/queries';
 import { useUpsertBudget } from '../lib/mutations';
 import type { BudgetItem } from '../lib/types';
 import { LINE_PROPS, inkMutedColor, negativeColor, useChartTheme } from './chartTheme';
@@ -87,6 +87,9 @@ function formatMonth(key: string): string {
 export function BudgetTab() {
   const [month, setMonth] = useState<string>(currentMonthKey);
   const { data, isPending, error, refetch } = useBudget(month);
+  // Phase 34: category drift is shown on the Budget row it concerns, next to
+  // the cap it is about, rather than only on a separate surface.
+  const { data: anomalyData } = useAnomalies(month);
   const { data: categoriesData } = useCategories();
   const { data: cashFlow } = useCashFlow();
   const upsertMutation = useUpsertBudget();
@@ -110,6 +113,14 @@ export function BudgetTab() {
       .sort((a, b) => a.localeCompare(b))
       .map((cat) => byCategory.get(cat) ?? emptyItem(cat, isCurrentMonth, period));
   }, [budgetItems, categoriesData, isCurrentMonth, period]);
+
+  const driftByCategory = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const anomaly of anomalyData?.anomalies ?? []) {
+      if (anomaly.kind === 'category_drift') map.set(anomaly.subject, anomaly.explanation);
+    }
+    return map;
+  }, [anomalyData]);
 
   const trendByCategory = useMemo(() => {
     const map = new Map<string, { month: string; amount: number }[]>();
@@ -210,6 +221,7 @@ export function BudgetTab() {
               onSave={() => handleSave(item.category)}
               onCancel={handleCancel}
               onValueChange={(value) => setEditValues({ ...editValues, [item.category]: value })}
+              drift={driftByCategory.get(item.category) ?? null}
               isExpanded={expanded === item.category}
               onToggleExpand={() =>
                 setExpanded((current) => (current === item.category ? null : item.category))
@@ -232,6 +244,8 @@ interface BudgetItemRowProps {
   onSave: () => void;
   onCancel: () => void;
   onValueChange: (value: number) => void;
+  /** The drift explanation for this category this month, if any. */
+  drift: string | null;
   isExpanded: boolean;
   onToggleExpand: () => void;
 }
@@ -257,6 +271,7 @@ function BudgetItemRow({
   onSave,
   onCancel,
   onValueChange,
+  drift,
   isExpanded,
   onToggleExpand,
 }: BudgetItemRowProps) {
@@ -324,6 +339,10 @@ function BudgetItemRow({
               <span className="text-ink-muted"> · inherited from {formatMonth(item.inherited_from)}</span>
             )}
           </div>
+        )}
+
+        {drift && !isEditing && (
+          <p className="mt-1 text-xs text-neg-text">{drift}</p>
         )}
 
         {item.details.length > 0 && !isEditing && (

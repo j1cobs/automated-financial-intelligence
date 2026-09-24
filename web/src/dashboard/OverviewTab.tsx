@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
-import { useOverview } from '../lib/queries';
-import { useSetCreditLimit } from '../lib/mutations';
+import { useOverview, useAnomalies } from '../lib/queries';
+import { useSetCreditLimit, useDismissAnomaly } from '../lib/mutations';
 import { useFilters } from '../lib/FilterContext';
 import type {
   AssetMixItem,
@@ -15,6 +15,7 @@ import { MasonryColumns } from './MasonryColumns';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { formatCategory } from '../lib/categories';
+import { Button } from '../components/Button';
 import {
   BarChart,
   Bar,
@@ -226,6 +227,56 @@ function OwnerBalanceMiniList({ owner, maxBalance }: { owner: OwnerBalanceItem; 
  * (credit utilisation, warnings, the emergency-fund meter) so the page reads
  * as one system.
  */
+/** Active anomalies, each with the explanation generated at detection time and
+ *  a dismiss control. Dismissal is period-scoped: it clears this month's alert
+ *  and says nothing about next month's. */
+function AnomaliesCard() {
+  const { data, isPending, isError } = useAnomalies();
+  const dismiss = useDismissAnomaly();
+
+  if (isPending || isError) return null;
+
+  const anomalies = data?.anomalies ?? [];
+  if (anomalies.length === 0) return null;
+
+  return (
+    <Card
+      title="Needs a Look"
+      caption="Spending that has moved away from your own recent pattern."
+    >
+      <ul className="divide-y divide-hairline">
+        {anomalies.map((anomaly) => (
+          <li
+            key={`${anomaly.kind}:${anomaly.subject}:${anomaly.period}`}
+            className="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0"
+          >
+            <div className="min-w-0">
+              <p className="text-sm text-ink">{anomaly.explanation}</p>
+              <p className="mt-0.5 text-xs text-ink-muted">
+                {anomaly.severity === 'high' ? 'Large change' : 'Worth a look'} · {anomaly.period}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={dismiss.isPending}
+              onClick={() =>
+                dismiss.mutate({
+                  kind: anomaly.kind,
+                  subject: anomaly.subject,
+                  period: anomaly.period,
+                })
+              }
+            >
+              Dismiss
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 function Card({
   title,
   caption,
@@ -660,6 +711,12 @@ export function OverviewTab() {
         monthly={ov.net_worth_trend_monthly}
         netWorthMomDelta={ov.net_worth_mom_delta}
       />
+
+      {/* Anomalies (Phase 34). Sits above the masonry pool and full-width,
+          because an alert you have to hunt for is not an alert -- this is the
+          tab the user opens first. Each row is the sentence the detector
+          generated, not a score to interpret. */}
+      <AnomaliesCard />
 
       {/* Credit Utilization + limit editor — mirrors app/dashboard.py:604-675.
           Full-width, fixed above the masonry pool below (not part of it) --

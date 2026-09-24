@@ -15,8 +15,10 @@
  *      re-categorising several rows in a row) into one round of refetches instead of one
  *      per edit.
  *
- * `recurring` never invalidates analytics: it changes nothing outside the ledger row
- * itself (`api/viewmodels.py` doesn't read `is_recurring` for any aggregate).
+ * `recurring` used to skip the analytics invalidation, on the grounds that no aggregate
+ * read `is_recurring`. That stopped being true -- `build_overview` reads it for the
+ * Committed/Recurring Spend card (`api/viewmodels.py:800`) -- so it now invalidates like
+ * the others, or that card keeps showing a figure the toggle has already changed.
  *
  * Ledger cache surgery uses `queryClient.setQueriesData({ queryKey: ledgerQueryKey }, ...)`
  * rather than `setQueryData` with an exact key, for the same reason `invalidateQueries`
@@ -283,6 +285,22 @@ export function useUnlinkTransaction() {
       // and duplicate edits.
       void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
       invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+/** Dismiss one anomaly for one period (Phase 34).
+ *
+ * Period-scoped on purpose: dismissing September's Dining drift because of a
+ * birthday must not silence October's. An alert that never comes back goes
+ * quiet exactly as it becomes useful. */
+export function useDismissAnomaly() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { kind: string; subject: string; period: string }) =>
+      apiFetch<void>('/anomalies/dismiss', { method: 'POST', body }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: anomaliesQueryKey });
     },
   });
 }

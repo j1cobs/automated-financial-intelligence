@@ -272,6 +272,30 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         self.assertEqual(response.status_code, 204)
         self.mock_db.set_manual_credit_limit.assert_called_once_with("plaid:acc1", None)
 
+    def test_dismissing_an_anomaly_is_period_scoped(self) -> None:
+        """Dismissing September's drift must not silence October's, so the
+        period is part of what gets recorded."""
+        response = self.client.post(
+            "/anomalies/dismiss",
+            json={"kind": "category_drift", "subject": "FOOD_AND_DRINK", "period": "2026-09"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.dismiss_anomaly.assert_called_once_with(
+            "category_drift", "FOOD_AND_DRINK", "2026-09"
+        )
+
+    def test_restoring_an_anomaly_undoes_the_dismissal(self) -> None:
+        response = self.client.post(
+            "/anomalies/restore",
+            json={"kind": "category_drift", "subject": "FOOD_AND_DRINK", "period": "2026-09"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.restore_anomaly.assert_called_once_with(
+            "category_drift", "FOOD_AND_DRINK", "2026-09"
+        )
+
     def test_budget_write_targets_the_given_month(self) -> None:
         response = self.client.put(
             "/budgets/Shopping",
@@ -560,14 +584,34 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         self.assertEqual(by_hash["hash-1"]["linked_transaction_hash"], "hash-2")
         self.assertEqual(by_hash["hash-2"]["linked_transaction_hash"], "hash-1")
 
-    def test_anomalies_only_includes_outliers(self) -> None:
+    def test_anomalies_reads_the_anomalies_table(self) -> None:
+        """Phase 34: an anomaly is per-category-per-month or per-stream and
+        carries its own explanation, not a per-transaction outlier score."""
         self._authed_client()
-        with self._load_financial_data_patch():
-            response = self.client.get("/anomalies")
+        self.mock_db.get_anomalies.return_value = [
+            {
+                "kind": "category_drift",
+                "subject": "FOOD_AND_DRINK",
+                "period": "2026-09",
+                "severity": "medium",
+                "explanation": "FOOD_AND_DRINK is $800.00 so far, 300% above your usual $200.00.",
+                "detected_at": "2026-09-09T00:00:00+00:00",
+            }
+        ]
+
+        response = self.client.get("/anomalies")
+
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(len(body["anomalies"]), 1)
-        self.assertEqual(body["anomalies"][0]["description"], "Weird Purchase")
+        self.assertEqual(body["anomalies"][0]["subject"], "FOOD_AND_DRINK")
+        self.assertIn("above your usual", body["anomalies"][0]["explanation"])
+
+    def test_anomalies_rejects_a_malformed_month(self) -> None:
+        self._authed_client()
+        response = self.client.get("/anomalies?month=September")
+        self.assertEqual(response.status_code, 422)
+
 
     def test_categories_is_thin_wrapper(self) -> None:
         self._authed_client()

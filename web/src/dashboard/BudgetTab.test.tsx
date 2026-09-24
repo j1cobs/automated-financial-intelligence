@@ -11,6 +11,7 @@ vi.mock('../lib/queries', () => ({
   useBudget: vi.fn(),
   useCategories: vi.fn(),
   useCashFlow: vi.fn(),
+  useAnomalies: vi.fn(() => ({ data: { anomalies: [] } })),
 }));
 
 vi.mock('../lib/mutations', () => ({

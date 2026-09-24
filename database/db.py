@@ -519,6 +519,108 @@ class DatabaseClient:
         """
         self._execute_many(sql, [(category, monthly_limit)])
 
+    def get_anomalies(self, period: str | None = None) -> list[dict]:
+        """Detected anomalies, newest period first, excluding dismissed ones."""
+        sql = """
+        SELECT a.kind, a.subject, a.period, a.severity, a.explanation, a.detected_at
+        FROM anomalies a
+        LEFT JOIN anomaly_feedback f
+               ON f.kind = a.kind AND f.subject = a.subject AND f.period = a.period
+        WHERE f.kind IS NULL
+        """
+        params: list = []
+        if period is not None:
+            sql += " AND a.period = %s"
+            params.append(period)
+        sql += " ORDER BY a.period DESC, a.severity DESC, a.subject"
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or None)
+                rows = cur.fetchall()
+        return [
+            {
+                "kind": r[0],
+                "subject": r[1],
+                "period": r[2].strip(),
+                "severity": r[3],
+                "explanation": r[4],
+                "detected_at": r[5].isoformat() if r[5] else None,
+            }
+            for r in rows
+        ]
+
+    def get_anomaly_feedback(self) -> list[dict]:
+        """Every dismissal, as {kind, subject, period}."""
+        sql = "SELECT kind, subject, period FROM anomaly_feedback"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [{"kind": r[0], "subject": r[1], "period": r[2].strip()} for r in rows]
+
+    def upsert_anomalies(self, anomalies: list[dict]) -> int:
+        """Persist detected anomalies.
+
+        `detected_at` is deliberately NOT updated on conflict: the alert's text
+        and severity stay current as the month develops, but when it first
+        tripped is history and shouldn't move.
+        """
+        if not anomalies:
+            return 0
+        sql = """
+        INSERT INTO anomalies (kind, subject, period, severity, explanation)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (kind, subject, period) DO UPDATE
+        SET severity    = EXCLUDED.severity,
+            explanation = EXCLUDED.explanation,
+            updated_at  = NOW()
+        """
+        params = [
+            (a["kind"], a["subject"], a["period"], a["severity"], a["explanation"])
+            for a in anomalies
+        ]
+        self._execute_many(sql, params)
+        return len(params)
+
+    def dismiss_anomaly(self, kind: str, subject: str, period: str) -> None:
+        """Dismiss one anomaly for one period. Never silences later periods."""
+        sql = """
+        INSERT INTO anomaly_feedback (kind, subject, period)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (kind, subject, period) DO NOTHING
+        """
+        self._execute_many(sql, [(kind, subject, period)])
+
+    def restore_anomaly(self, kind: str, subject: str, period: str) -> None:
+        """Undo a dismissal, so the anomaly is visible again."""
+        sql = "DELETE FROM anomaly_feedback WHERE kind = %s AND subject = %s AND period = %s"
+        self._execute_many(sql, [(kind, subject, period)])
+
+    def set_outlier_flags(self, transaction_hashes: list[str]) -> int:
+        """Point `transactions.is_outlier` at the rows behind live anomalies.
+
+        A compatibility shim, not a feature. The frozen Streamlit dashboard
+        reads `is_outlier`/`outlier_score` (app/dashboard.py:339, :787,
+        :1195-1209) and the freeze forbids editing it, so if Phase 34 simply
+        stopped writing that column its anomalies view would sit permanently
+        empty. Flagging the transactions that actually drive a current anomaly
+        keeps that view showing relevant rows.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE transactions SET is_outlier = FALSE WHERE is_outlier")
+                if transaction_hashes:
+                    cur.execute(
+                        "UPDATE transactions SET is_outlier = TRUE WHERE transaction_hash = ANY(%s)",
+                        (transaction_hashes,),
+                    )
+                    flagged = cur.rowcount
+                else:
+                    flagged = 0
+            conn.commit()
+        return flagged
+
     def update_recurring_for_stream(self, stream_id: str, recurring: bool) -> int:
         """Set `is_recurring` on every transaction belonging to a stream.
 

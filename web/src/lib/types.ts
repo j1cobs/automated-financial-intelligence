@@ -356,13 +356,20 @@ export interface CategoryUpdateResponse {
 // ---------------------------------------------------------------------------
 
 export interface AnomalyItem {
-  date: string;
-  owner_name: string | null;
-  account_name: string;
-  description: string;
-  amount: number;
-  category: string | null;
-  outlier_score: number;
+  /** 'category_drift' | 'price_creep'. An anomaly is per-category-per-month or
+   *  per-stream, not per-transaction — a category overspending is not a
+   *  property of any one row. */
+  kind: string;
+  /** Category name, or stream_id. */
+  subject: string;
+  /** 'YYYY-MM'. */
+  period: string;
+  /** 'medium' | 'high'. Anything below medium is never emitted. */
+  severity: string;
+  /** A sentence stating the numbers it was derived from, generated at
+   *  detection time. Replaces an unexplainable outlier score. */
+  explanation: string;
+  detected_at: string | null;
 }
 
 export interface AnomaliesResponse {

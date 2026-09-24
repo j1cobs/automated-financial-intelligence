@@ -426,17 +426,26 @@ class LedgerResponse(BaseModel):
 
 
 class AnomalyItem(BaseModel):
-    date: str
-    owner_name: str | None
-    account_name: str
-    description: str
-    amount: float
-    category: str | None
-    outlier_score: float
+    """Phase 34. Replaces the per-transaction outlier row: an anomaly is now
+    per-category-per-month (drift) or per-stream (price creep), and carries the
+    sentence it was derived from rather than an unexplainable score."""
+
+    kind: str          # category_drift | price_creep
+    subject: str       # category name, or stream_id
+    period: str        # 'YYYY-MM'
+    severity: str      # medium | high
+    explanation: str
+    detected_at: str | None = None
 
 
 class AnomaliesResponse(BaseModel):
     anomalies: list[AnomalyItem]
+
+
+class AnomalyDismissal(BaseModel):
+    kind: str
+    subject: str
+    period: str
 
 
 class CategoriesResponse(BaseModel):
@@ -535,11 +544,47 @@ def get_ledger(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> 
 
 
 @router.get("/anomalies", response_model=AnomaliesResponse)
-def get_anomalies(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> AnomaliesResponse:
-    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
+def get_anomalies(
+    current_user: CurrentUserDep,
+    db: DbDep,
+    month: str | None = Query(None, description="Limit to one month, 'YYYY-MM'."),
+) -> AnomaliesResponse:
+    """Reads the `anomalies` table rather than deriving per-transaction outliers.
+    Dismissed anomalies are excluded by the query itself. Takes no transaction
+    filters: an anomaly is a statement about a category or a stream over a
+    period, so narrowing the ledger view does not change whether it holds."""
+    if month is not None and not PERIOD_PATTERN.match(month):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
     return AnomaliesResponse(
-        anomalies=[AnomalyItem(**item) for item in build_anomalies(net_linked_transactions(exclude_duplicate_rows(filtered)))]
+        anomalies=[AnomalyItem(**item) for item in db.get_anomalies(month)]
     )
+
+
+@router.post("/anomalies/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+def dismiss_anomaly(
+    body: AnomalyDismissal,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    """Dismiss one anomaly for one period. Deliberately period-scoped: dismissing
+    September's Dining drift must not silence October's."""
+    db.dismiss_anomaly(body.kind, body.subject, body.period)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/anomalies/restore", status_code=status.HTTP_204_NO_CONTENT)
+def restore_anomaly(
+    body: AnomalyDismissal,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    """Undo a dismissal, so a mis-click is recoverable."""
+    db.restore_anomaly(body.kind, body.subject, body.period)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/filter-options", response_model=FilterOptionsResponse)

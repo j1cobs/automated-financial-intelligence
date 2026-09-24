@@ -22,17 +22,11 @@ vi.mock('recharts', async (importOriginal) => {
 });
 
 import { TransactionsTab, LEDGER_COLUMN_WIDTHS } from './TransactionsTab';
-import type {
-  LedgerResponse,
-  AnomaliesResponse,
-  CategoriesResponse,
-  CategoryUpdateResponse,
-} from '../lib/types';
+import type { LedgerResponse, CategoriesResponse, CategoryUpdateResponse } from '../lib/types';
 
 // Mock the queries and mutations
 vi.mock('../lib/queries', () => ({
   useLedger: vi.fn(),
-  useAnomalies: vi.fn(),
   useCategories: vi.fn(),
 }));
 
@@ -45,7 +39,7 @@ vi.mock('../lib/mutations', () => ({
   useUnlinkTransaction: vi.fn(),
 }));
 
-import { useLedger, useAnomalies, useCategories } from '../lib/queries';
+import { useLedger, useCategories } from '../lib/queries';
 import {
   useUpdateCategory,
   useUpdateRecurring,
@@ -56,7 +50,6 @@ import {
 } from '../lib/mutations';
 
 const mockedUseLedger = vi.mocked(useLedger);
-const mockedUseAnomalies = vi.mocked(useAnomalies);
 const mockedUseCategories = vi.mocked(useCategories);
 const mockedUseUpdateCategory = vi.mocked(useUpdateCategory);
 const mockedUseUpdateRecurring = vi.mocked(useUpdateRecurring);
@@ -188,7 +181,6 @@ describe('TransactionsTab', () => {
   describe('Ledger loading and error states', () => {
     it('renders a skeleton for ledger while loading', () => {
       mockedUseLedger.mockReturnValue(mockQueryLoading<LedgerResponse>());
-      mockedUseAnomalies.mockReturnValue(mockQueryLoading<AnomaliesResponse>());
       mockedUseCategories.mockReturnValue(mockQueryLoading<CategoriesResponse>());
       setDefaultMutations();
 
@@ -202,7 +194,6 @@ describe('TransactionsTab', () => {
     it('renders error state for ledger with a retry action wired to refetch', () => {
       const ledgerResult = mockQueryError<LedgerResponse>();
       mockedUseLedger.mockReturnValue(ledgerResult);
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -212,34 +203,6 @@ describe('TransactionsTab', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
       expect(ledgerResult.refetch).toHaveBeenCalled();
-    });
-  });
-
-  describe('Anomalies loading and error states', () => {
-    it('renders a skeleton for anomalies while loading', () => {
-      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQueryLoading<AnomaliesResponse>());
-      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-      setDefaultMutations();
-
-      renderComponent();
-
-      expect(screen.getByRole('status', { name: 'Loading…' })).toBeInTheDocument();
-    });
-
-    it('renders error state for anomalies with a retry action wired to refetch', () => {
-      const anomaliesResult = mockQueryError<AnomaliesResponse>();
-      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(anomaliesResult);
-      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-      setDefaultMutations();
-
-      renderComponent();
-
-      expect(screen.getByText(/failed to load anomalies/i)).toBeInTheDocument();
-
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-      expect(anomaliesResult.refetch).toHaveBeenCalled();
     });
   });
 
@@ -289,7 +252,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(
         mockQuerySuccess({ categories: ['Groceries', 'Gas', 'Utilities'] }),
       );
@@ -327,7 +289,6 @@ describe('TransactionsTab', () => {
         })),
       };
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -371,7 +332,6 @@ describe('TransactionsTab', () => {
           })),
         };
         mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-        mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
         mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
         setDefaultMutations();
 
@@ -395,7 +355,6 @@ describe('TransactionsTab', () => {
 
     it('renders empty ledger message when no transactions', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
 
       renderComponent();
@@ -405,7 +364,6 @@ describe('TransactionsTab', () => {
 
     it('shows the three explanatory captions', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
 
       renderComponent();
@@ -471,7 +429,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -524,7 +481,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -537,57 +493,9 @@ describe('TransactionsTab', () => {
     });
   });
 
-  describe('Anomalies rendering', () => {
-    const mockAnomaliesData: AnomaliesResponse = {
-      anomalies: [
-        {
-          date: '2024-01-20',
-          account_name: 'Savings',
-          owner_name: 'Jane Doe',
-          description: 'Large Withdrawal',
-          amount: -5000.0,
-          category: 'Withdrawal',
-          outlier_score: 0.95,
-        },
-        {
-          date: '2024-01-18',
-          account_name: 'Checking',
-          owner_name: 'Jane Doe',
-          description: 'Odd Refund',
-          amount: 300.0,
-          category: 'Refund',
-          outlier_score: 0.4,
-        },
-      ],
-    };
-
-    it('renders the anomaly scatter plot with a point per anomaly', () => {
-      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess(mockAnomaliesData));
-      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-
-      const { container } = renderComponent();
-
-      const points = container.querySelectorAll('.recharts-scatter-symbol');
-      expect(points.length).toBe(mockAnomaliesData.anomalies.length);
-      expect(screen.getByText(/higher score = more unusual transaction/i)).toBeInTheDocument();
-    });
-
-    it('renders empty anomalies message when none detected', () => {
-      mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
-      mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
-
-      renderComponent();
-
-      expect(screen.getByText(/no anomalies detected/i)).toBeInTheDocument();
-    });
-  });
-
   describe('Failed ledger edits', () => {
     it('shows an inline error banner when a category edit fails', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockRejectedValue(new Error('fail')), { isError: true }),
@@ -604,7 +512,6 @@ describe('TransactionsTab', () => {
 
     it('shows no error banner when every mutation is in its default (non-error) state', () => {
       mockedUseLedger.mockReturnValue(mockQuerySuccess({ transactions: [] }));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -648,7 +555,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(
         mockQuerySuccess({ categories: ['Groceries', 'Gas', 'Utilities'] }),
       );
@@ -705,7 +611,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(
         mockQuerySuccess({ categories: ['FOOD_AND_DRINK', 'UNCATEGORIZED'] }),
       );
@@ -763,7 +668,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -819,7 +723,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -872,7 +775,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Groceries'] }));
       setDefaultMutations();
 
@@ -933,7 +835,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Groceries', 'Gas'] }));
       setDefaultMutations();
 
@@ -984,7 +885,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Testing'] }));
       setDefaultMutations();
 
@@ -1077,7 +977,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['Groceries', 'Gas', 'Other'] }));
       setDefaultMutations();
 
@@ -1133,7 +1032,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -1170,7 +1068,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -1246,7 +1143,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       setDefaultMutations();
 
@@ -1322,7 +1218,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -1403,7 +1298,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -1468,7 +1362,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -1515,7 +1408,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -1560,7 +1452,6 @@ describe('TransactionsTab', () => {
       };
 
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
-      mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
       mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
       mockedUseUpdateCategory.mockReturnValue(
         mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
@@ -1641,7 +1532,6 @@ describe('plain ledger table column discipline', () => {
       ],
     };
     mockedUseLedger.mockReturnValue(mockQuerySuccess(ledger));
-    mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
     mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: ['FOOD_AND_DRINK'] }));
     setDefaultMutations();
     return renderComponent();
@@ -1702,7 +1592,6 @@ describe('recurring control: series vs single row', () => {
       ],
     };
     mockedUseLedger.mockReturnValue(mockQuerySuccess(ledger));
-    mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
     mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
     setDefaultMutations();
     // Applied after the defaults, or they would clobber a test's own spies.

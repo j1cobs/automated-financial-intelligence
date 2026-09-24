@@ -1,18 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import {
-  ScatterChart,
-  Scatter,
-  XAxis,
-  YAxis,
-  ZAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-} from 'recharts';
-import type { TooltipContentProps } from 'recharts';
-import { useLedger, useAnomalies, useCategories } from '../lib/queries';
+import { useLedger, useCategories } from '../lib/queries';
 import {
   useUpdateCategory,
   useUpdateRecurring,
@@ -21,17 +9,8 @@ import {
   useLinkTransaction,
   useUnlinkTransaction,
 } from '../lib/mutations';
-import type { LedgerItem, AnomalyItem } from '../lib/types';
+import type { LedgerItem } from '../lib/types';
 import { formatCategory } from '../lib/categories';
-import {
-  categoricalColor,
-  CATEGORICAL_SLOTS,
-  gridProps,
-  xAxisProps,
-  yAxisProps,
-  legendProps,
-  CHART_MARGIN,
-} from './chartTheme';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { directionOf, toneFor, toneLabel, DIRECTION_GLYPH, TONE_TOKENS } from '../lib/polarity';
@@ -39,7 +18,13 @@ import type { TabId } from './tabs';
 import { Button } from '../components/Button';
 
 /**
- * Transactions tab -- ledger + anomaly scatter (PLAN.md Phase 15, Fix 10).
+ * Transactions tab -- the ledger.
+ *
+ * The anomaly scatter that used to live here was removed in Phase 34. It
+ * plotted `transactions.outlier_score`, which the retired Isolation Forest
+ * produced; anomalies are now per-category-per-month or per-stream and surface
+ * on Overview and inline on Budget rows, where the numbers they describe
+ * already are.
  *
  * The ledger row-rendering below `VIRTUALIZE_THRESHOLD` transactions is a
  * plain `<tbody>` map, identical to Phase 15's original markup -- every
@@ -50,14 +35,6 @@ import { Button } from '../components/Button';
  * column widths stable as rows scroll in and out, since natural auto-layout
  * can't see the width of a row that isn't mounted.
  */
-
-const UNCATEGORIZED_LABEL = 'Uncategorized';
-/** The scatter is an all-pairs colour form (any two bubbles can sit side by
- *  side), so the tail folds into a shared "Other" slot rather than growing
- *  past the palette -- see `dataviz` skill, `color-formula.md` check 4. One
- *  slot is reserved for "Other", leaving `CATEGORICAL_SLOTS - 1` named ones. */
-const MAX_NAMED_CATEGORIES = CATEGORICAL_SLOTS - 1;
-const OTHER_LABEL = 'Other';
 
 function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -72,10 +49,6 @@ function formatDate(dateString: string): string {
     day: 'numeric',
     year: 'numeric',
   });
-}
-
-function formatAxisDate(timestamp: number): string {
-  return new Date(timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 /**
@@ -96,125 +69,6 @@ export function AmountCell({ amount }: { amount: number }) {
       {formatCurrency(amount)}
       <span className="sr-only">({toneLabel(direction, tone)})</span>
     </span>
-  );
-}
-
-/** Deterministic category -> colour slot, with a shared "Other" bucket past
- *  the palette's named-slot budget. Order is alphabetical over the full
- *  category set that's actually on screen, so two renders of the same data
- *  agree; it can still shift if a filter changes the category set, which is
- *  the accepted cost of an unbounded category list on an 8-slot palette. */
-function useCategoryColorScale(categories: readonly (string | null)[]) {
-  return useMemo(() => {
-    const labels = Array.from(new Set(categories.map((c) => (c && c.trim() ? c : UNCATEGORIZED_LABEL)))).sort(
-      (a, b) => a.localeCompare(b),
-    );
-    const named = labels.slice(0, MAX_NAMED_CATEGORIES);
-    const overflow = labels.length > MAX_NAMED_CATEGORIES;
-    const colorOf = (label: string): { bucket: string; color: string } => {
-      const idx = named.indexOf(label);
-      if (idx >= 0) return { bucket: label, color: categoricalColor(idx) };
-      return { bucket: OTHER_LABEL, color: categoricalColor(MAX_NAMED_CATEGORIES) };
-    };
-    const buckets = overflow ? [...named, OTHER_LABEL] : named;
-    return { colorOf, buckets };
-  }, [categories]);
-}
-
-type ScatterPoint = {
-  x: number;
-  y: number;
-  z: number;
-  date: string;
-  description: string;
-  amount: number;
-  owner_name: string | null;
-  category: string;
-  bucket: string;
-  color: string;
-};
-
-function AnomalyTooltip({ active, payload }: Partial<TooltipContentProps<number, string>>) {
-  if (!active || !payload || payload.length === 0) return null;
-  const point = payload[0]?.payload as ScatterPoint | undefined;
-  if (!point) return null;
-  return (
-    <div className="rounded-md border border-hairline bg-surface-1 p-2 text-xs shadow-sm sm:text-sm">
-      <p className="mb-1 font-semibold text-ink">{point.description}</p>
-      <p className="text-ink-secondary">
-        {formatDate(point.date)} · {formatCategory(point.category)}
-      </p>
-      <p className="text-ink-secondary">{formatCurrency(point.amount)}</p>
-      {point.owner_name && <p className="text-ink-muted">{point.owner_name}</p>}
-    </div>
-  );
-}
-
-function AnomalyScatter({ anomalies }: { anomalies: AnomalyItem[] }) {
-  const { colorOf, buckets } = useCategoryColorScale(anomalies.map((a) => a.category));
-
-  const points: ScatterPoint[] = useMemo(
-    () =>
-      anomalies.map((a) => {
-        const label = a.category && a.category.trim() ? a.category : UNCATEGORIZED_LABEL;
-        const { bucket, color } = colorOf(label);
-        return {
-          x: new Date(a.date).getTime(),
-          y: a.outlier_score,
-          z: Math.abs(a.amount),
-          date: a.date,
-          description: a.description,
-          amount: a.amount,
-          owner_name: a.owner_name,
-          category: label,
-          bucket,
-          color,
-        };
-      }),
-    [anomalies, colorOf],
-  );
-
-  const byBucket = useMemo(() => {
-    const map = new Map<string, ScatterPoint[]>();
-    for (const point of points) {
-      const list = map.get(point.bucket) ?? [];
-      list.push(point);
-      map.set(point.bucket, list);
-    }
-    return buckets
-      .map((bucket) => ({ bucket, points: map.get(bucket) ?? [] }))
-      .filter((s) => s.points.length > 0);
-  }, [points, buckets]);
-
-  return (
-    <div className="h-72 w-full sm:h-96">
-      <ResponsiveContainer width="100%" height="100%">
-        <ScatterChart margin={CHART_MARGIN.default}>
-          <CartesianGrid {...gridProps()} />
-          <XAxis
-            {...xAxisProps()}
-            dataKey="x"
-            type="number"
-            name="Date"
-            domain={['dataMin', 'dataMax']}
-            tickFormatter={(value: number) => formatAxisDate(value)}
-          />
-          <YAxis {...yAxisProps()} dataKey="y" type="number" name="Outlier score" />
-          <ZAxis dataKey="z" type="number" range={[80, 900]} name="Amount" />
-          <Tooltip content={<AnomalyTooltip />} cursor={{ strokeDasharray: '3 3' }} />
-          {byBucket.length > 1 && <Legend {...legendProps()} />}
-          {byBucket.map(({ bucket, points: bucketPoints }) => (
-            <Scatter
-              key={bucket}
-              name={formatCategory(bucket)}
-              data={bucketPoints}
-              fill={bucketPoints[0]?.color}
-              fillOpacity={0.75}
-            />
-          ))}
-        </ScatterChart>
-      </ResponsiveContainer>
-    </div>
   );
 }
 
@@ -611,9 +465,7 @@ export const LEDGER_COLUMN_WIDTHS = {
  *  (<50-row) table previously had no colgroup and no fixed layout at all, so
  *  its columns were sized by whatever content happened to be present. */
 function LedgerColgroup({ showPfcDetail }: { showPfcDetail: boolean }) {
-  const widths = showPfcDetail
-    ? LEDGER_COLUMN_WIDTHS.withDetail
-    : LEDGER_COLUMN_WIDTHS.withoutDetail;
+  const widths = showPfcDetail ? LEDGER_COLUMN_WIDTHS.withDetail : LEDGER_COLUMN_WIDTHS.withoutDetail;
   return (
     <colgroup>
       {widths.map((width, index) => (
@@ -663,10 +515,7 @@ function VirtualizedLedgerTable({
 
   return (
     <div ref={scrollRef} className="max-h-[70vh] overflow-auto rounded-lg border border-hairline">
-      <table
-        className="w-full min-w-[720px] text-xs sm:text-sm"
-        style={{ tableLayout: 'fixed' }}
-      >
+      <table className="w-full min-w-[720px] text-xs sm:text-sm" style={{ tableLayout: 'fixed' }}>
         <LedgerColgroup showPfcDetail={showPfcDetail} />
         <thead className="sticky top-0 z-10">
           <LedgerTheadRow
@@ -726,7 +575,6 @@ interface TransactionsTabProps {
 
 export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabProps) {
   const ledgerQuery = useLedger();
-  const anomaliesQuery = useAnomalies();
   const categoriesQuery = useCategories();
 
   const updateCategory = useUpdateCategory();
@@ -874,35 +722,6 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
         </div>
       )}
 
-      {/* Anomalies Section */}
-      <div>
-        <h2 className="mb-1 text-base font-semibold text-ink sm:text-lg">Anomalies</h2>
-
-        {anomaliesQuery.isLoading && <TabSkeleton />}
-
-        {anomaliesQuery.isError && (
-          <ErrorState
-            message="Failed to load anomalies. Please try again."
-            onRetry={() => void anomaliesQuery.refetch()}
-          />
-        )}
-
-        {anomaliesQuery.data && (
-          <>
-            {anomaliesQuery.data.anomalies.length === 0 ? (
-              <div className="rounded-lg border border-hairline bg-surface-1 py-8 text-center text-sm text-ink-muted">
-                No anomalies detected
-              </div>
-            ) : (
-              <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-                <p className="mb-2 text-xs text-ink-muted">Higher score = more unusual transaction.</p>
-                <AnomalyScatter anomalies={anomaliesQuery.data.anomalies} />
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
       {/* Ledger Section */}
       <div>
         <h2 className="mb-1 text-base font-semibold text-ink sm:text-lg">Ledger</h2>
@@ -995,10 +814,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                     viewport would squeeze each to a few characters. Scrolling
                     the table sideways inside its container keeps every column
                     readable instead. */}
-                <table
-                  className="w-full min-w-[720px] text-xs sm:text-sm"
-                  style={{ tableLayout: 'fixed' }}
-                >
+                <table className="w-full min-w-[720px] text-xs sm:text-sm" style={{ tableLayout: 'fixed' }}>
                   <LedgerColgroup showPfcDetail={showPfcDetail} />
                   <thead>
                     <LedgerTheadRow

@@ -85,11 +85,14 @@ export function useLedger() {
   });
 }
 
-export function useAnomalies() {
-  const { filters } = useFilters();
+/** Deliberately ignores the filter bar: an anomaly is a statement about a
+ *  category or a stream over a period, so narrowing the ledger view does not
+ *  change whether it holds. */
+export function useAnomalies(month?: string | null) {
   return useQuery({
-    queryKey: [...anomaliesQueryKey, filters],
-    queryFn: () => apiFetch<AnomaliesResponse>(withFilters('/anomalies', filters)),
+    queryKey: [...anomaliesQueryKey, month ?? null],
+    queryFn: () =>
+      apiFetch<AnomaliesResponse>(month ? `/anomalies?month=${encodeURIComponent(month)}` : '/anomalies'),
   });
 }
 
