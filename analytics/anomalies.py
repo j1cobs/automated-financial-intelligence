@@ -224,6 +224,20 @@ def detect_price_creep(
             continue
 
         ordered = group.sort_values("date")
+
+        # The change must have happened IN `period`. Without this the latest
+        # occurrence is whenever it happened, compared against everything
+        # before it, and then stamped with the current month -- so a price rise
+        # six months ago produces a fresh, undismissed anomaly every month
+        # thereafter, each with identical text.
+        if "month" in ordered.columns:
+            if str(ordered["month"].iloc[-1]) != period:
+                continue
+        else:
+            last_date = pd.to_datetime(ordered["date"].iloc[-1])
+            if last_date.strftime("%Y-%m") != period:
+                continue
+
         amounts = [abs(float(value)) for value in ordered["adjusted_amount"].tolist()]
         latest = amounts[-1]
         previous = amounts[:-1]

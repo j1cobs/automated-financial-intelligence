@@ -616,6 +616,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
   const editFailed =
     updateCategory.isError ||
     updateRecurring.isError ||
+    updateStreamRecurring.isError ||
     updateDuplicate.isError ||
     linkTransaction.isError ||
     unlinkTransaction.isError;
@@ -788,7 +789,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                 editingHash={editingHash}
                 editingCategory={editingCategory}
                 categories={categoriesQuery.data?.categories}
-                isRecurringPending={updateRecurring.isPending}
+                isRecurringPending={updateRecurring.isPending || updateStreamRecurring.isPending}
                 isDuplicatePending={updateDuplicate.isPending}
                 isLinkPending={linkTransaction.isPending || unlinkTransaction.isPending}
                 linkingHash={linkingHash}
@@ -842,7 +843,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                           editingHash={editingHash}
                           editingCategory={editingCategory}
                           categories={categoriesQuery.data?.categories}
-                          isRecurringPending={updateRecurring.isPending}
+                          isRecurringPending={updateRecurring.isPending || updateStreamRecurring.isPending}
                           isDuplicatePending={updateDuplicate.isPending}
                           isLinkPending={linkTransaction.isPending || unlinkTransaction.isPending}
                           showPfcDetail={showPfcDetail}

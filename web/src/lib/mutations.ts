@@ -38,11 +38,23 @@ import {
   ledgerQueryKey,
   anomaliesQueryKey,
   goalsQueryKey,
+  forecastQueryKey,
 } from './queries';
 import type { CategoryUpdateResponse, LedgerItem, LedgerResponse } from './types';
 
 /** Every analytics endpoint a ledger edit can change the numbers of. */
-const ANALYTICS_QUERY_KEYS = [overviewQueryKey, cashFlowQueryKey, budgetQueryKey, anomaliesQueryKey] as const;
+const ANALYTICS_QUERY_KEYS = [
+  overviewQueryKey,
+  cashFlowQueryKey,
+  budgetQueryKey,
+  anomaliesQueryKey,
+  // The forecast derives its budget line from the caps and its balances from
+  // the accounts, and goals derive progress from those same balances -- both
+  // render beside the things that change them, so omitting either leaves
+  // pre-edit numbers on screen with no remount to trigger a refetch.
+  forecastQueryKey,
+  goalsQueryKey,
+] as const;
 
 /** Coalescing window for the debounced analytics invalidation below. */
 const ANALYTICS_INVALIDATE_DEBOUNCE_MS = 500;
@@ -132,6 +144,9 @@ export function useUpsertBudget() {
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: budgetQueryKey });
+      // GET /forecast holds categories to their caps, and the chart sits above
+      // these rows in the same tab.
+      void queryClient.invalidateQueries({ queryKey: forecastQueryKey });
     },
   });
 }

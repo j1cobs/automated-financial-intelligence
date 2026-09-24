@@ -8,6 +8,8 @@ from typing import NamedTuple
 import pandas as pd
 import psycopg
 
+from app.dashboard import _enrich_transactions, load_financial_data
+
 from analytics.models import build_models
 from analytics.anomalies import detect_anomalies, suppress_dismissed
 from analytics.recurring import derive_streams
@@ -49,37 +51,43 @@ def _build_ingestor(settings):
     )
 
 
+def _load_enriched_history(database: DatabaseClient) -> pd.DataFrame:
+    """Every persisted transaction, enriched, for the post-persistence passes.
+
+    **Not the frame the pipeline just ingested.** After the first run,
+    `sync_transactions` returns a DELTA -- often a handful of rows, sometimes
+    none. Recurring detection needs at least two occurrences of a merchant to
+    see a cadence, and anomaly detection needs three complete months of
+    baseline, so both are structurally incapable of working on a delta: they
+    would return nothing every day forever while their unit tests passed.
+
+    Reuses the frozen `load_financial_data` + `_enrich_transactions` rather
+    than re-deriving `month`/`tx_type`/`adjusted_amount` here. That also
+    supplies `transaction_hash`, which `PlaidIngestor._normalize` does not
+    produce (the hash is computed inside `upsert_transactions`) and which the
+    `is_outlier` shim needs to flag anything at all.
+    """
+    tx_df, _acct_df = load_financial_data(database.database_url)
+    if tx_df is None or tx_df.empty:
+        return pd.DataFrame()
+    enriched = _enrich_transactions(tx_df)
+    # Duplicate-flagged rows are excluded from analytics everywhere else; an
+    # anomaly built on a known double-post would be an artefact.
+    return enriched[~enriched["is_duplicate"].fillna(False).astype(bool)]
+
+
 def _detect_and_store_anomalies(
     database: DatabaseClient,
-    transactions: pd.DataFrame,
+    history: pd.DataFrame,
     streams: list[dict],
 ) -> None:
     """Detect anomalies for the current month, persist them, and refresh the
-    legacy `is_outlier` flags the frozen Streamlit dashboard still reads.
-
-    The frame here is what the pipeline just ingested. `_enrich_transactions`'s
-    derived columns (`month`, `tx_type`, `adjusted_amount`) belong to the API's
-    read path, so the few this needs are derived locally rather than importing
-    the frozen dashboard module into the pipeline.
-    """
-    if transactions is None or transactions.empty:
+    legacy `is_outlier` flags the frozen Streamlit dashboard still reads."""
+    if history is None or history.empty:
         return
-
-    frame = transactions.copy()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"])
-    if frame.empty:
-        return
-
-    frame["month"] = frame["date"].dt.strftime("%Y-%m")
-    # Plaid's sign convention: a positive amount is money leaving the account.
-    frame["adjusted_amount"] = -frame["amount"].astype(float)
-    frame["tx_type"] = frame["adjusted_amount"].map(
-        lambda value: "expense" if value < 0 else "income"
-    )
 
     period = date.today().strftime("%Y-%m")
-    found = detect_anomalies(frame, streams, period)
+    found = detect_anomalies(history, streams, period)
     found = suppress_dismissed(found, database.get_anomaly_feedback())
 
     database.upsert_anomalies(
@@ -199,12 +207,17 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # and `PlaidIngestor.fetch_recurring_streams` can take over without changing this table's
     # shape. Failing here must not fail the run: streams are an enrichment, and the
     # transactions they are derived from are already committed above.
+    # Both passes below read PERSISTED history, never `transactions` -- that is
+    # the sync delta after the first run, and neither detector can see a cadence
+    # or a baseline in one day's rows.
     streams: list[dict] = []
     try:
-        streams = derive_streams(transactions)
+        history = _load_enriched_history(database)
+        streams = derive_streams(history)
         if streams:
             database.upsert_recurring_streams(streams)
     except Exception as error:  # noqa: BLE001 - enrichment must not sink the pipeline
+        history = pd.DataFrame()
         LOGGER.warning("Recurring-stream detection skipped: %s", type(error).__name__)
 
     # Step 6c: anomaly detection (Phase 34). Same reasoning as streams -- an enrichment over
@@ -212,7 +225,7 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
     # transaction-identifying is logged: only the exception class, per the scrubbed-logging
     # rule that applies to everything the daily pipeline prints.
     try:
-        _detect_and_store_anomalies(database, transactions, streams)
+        _detect_and_store_anomalies(database, history, streams)
     except Exception as error:  # noqa: BLE001 - enrichment must not sink the pipeline
         LOGGER.warning("Anomaly detection skipped: %s", type(error).__name__)
 

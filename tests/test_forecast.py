@@ -237,3 +237,59 @@ class ProjectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HorizonClampTests(unittest.TestCase):
+    def _four_months(self):
+        return _history(["2026-05", "2026-06", "2026-07", "2026-08"])
+
+    def test_a_far_future_goal_cannot_blow_past_the_ceiling(self):
+        """Extending to reach a goal is useful; a goal dated 2060 building ~400
+        rows to serialize and plot is not."""
+        from analytics.forecast import MAX_HORIZON_MONTHS
+
+        result = project(
+            self._four_months(),
+            [],
+            {},
+            starting=0.0,
+            today=date(2026, 9, 1),
+            furthest_goal_date=date(2060, 1, 1),
+        )
+        self.assertEqual(len(result["rows"]), MAX_HORIZON_MONTHS)
+
+
+class IncomeBaselineTests(unittest.TestCase):
+    def test_months_without_income_count_as_zero(self):
+        """Irregular income (freelance, bonuses) must not be read as though it
+        arrived every month -- the projected balance would climb faster than
+        reality, every month, forever. Expenses already reindex this way."""
+        rows = []
+        for month in ["2026-05", "2026-06", "2026-07", "2026-08"]:
+            year, mon = (int(part) for part in month.split("-"))
+            rows.append(
+                {
+                    "month": month,
+                    "date": pd.Timestamp(date(year, mon, 15)),
+                    "category": "FOOD_AND_DRINK",
+                    "tx_type": "expense",
+                    "adjusted_amount": -100.0,
+                }
+            )
+        # Income in only two of the four months.
+        for month in ["2026-07", "2026-08"]:
+            year, mon = (int(part) for part in month.split("-"))
+            rows.append(
+                {
+                    "month": month,
+                    "date": pd.Timestamp(date(year, mon, 1)),
+                    "category": "INCOME",
+                    "tx_type": "income",
+                    "adjusted_amount": 4000.0,
+                }
+            )
+
+        result = project(pd.DataFrame(rows), [], {}, starting=0.0, today=date(2026, 9, 1))
+
+        # Median over [0, 0, 4000, 4000] is 2000, not 4000.
+        self.assertAlmostEqual(result["rows"][0]["income"], 2000.0)

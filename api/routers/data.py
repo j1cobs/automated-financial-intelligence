@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from analytics.budget_periods import PERIOD_PATTERN, resolve_caps
 from analytics.forecast import (
     DEFAULT_HORIZON_MONTHS,
+    MAX_HORIZON_MONTHS,
     project as forecast_project,
     starting_balance as forecast_starting_balance,
 )
@@ -528,10 +529,17 @@ def get_budget(
     term stay `period`; only the HTTP name differs, and only because of that."""
     if month is not None and not PERIOD_PATTERN.match(month):
         raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
-    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
+    _tx, filtered, all_time, _acct_df = _load_filtered(db, filters)
+
+    # When the month picker names a month, that IS the period selection, so use
+    # the frame with every filter EXCEPT the period applied. Otherwise the
+    # filter bar's own period (default: last 3 months) silently wins: navigating
+    # back a fourth month lands outside it, every category reports $0 spent and
+    # nothing reads as over budget, while inherited caps still resolve normally.
+    frame = all_time if month is not None else filtered
     return BudgetResponse(
         **build_budget(
-            net_linked_transactions(exclude_duplicate_rows(filtered)),
+            net_linked_transactions(exclude_duplicate_rows(frame)),
             db.get_budget_periods(),
             period=month,
         )
@@ -916,11 +924,21 @@ class GoalUpdate(BaseModel):
 
 
 def _account_balances(acct_df) -> dict[str, float]:
+    """Account key -> current balance, with nulls as 0.
+
+    `float(x or 0.0)` is wrong here: `bool(nan)` is True, so a NaN balance
+    survives and FastAPI then serializes bare `NaN`, which `JSON.parse`
+    rejects -- taking the whole /goals response down. `fillna` first.
+    """
     if acct_df is None or acct_df.empty:
         return {}
+    if "account_key" not in acct_df.columns or "balance_current" not in acct_df.columns:
+        return {}
+    balances = acct_df[["account_key", "balance_current"]].copy()
+    balances["balance_current"] = balances["balance_current"].fillna(0.0)
     return {
-        str(row["account_key"]): float(row["balance_current"] or 0.0)
-        for _, row in acct_df.iterrows()
+        str(row["account_key"]): float(row["balance_current"])
+        for _, row in balances.iterrows()
     }
 
 
@@ -1001,6 +1019,25 @@ def update_goal(
     fields = body.model_dump(exclude_unset=True)
     if "target_date" in fields:
         fields["target_date"] = _parse_target_date(fields["target_date"])
+
+    # Re-baseline when the linked accounts change. `baseline_amount` was
+    # captured against the ORIGINAL set, so linking an account that already
+    # holds $50k would otherwise report $50k of instant progress -- precisely
+    # what the baseline exists to prevent. Only the newly-added accounts are
+    # re-baselined, so progress already earned on the existing ones is kept.
+    if fields.get("account_keys") is not None:
+        existing = next((g for g in db.get_savings_goals(include_archived=True)
+                         if g["id"] == goal_id), None)
+        if existing is not None:
+            _tx, acct_df = _load(db)
+            balances = _account_balances(acct_df)
+            added = set(fields["account_keys"]) - set(existing.get("account_keys", []))
+            removed = set(existing.get("account_keys", [])) - set(fields["account_keys"])
+            baseline = float(existing.get("baseline_amount") or 0.0)
+            baseline += sum(balances.get(key, 0.0) for key in added)
+            baseline -= sum(balances.get(key, 0.0) for key in removed)
+            fields["baseline_amount"] = baseline
+
     db.update_savings_goal(goal_id, **fields)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -1050,7 +1087,7 @@ def get_forecast(
     current_user: CurrentUserDep,
     db: DbDep,
     filters: FiltersDep,
-    horizon: int = Query(DEFAULT_HORIZON_MONTHS, ge=1, le=36),
+    horizon: int = Query(DEFAULT_HORIZON_MONTHS, ge=1, le=MAX_HORIZON_MONTHS),
 ) -> ForecastResponse:
     """Projects forward from today's spendable cash.
 
@@ -1073,6 +1110,10 @@ def get_forecast(
         starting=forecast_starting_balance(acct_df),
         horizon_months=horizon,
         furthest_goal_date=furthest,
+        # The `le=36` bound above is the real limit. Without passing it through,
+        # a goal dated far out would silently override it and build hundreds of
+        # rows to serialize and plot.
+        max_horizon_months=MAX_HORIZON_MONTHS,
     )
     return ForecastResponse(
         rows=[ForecastRow(**row) for row in result["rows"]],

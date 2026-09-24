@@ -665,7 +665,13 @@ class DatabaseClient:
         if period is not None:
             sql += " AND a.period = %s"
             params.append(period)
-        sql += " ORDER BY a.period DESC, a.severity DESC, a.subject"
+        # Explicit rank, NOT `severity DESC`: the column is TEXT, and
+        # descending lexicographic order puts 'medium' above 'high'.
+        sql += (
+            " ORDER BY a.period DESC,"
+            " CASE a.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,"
+            " a.subject"
+        )
 
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:

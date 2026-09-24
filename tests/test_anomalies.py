@@ -197,11 +197,11 @@ class PriceCreepTests(unittest.TestCase):
     def test_a_stable_price_is_not_an_anomaly(self):
         frame = self._history([16.99, 16.99, 16.99])
         streams = [self._stream(last_amount=-16.99)]
-        self.assertEqual(detect_price_creep(frame, streams, "2026-09"), [])
+        self.assertEqual(detect_price_creep(frame, streams, "2026-07"), [])
 
     def test_a_real_increase_is_flagged(self):
         frame = self._history([16.99, 16.99, 22.99])
-        found = detect_price_creep(frame, [self._stream()], "2026-09")
+        found = detect_price_creep(frame, [self._stream()], "2026-07")
 
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["kind"], KIND_PRICE_CREEP)
@@ -212,7 +212,7 @@ class PriceCreepTests(unittest.TestCase):
     def test_a_price_decrease_is_not_flagged(self):
         frame = self._history([22.99, 22.99, 16.99])
         streams = [self._stream(last_amount=-16.99)]
-        self.assertEqual(detect_price_creep(frame, streams, "2026-09"), [])
+        self.assertEqual(detect_price_creep(frame, streams, "2026-07"), [])
 
     def test_dual_threshold_suppresses_noise_on_small_streams(self):
         """A 20% rise on a $2 charge is 40 cents -- percentage alone would
@@ -236,27 +236,40 @@ class PriceCreepTests(unittest.TestCase):
             ]
         )
         streams = [self._stream(merchant_key="SMALL", description="SMALL", last_amount=-2.40)]
-        self.assertEqual(detect_price_creep(frame, streams, "2026-09"), [])
+        self.assertEqual(detect_price_creep(frame, streams, "2026-07"), [])
 
     def test_dual_threshold_suppresses_a_large_but_trivial_percentage(self):
         """$4 on a $400 charge is 1% -- the dollar amount alone would flag it."""
         frame = self._history([400.0, 400.0, 404.0])
         streams = [self._stream(last_amount=-404.0)]
-        self.assertEqual(detect_price_creep(frame, streams, "2026-09"), [])
+        self.assertEqual(detect_price_creep(frame, streams, "2026-07"), [])
 
     def test_severity_escalates_on_a_big_jump(self):
         frame = self._history([16.99, 16.99, 49.99])
-        found = detect_price_creep(frame, [self._stream(last_amount=-49.99)], "2026-09")
+        found = detect_price_creep(frame, [self._stream(last_amount=-49.99)], "2026-07")
         self.assertEqual(found[0]["severity"], SEVERITY_HIGH)
 
     def test_a_single_occurrence_has_nothing_to_compare_against(self):
         frame = self._history([22.99])
-        self.assertEqual(detect_price_creep(frame, [self._stream()], "2026-09"), [])
+        self.assertEqual(detect_price_creep(frame, [self._stream()], "2026-05"), [])
 
     def test_income_streams_are_ignored(self):
         frame = self._history([16.99, 16.99, 22.99])
         streams = [self._stream(direction="inflow")]
-        self.assertEqual(detect_price_creep(frame, streams, "2026-09"), [])
+        self.assertEqual(detect_price_creep(frame, streams, "2026-07"), [])
+
+    def test_a_rise_in_an_earlier_month_does_not_re_fire(self):
+        """The bug this scoping exists for: without it, the latest occurrence is
+        whenever it happened, compared against everything before it, and then
+        stamped with the CURRENT month -- so a price rise six months ago
+        produces a fresh, undismissed anomaly every month thereafter."""
+        frame = self._history([16.99, 16.99, 22.99])  # rise landed in July
+        self.assertEqual(detect_price_creep(frame, [self._stream()], "2026-08"), [])
+        self.assertEqual(detect_price_creep(frame, [self._stream()], "2026-09"), [])
+
+    def test_the_period_it_is_stamped_with_is_the_one_it_happened_in(self):
+        found = detect_price_creep(self._history([16.99, 16.99, 22.99]), [self._stream()], "2026-07")
+        self.assertEqual(found[0]["period"], "2026-07")
 
 
 class SuppressionTests(unittest.TestCase):
@@ -321,3 +334,34 @@ class DetectAnomaliesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContributingHashesTests(unittest.TestCase):
+    """The `is_outlier` shim can only flag rows if the frame carries hashes.
+
+    `PlaidIngestor._normalize` does NOT produce `transaction_hash` -- it is
+    computed inside `upsert_transactions` and never written back. Feeding the
+    ingested frame here therefore yielded no hashes, and `set_outlier_flags([])`
+    cleared every flag without setting any: the shim guaranteed exactly the
+    empty Streamlit view it exists to prevent.
+    """
+
+    def test_no_hashes_when_the_column_is_absent(self):
+        history = _steady_history()
+        history["2026-09"] = [(5, 400.0), (9, 400.0)]
+        frame = _rows(history).drop(columns=["transaction_hash"])
+
+        found = detect_category_drift(frame, "2026-09", today=date(2026, 9, 9))
+        self.assertEqual(found[0]["contributing_hashes"], [])
+
+    def test_hashes_are_the_largest_contributors(self):
+        history = _steady_history()
+        history["2026-09"] = [(5, 50.0), (7, 700.0), (9, 60.0)]
+        frame = _rows(history)
+
+        found = detect_category_drift(frame, "2026-09", today=date(2026, 9, 9))
+        hashes = found[0]["contributing_hashes"]
+
+        self.assertLessEqual(len(hashes), 3)
+        # The $700 row must be in there; it is what drove the anomaly.
+        self.assertIn("h-2026-09-7-700.0", hashes)

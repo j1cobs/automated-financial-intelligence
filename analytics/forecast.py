@@ -39,12 +39,17 @@ import pandas as pd
 
 __all__ = [
     "DEFAULT_HORIZON_MONTHS",
+    "MAX_HORIZON_MONTHS",
     "MIN_MONTHS_FOR_FORECAST",
     "project",
     "starting_balance",
 ]
 
 DEFAULT_HORIZON_MONTHS = 6
+
+#: Hard ceiling. A goal dated decades out must not turn a chart into hundreds
+#: of rows -- the projection is worthless that far ahead anyway.
+MAX_HORIZON_MONTHS = 36
 
 #: Complete months of history required before projecting at all.
 MIN_MONTHS_FOR_FORECAST = 3
@@ -134,6 +139,7 @@ def project(
     horizon_months: int = DEFAULT_HORIZON_MONTHS,
     today: date | None = None,
     furthest_goal_date: date | None = None,
+    max_horizon_months: int = MAX_HORIZON_MONTHS,
 ) -> dict[str, Any]:
     """Project `horizon_months` forward from `starting`.
 
@@ -168,11 +174,18 @@ def project(
     income = complete[complete["tx_type"] == "income"]
 
     # Median, not mean: one unusual month should not set the baseline.
-    monthly_income = (
-        statistics.median(income.groupby("month")["adjusted_amount"].sum().abs().tolist())
-        if not income.empty
-        else 0.0
-    )
+    #
+    # Reindexed over EVERY month, matching the per-category treatment below. A
+    # median over only the months that happen to contain income rows reads
+    # irregular income (freelance, bonuses) as though it arrived every month,
+    # and the projected balance then climbs faster than reality forever.
+    if income.empty:
+        monthly_income = 0.0
+    else:
+        income_by_month = income.groupby("month")["adjusted_amount"].sum().abs()
+        monthly_income = statistics.median(
+            [float(income_by_month.get(month, 0.0)) for month in months]
+        )
 
     per_category: dict[str, float] = {}
     if not expenses.empty:
@@ -187,6 +200,9 @@ def project(
     if furthest_goal_date is not None:
         goal_period = f"{furthest_goal_date.year:04d}-{furthest_goal_date.month:02d}"
         horizon = max(horizon, _months_between(current_period, goal_period))
+    # Clamped: extending to reach a goal is useful, but a goal dated 2060 must
+    # not build 400 rows to serialize and plot.
+    horizon = max(1, min(horizon, max_horizon_months))
 
     rows: list[dict[str, Any]] = []
     balance = float(starting)

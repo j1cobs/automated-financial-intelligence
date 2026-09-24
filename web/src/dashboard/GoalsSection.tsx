@@ -48,9 +48,14 @@ function paceLabel(goal: GoalItem): string {
   return `${rate} — from cash flow (${weeks} week${weeks === 1 ? '' : 's'} of balance history so far)`;
 }
 
+/** `on_track` is null for two different reasons, and they must not read the
+ *  same: either there is no projection (a zero pace), or there IS one but no
+ *  target date to judge it against. Conflating them put "No projection yet"
+ *  directly above "Projected Mar 2027". */
 function statusLabel(goal: GoalItem): string {
   if (goal.is_complete) return 'Reached';
-  if (goal.on_track === null) return 'No projection yet';
+  if (goal.projected_date === null) return 'No projection yet';
+  if (goal.on_track === null) return 'No target date';
   return goal.on_track ? 'On track' : 'Behind';
 }
 

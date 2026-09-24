@@ -138,6 +138,17 @@ describe('GoalsSection', () => {
     expect(screen.getByText('No projection yet')).toBeInTheDocument();
   });
 
+  // Both cases arrive as on_track === null but mean different things; reading
+  // them the same put "No projection yet" directly above "Projected Mar 2027".
+  it('distinguishes "no target date" from "no projection"', () => {
+    mockGoals([goal({ on_track: null, projected_date: '2027-03-01', target_date: null })]);
+    render(<GoalsSection />);
+
+    expect(screen.getByText('No target date')).toBeInTheDocument();
+    expect(screen.queryByText('No projection yet')).not.toBeInTheDocument();
+    expect(screen.getByText(/Projected Mar 2027/)).toBeInTheDocument();
+  });
+
   it('creates a goal from the form', async () => {
     const mutate = vi.fn();
     mockedUseCreateGoal.mockReturnValue({
