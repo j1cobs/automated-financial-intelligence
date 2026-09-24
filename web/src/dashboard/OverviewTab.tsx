@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { useOverview, useAnomalies } from '../lib/queries';
-import { useSetCreditLimit, useDismissAnomaly } from '../lib/mutations';
+import { useSetCreditLimit, useDismissAnomaly, useRefreshBalances } from '../lib/mutations';
 import { useFilters } from '../lib/FilterContext';
 import type {
   AssetMixItem,
@@ -230,6 +230,29 @@ function OwnerBalanceMiniList({ owner, maxBalance }: { owner: OwnerBalanceItem; 
 /** Active anomalies, each with the explanation generated at detection time and
  *  a dismiss control. Dismissal is period-scoped: it clears this month's alert
  *  and says nothing about next month's. */
+function RefreshBalancesControl() {
+  const refresh = useRefreshBalances();
+  const result = refresh.data;
+
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-ink-muted">
+      {refresh.isError && <span className="text-neg-text">Could not refresh balances.</span>}
+      {result && !refresh.isError && (
+        <span>
+          Refreshed {result.accounts_refreshed} account
+          {result.accounts_refreshed === 1 ? '' : 's'}
+          {/* A partial failure is reported rather than swallowed: one broken
+              Plaid Item should not silently look like a clean refresh. */}
+          {result.accounts_failed > 0 && `, ${result.accounts_failed} failed`}
+        </span>
+      )}
+      <Button size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+        {refresh.isPending ? 'Refreshing…' : 'Refresh balances'}
+      </Button>
+    </div>
+  );
+}
+
 function AnomaliesCard() {
   const { data, isPending, isError } = useAnomalies();
   const dismiss = useDismissAnomaly();
@@ -240,10 +263,7 @@ function AnomaliesCard() {
   if (anomalies.length === 0) return null;
 
   return (
-    <Card
-      title="Needs a Look"
-      caption="Spending that has moved away from your own recent pattern."
-    >
+    <Card title="Needs a Look" caption="Spending that has moved away from your own recent pattern.">
       <ul className="divide-y divide-hairline">
         {anomalies.map((anomaly) => (
           <li
@@ -711,6 +731,10 @@ export function OverviewTab() {
         monthly={ov.net_worth_trend_monthly}
         netWorthMomDelta={ov.net_worth_mom_delta}
       />
+
+      {/* Balances are otherwise only as fresh as the last pipeline run -- up to
+          24 hours stale, which reads as wrong right after money moves. */}
+      <RefreshBalancesControl />
 
       {/* Anomalies (Phase 34). Sits above the masonry pool and full-width,
           because an alert you have to hunt for is not an alert -- this is the

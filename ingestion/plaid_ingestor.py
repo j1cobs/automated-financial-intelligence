@@ -139,6 +139,56 @@ class PlaidIngestor(BaseIngestor):
             )
         return results
 
+    def refresh_balances(
+        self, owner_by_token: dict[str, str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Fetch live balances via `/accounts/balance/get` (Phase 35).
+
+        A Balance add-on works with existing access tokens -- no re-link, no
+        update mode -- so this needs nothing from the user beyond what the
+        pipeline already has.
+
+        Differs from `fetch_accounts` in one way that matters: `/accounts/get`
+        may serve Plaid's cached balance, while `/accounts/balance/get` forces a
+        fetch from the institution. The account shape returned is identical, so
+        callers can feed it straight to `upsert_plaid_accounts` and
+        `record_balance_snapshots`.
+
+        The per-instance raw-accounts cache is bypassed deliberately: the whole
+        point of this call is to not reuse a cached balance.
+        """
+        owner_by_token = owner_by_token or {}
+        all_accounts: list[dict[str, Any]] = []
+        failed_tokens: dict[str, str] = {}
+
+        for token in self.access_tokens:
+            fingerprint = hashlib.sha256(token.encode()).hexdigest()
+            try:
+                data = self._post(
+                    "accounts/balance/get",
+                    {
+                        "client_id": self.client_id,
+                        "secret": self.secret,
+                        "access_token": token,
+                    },
+                )
+                self._raw_accounts_cache[token] = data.get("accounts", [])
+                accounts = self._fetch_accounts_raw(token, owner_by_token.get(token, ""))
+                for account in accounts:
+                    account["_token_fingerprint"] = fingerprint
+                all_accounts.extend(accounts)
+            except Exception as error:
+                # Same scrubbed logging as everywhere else in this file: never
+                # the raw response, never an account mask.
+                LOGGER.warning(
+                    "Failed to refresh balances for token suffix=%s (%s)",
+                    token[-6:],
+                    _describe_plaid_error(error),
+                )
+                failed_tokens[fingerprint] = _describe_plaid_error(error)
+
+        return all_accounts, failed_tokens
+
     def fetch_accounts(self, owner_by_token: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
         owner_by_token = owner_by_token or {}
         all_accounts: list[dict[str, Any]] = []

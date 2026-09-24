@@ -27,6 +27,7 @@ vi.mock('../lib/queries', () => ({
 vi.mock('../lib/mutations', () => ({
   useSetCreditLimit: vi.fn(),
   useDismissAnomaly: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useRefreshBalances: vi.fn(() => ({ mutate: vi.fn(), isPending: false, isError: false, data: undefined })),
 }));
 
 // Recharts' ResponsiveContainer measures its parent via ResizeObserver, which

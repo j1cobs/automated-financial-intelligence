@@ -304,3 +304,22 @@ export function useDismissAnomaly() {
     },
   });
 }
+
+/** Fetch live balances on demand (Phase 35).
+ *
+ * Invalidates every analytics key rather than just one: a balance change moves
+ * net worth, the emergency-fund figure and goal progress at once. */
+export function useRefreshBalances() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<{ accounts_refreshed: number; accounts_failed: number }>('/accounts/refresh-balances', {
+        method: 'POST',
+      }),
+    onSettled: () => {
+      for (const key of ANALYTICS_QUERY_KEYS) {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }
+    },
+  });
+}

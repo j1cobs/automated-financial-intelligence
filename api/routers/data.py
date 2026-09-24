@@ -22,10 +22,11 @@ from pydantic import BaseModel
 from analytics.budget_periods import PERIOD_PATTERN
 from analytics.categories import CANONICAL_CATEGORIES, canonicalize
 from analytics.categorizer import merchant_key
+from ingestion.plaid_ingestor import PlaidIngestor
 
 from ..dataload import invalidate as invalidate_cache
 from ..dataload import load_frames
-from ..deps import CurrentUserDep, DbDep, RequireCsrfDep
+from ..deps import CurrentUserDep, DbDep, RequireCsrfDep, SettingsDep
 from ..filters import FiltersDep, apply_filters, build_filter_options
 from ..viewmodels import (
     build_anomalies,
@@ -805,3 +806,55 @@ def unlink_transaction(
     db.unlink_transaction(transaction_hash)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class BalanceRefreshResponse(BaseModel):
+    accounts_refreshed: int
+    accounts_failed: int
+
+
+@router.post("/accounts/refresh-balances", response_model=BalanceRefreshResponse)
+def refresh_balances(
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+    settings: SettingsDep,
+) -> BalanceRefreshResponse:
+    """Fetch live balances on demand (Phase 35).
+
+    Without this, balances are only as fresh as the last pipeline run -- up to
+    24 hours stale -- which makes goal progress and net worth read as wrong
+    right after money moves. `/accounts/balance/get` needs no re-link.
+
+    A partial failure is reported, not raised: one broken Plaid Item should not
+    stop the other two from refreshing.
+    """
+    if not settings.plaid_client_id or not settings.plaid_secret:
+        raise HTTPException(status_code=503, detail="Plaid credentials are not configured")
+    if not settings.plaid_access_tokens:
+        raise HTTPException(status_code=503, detail="No Plaid access tokens are configured")
+
+    ingestor = PlaidIngestor(
+        client_id=settings.plaid_client_id,
+        secret=settings.plaid_secret,
+        access_tokens=settings.plaid_access_tokens,
+        base_url=settings.plaid_base_url,
+    )
+    owner_by_token = dict(
+        zip(settings.plaid_access_tokens, settings.plaid_access_token_owners, strict=False)
+    )
+    accounts, failed = ingestor.refresh_balances(owner_by_token)
+
+    for account in accounts:
+        account.pop("_token_fingerprint", None)
+    if accounts:
+        key_remap = db.canonicalize_account_keys(accounts)
+        for account in accounts:
+            account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
+        db.upsert_plaid_accounts(accounts)
+        # Upserts today's row in place rather than adding a second one --
+        # account_balance_snapshots is UNIQUE (account_key, snapshot_date).
+        db.record_balance_snapshots(accounts)
+
+    invalidate_cache(db.database_url)
+    return BalanceRefreshResponse(accounts_refreshed=len(accounts), accounts_failed=len(failed))
