@@ -28,7 +28,6 @@ from api.viewmodels import (  # noqa: E402
     _build_last_period_metric,
     _build_metric,
     _weekly_series,
-    build_anomalies,
     build_budget,
     build_cash_flow,
     build_ledger,
@@ -1501,27 +1500,6 @@ class NetLinkedTransactionsIntegrationTests(unittest.TestCase):
         shopping_item = next((item for item in result["items"] if item["category"] == "Shopping"), None)
         self.assertIsNotNone(shopping_item)
         self.assertAlmostEqual(shopping_item["spent"], 1000.0)
-
-    def test_anomalies_reflects_netted_amounts(self) -> None:
-        """The /anomalies response also applies net_linked_transactions."""
-        # Linked pair both marked as outliers
-        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
-        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
-
-        df = _frame([expense, reimbursement])
-        df.loc[df["transaction_hash"] == "h-expense", "is_outlier"] = True
-        df.loc[df["transaction_hash"] == "h-reimbursement", "is_outlier"] = True
-        df["linked_transaction_hash"] = None
-        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
-        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
-
-        netted = net_linked_transactions(exclude_duplicate_rows(df))
-        result = build_anomalies(netted)
-
-        # Should have exactly 1 anomaly (the anchor expense with netted amount)
-        self.assertEqual(len(result), 1)
-        # build_anomalies returns adjusted_amount; for an expense (negative), this is -1000.0
-        self.assertAlmostEqual(result[0]["amount"], -1000.0)
 
 
 if __name__ == "__main__":

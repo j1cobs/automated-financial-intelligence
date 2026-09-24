@@ -37,6 +37,7 @@ import {
   budgetQueryKey,
   ledgerQueryKey,
   anomaliesQueryKey,
+  goalsQueryKey,
 } from './queries';
 import type { CategoryUpdateResponse, LedgerItem, LedgerResponse } from './types';
 
@@ -320,6 +321,34 @@ export function useRefreshBalances() {
       for (const key of ANALYTICS_QUERY_KEYS) {
         void queryClient.invalidateQueries({ queryKey: key });
       }
+    },
+  });
+}
+
+/** Savings-goal writes (Phase 33). Each invalidates the goals list; goal
+ *  numbers derive from account balances, which no goal write changes, so
+ *  nothing else needs refetching. */
+export function useCreateGoal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      name: string;
+      target_amount: number;
+      target_date: string | null;
+      account_keys: string[];
+    }) => apiFetch<unknown>('/goals', { method: 'POST', body }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: goalsQueryKey });
+    },
+  });
+}
+
+export function useDeleteGoal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (goalId: number) => apiFetch<void>(`/goals/${goalId}`, { method: 'DELETE' }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: goalsQueryKey });
     },
   });
 }

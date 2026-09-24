@@ -39,6 +39,12 @@ import pandas as pd
 
 from analytics.budget_periods import resolve_caps_detailed
 from analytics.categorizer import merchant_key
+from analytics.goals import (
+    contested_amounts,
+    pace as goal_pace,
+    progress as goal_progress,
+    projection as goal_projection,
+)
 from analytics.recurring import upcoming_from_streams
 
 from app.dashboard import (
@@ -1279,29 +1285,6 @@ def build_budget(
     return {"month": month_str, "items": items}
 
 
-def build_anomalies(df: pd.DataFrame) -> list[dict[str, Any]]:
-    """Port of `_section_anomalies`'s data. `df` must already be enriched and
-    duplicate-excluded."""
-    if df.empty:
-        return []
-    outliers = df[df["is_outlier"]].copy()
-    if outliers.empty:
-        return []
-    outliers = outliers.sort_values("date", ascending=False)
-    return [
-        {
-            "date": row["date"].date().isoformat(),
-            "owner_name": _clean(row["owner_name"]),
-            "account_name": row["account_name"],
-            "description": row["description"],
-            "amount": float(row["adjusted_amount"]),
-            "category": _clean(row["category"]),
-            "outlier_score": float(row["outlier_score"]),
-        }
-        for _, row in outliers.iterrows()
-    ]
-
-
 def build_ledger(
     df: pd.DataFrame,
     recurring_streams: list[dict[str, Any]] | None = None,
@@ -1368,3 +1351,54 @@ def build_ledger(
         }
         for position, (_, row) in enumerate(ordered.iterrows())
     ]
+
+
+def build_goals(
+    goals: list[dict[str, Any]],
+    balances: dict[str, float],
+    history_by_goal: dict[Any, list[dict[str, Any]]],
+    cashflow_monthly: float,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """View models for the Goals section (Phase 33).
+
+    `cashflow_monthly` is the fallback pace used until a goal has enough
+    balance history — see `analytics.goals.pace`. Every row carries its pace
+    **basis** and how many weeks back it, because a confident-looking pace
+    built on four weeks of snapshots is worse than no pace at all.
+    """
+    contested = contested_amounts(goals, balances)
+    rows: list[dict[str, Any]] = []
+
+    for goal in goals:
+        saved = goal_progress(goal, balances)
+        monthly_pace, basis, weeks = goal_pace(
+            goal, history_by_goal.get(goal["id"], []), cashflow_monthly
+        )
+        outlook = goal_projection(goal, saved=saved, monthly_pace=monthly_pace, today=today)
+
+        target = float(goal.get("target_amount") or 0.0)
+        rows.append(
+            {
+                "id": goal["id"],
+                "name": goal["name"],
+                "target_amount": target,
+                "target_date": goal["target_date"].isoformat() if goal.get("target_date") else None,
+                "account_keys": goal.get("account_keys", []),
+                "saved": saved,
+                # Fraction, never percentage points -- this module's unit contract.
+                "pct": (saved / target) if target > 0 else None,
+                "remaining": outlook["remaining"],
+                "monthly_pace": monthly_pace,
+                "pace_basis": basis,
+                "pace_weeks_of_history": weeks,
+                "projected_date": (
+                    outlook["projected_date"].isoformat() if outlook["projected_date"] else None
+                ),
+                "on_track": outlook["on_track"],
+                "is_complete": outlook["is_complete"],
+                "contested_amount": contested.get(goal["id"], 0.0),
+            }
+        )
+
+    return rows

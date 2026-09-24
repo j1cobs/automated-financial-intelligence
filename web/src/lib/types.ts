@@ -402,3 +402,37 @@ export interface FilterOptions {
   amount_min: number;
   amount_max: number;
 }
+
+// ---------------------------------------------------------------------------
+// GET /goals
+// ---------------------------------------------------------------------------
+
+export interface GoalItem {
+  id: number;
+  name: string;
+  target_amount: number;
+  target_date: string | null;
+  account_keys: string[];
+  saved: number;
+  /** Fraction (0.43 = 43%), not percentage points. */
+  pct: number | null;
+  remaining: number;
+  monthly_pace: number;
+  /** 'balance' once there are >= 12 weeks of snapshots, else 'cashflow'.
+   *  Always render this next to the pace: a figure built on four weeks that
+   *  looks as confident as one built on a year is worse than none. */
+  pace_basis: string;
+  pace_weeks_of_history: number;
+  projected_date: string | null;
+  /** null when there is no target date to be on track against, or no pace. */
+  on_track: boolean | null;
+  is_complete: boolean;
+  /** How much of this goal's balance sits in an account another goal also
+   *  claims. Overlap is allowed; hiding it would let the dashboard call two
+   *  goals on track when the same dollars can only buy one. */
+  contested_amount: number;
+}
+
+export interface GoalsResponse {
+  goals: GoalItem[];
+}

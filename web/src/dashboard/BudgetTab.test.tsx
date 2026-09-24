@@ -12,10 +12,13 @@ vi.mock('../lib/queries', () => ({
   useCategories: vi.fn(),
   useCashFlow: vi.fn(),
   useAnomalies: vi.fn(() => ({ data: { anomalies: [] } })),
+  useGoals: vi.fn(() => ({ data: { goals: [] }, isPending: false })),
 }));
 
 vi.mock('../lib/mutations', () => ({
   useUpsertBudget: vi.fn(),
+  useCreateGoal: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useDeleteGoal: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }));
 
 // Recharts' ResponsiveContainer measures its parent via ResizeObserver, which

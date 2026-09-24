@@ -29,6 +29,7 @@ import type {
   AnomaliesResponse,
   CategoriesResponse,
   FilterOptions,
+  GoalsResponse,
 } from './types';
 
 export const overviewQueryKey = ['overview'] as const;
@@ -38,6 +39,7 @@ export const ledgerQueryKey = ['ledger'] as const;
 export const anomaliesQueryKey = ['anomalies'] as const;
 export const categoriesQueryKey = ['categories'] as const;
 export const filterOptionsQueryKey = ['filter-options'] as const;
+export const goalsQueryKey = ['goals'] as const;
 
 /** Append the filters' query string to a path; omits `?` entirely when every filter is default. */
 function withFilters(path: string, filters: DashboardFilters): string {
@@ -111,5 +113,13 @@ export function useFilterOptions() {
   return useQuery({
     queryKey: filterOptionsQueryKey,
     queryFn: () => apiFetch<FilterOptions>('/filter-options'),
+  });
+}
+
+export function useGoals() {
+  const { filters } = useFilters();
+  return useQuery({
+    queryKey: [...goalsQueryKey, filters],
+    queryFn: () => apiFetch<GoalsResponse>(withFilters('/goals', filters)),
   });
 }

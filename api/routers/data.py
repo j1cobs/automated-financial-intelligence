@@ -29,7 +29,7 @@ from ..dataload import load_frames
 from ..deps import CurrentUserDep, DbDep, RequireCsrfDep, SettingsDep
 from ..filters import FiltersDep, apply_filters, build_filter_options
 from ..viewmodels import (
-    build_anomalies,
+    build_goals,
     build_budget,
     build_cash_flow,
     build_ledger,
@@ -858,3 +858,156 @@ def refresh_balances(
 
     invalidate_cache(db.database_url)
     return BalanceRefreshResponse(accounts_refreshed=len(accounts), accounts_failed=len(failed))
+
+
+# ---------------------------------------------------------------------------
+# Savings goals (Phase 33)
+# ---------------------------------------------------------------------------
+
+
+class GoalItem(BaseModel):
+    id: int
+    name: str
+    target_amount: float
+    target_date: str | None
+    account_keys: list[str]
+    saved: float
+    pct: float | None
+    """Fraction (0.43 = 43%), not percentage points."""
+    remaining: float
+    monthly_pace: float
+    pace_basis: str
+    """'balance' once there are >= 12 weeks of snapshots, else 'cashflow'.
+    Always rendered alongside the number: a pace built on four weeks of history
+    that looks as confident as one built on a year is worse than none."""
+    pace_weeks_of_history: int
+    projected_date: str | None
+    on_track: bool | None
+    is_complete: bool
+    contested_amount: float
+    """How much of this goal's balance sits in an account another goal also
+    claims. Overlap is allowed -- people really do save for two things in one
+    account -- but hiding it would let the dashboard call two goals on track
+    when the same dollars can only buy one."""
+
+
+class GoalsResponse(BaseModel):
+    goals: list[GoalItem]
+
+
+class GoalCreate(BaseModel):
+    name: str
+    target_amount: float
+    target_date: str | None = None
+    account_keys: list[str] = []
+
+
+class GoalUpdate(BaseModel):
+    name: str | None = None
+    target_amount: float | None = None
+    target_date: str | None = None
+    account_keys: list[str] | None = None
+    is_archived: bool | None = None
+
+
+def _account_balances(acct_df) -> dict[str, float]:
+    if acct_df is None or acct_df.empty:
+        return {}
+    return {
+        str(row["account_key"]): float(row["balance_current"] or 0.0)
+        for _, row in acct_df.iterrows()
+    }
+
+
+def _parse_target_date(value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="target_date must be 'YYYY-MM-DD'") from error
+
+
+@router.get("/goals", response_model=GoalsResponse)
+def get_goals(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> GoalsResponse:
+    tx, _filtered, all_time, acct_df = _load_filtered(db, filters)
+    goals = db.get_savings_goals()
+
+    balances = _account_balances(acct_df)
+    history = {
+        goal["id"]: db.get_goal_balance_history(goal.get("account_keys", [])) for goal in goals
+    }
+
+    # Fallback pace, used until a goal has 12 weeks of balance snapshots.
+    # Measured over all history rather than the filtered period: saving capacity
+    # is a property of the user's life, not of the window they are looking at.
+    real = net_linked_transactions(exclude_duplicate_rows(all_time))
+    cashflow_monthly = 0.0
+    if not real.empty and "month" in real.columns:
+        monthly_net = real.groupby("month")["adjusted_amount"].sum()
+        if len(monthly_net) > 0:
+            cashflow_monthly = max(float(monthly_net.mean()), 0.0)
+
+    return GoalsResponse(
+        goals=[
+            GoalItem(**item)
+            for item in build_goals(goals, balances, history, cashflow_monthly)
+        ]
+    )
+
+
+@router.post("/goals", response_model=GoalItem, status_code=status.HTTP_201_CREATED)
+def create_goal(
+    body: GoalCreate,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> GoalItem:
+    """Creating a goal captures the linked accounts' CURRENT combined balance as
+    the baseline, so progress measures growth from here rather than crediting
+    money that was already sitting there."""
+    _tx, acct_df = _load(db)
+    balances = _account_balances(acct_df)
+    baseline = sum(balances.get(key, 0.0) for key in body.account_keys)
+
+    goal_id = db.create_savings_goal(
+        name=body.name,
+        target_amount=body.target_amount,
+        target_date=_parse_target_date(body.target_date),
+        account_keys=body.account_keys,
+        baseline_amount=baseline,
+    )
+    invalidate_cache(db.database_url)
+
+    created = next((g for g in db.get_savings_goals() if g["id"] == goal_id), None)
+    if created is None:
+        raise HTTPException(status_code=500, detail="Goal was created but could not be read back")
+    return GoalItem(**build_goals([created], balances, {goal_id: []}, 0.0)[0])
+
+
+@router.patch("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+def update_goal(
+    goal_id: int,
+    body: GoalUpdate,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    fields = body.model_dump(exclude_unset=True)
+    if "target_date" in fields:
+        fields["target_date"] = _parse_target_date(fields["target_date"])
+    db.update_savings_goal(goal_id, **fields)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_goal(
+    goal_id: int,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    db.delete_savings_goal(goal_id)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

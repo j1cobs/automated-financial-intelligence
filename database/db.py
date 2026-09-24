@@ -519,6 +519,139 @@ class DatabaseClient:
         """
         self._execute_many(sql, [(category, monthly_limit)])
 
+    def get_savings_goals(self, include_archived: bool = False) -> list[dict]:
+        """Goals with their linked account keys attached."""
+        sql = """
+        SELECT id, name, target_amount::double precision, target_date,
+               baseline_amount::double precision, started_on, is_archived
+        FROM savings_goals
+        """
+        if not include_archived:
+            sql += " WHERE NOT is_archived"
+        sql += " ORDER BY COALESCE(target_date, DATE '9999-12-31'), name"
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+                cur.execute("SELECT goal_id, account_key FROM savings_goal_accounts")
+                links = cur.fetchall()
+
+        by_goal: dict[int, list[str]] = {}
+        for goal_id, account_key in links:
+            by_goal.setdefault(goal_id, []).append(account_key)
+
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "target_amount": r[2],
+                "target_date": r[3],
+                "baseline_amount": r[4],
+                "started_on": r[5],
+                "is_archived": r[6],
+                "account_keys": sorted(by_goal.get(r[0], [])),
+            }
+            for r in rows
+        ]
+
+    def create_savings_goal(
+        self,
+        name: str,
+        target_amount: float,
+        target_date: dt.date | None,
+        account_keys: list[str],
+        baseline_amount: float,
+    ) -> int:
+        """Create a goal and link its accounts in one transaction.
+
+        `baseline_amount` is captured by the caller from the accounts' current
+        balances, so progress starts from zero rather than counting money that
+        was already there.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO savings_goals (name, target_amount, target_date, baseline_amount)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (name, target_amount, target_date, baseline_amount),
+                )
+                goal_id = cur.fetchone()[0]
+                for key in account_keys:
+                    cur.execute(
+                        """
+                        INSERT INTO savings_goal_accounts (goal_id, account_key)
+                        VALUES (%s, %s)
+                        ON CONFLICT (goal_id, account_key) DO NOTHING
+                        """,
+                        (goal_id, key),
+                    )
+            conn.commit()
+        return goal_id
+
+    def update_savings_goal(self, goal_id: int, **fields) -> None:
+        """Update a goal's editable fields, and its account links when given.
+
+        `account_keys` is replaced wholesale rather than merged: the UI presents
+        it as a set of checkboxes, so an omitted key means "unlinked".
+        """
+        account_keys = fields.pop("account_keys", None)
+        allowed = {"name", "target_amount", "target_date", "baseline_amount", "is_archived"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                if updates:
+                    assignments = ", ".join(f"{key} = %s" for key in updates)
+                    cur.execute(
+                        f"UPDATE savings_goals SET {assignments}, updated_at = NOW() WHERE id = %s",
+                        (*updates.values(), goal_id),
+                    )
+                if account_keys is not None:
+                    cur.execute(
+                        "DELETE FROM savings_goal_accounts WHERE goal_id = %s", (goal_id,)
+                    )
+                    for key in account_keys:
+                        cur.execute(
+                            "INSERT INTO savings_goal_accounts (goal_id, account_key) VALUES (%s, %s)",
+                            (goal_id, key),
+                        )
+            conn.commit()
+
+    def delete_savings_goal(self, goal_id: int) -> bool:
+        """Delete a goal. Its account links go with it (ON DELETE CASCADE)."""
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM savings_goals WHERE id = %s", (goal_id,))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted > 0
+
+    def get_goal_balance_history(self, account_keys: list[str]) -> list[dict]:
+        """Combined daily balance of `account_keys`, oldest first.
+
+        Feeds `analytics.goals.pace`. Days where only some of the accounts have
+        a snapshot still sum what exists -- partial coverage is better than a
+        gap, and the pace only reads the first and last rows anyway.
+        """
+        if not account_keys:
+            return []
+        sql = """
+        SELECT snapshot_date, SUM(balance_current)::double precision
+        FROM account_balance_snapshots
+        WHERE account_key = ANY(%s)
+        GROUP BY snapshot_date
+        ORDER BY snapshot_date
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (account_keys,))
+                rows = cur.fetchall()
+        return [{"snapshot_date": r[0], "balance": r[1] or 0.0} for r in rows]
+
     def get_anomalies(self, period: str | None = None) -> list[dict]:
         """Detected anomalies, newest period first, excluding dismissed ones."""
         sql = """

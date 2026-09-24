@@ -28,6 +28,7 @@ import { TabSkeleton, ErrorState } from './LoadingState';
 import { DIRECTION_GLYPH, type Tone } from '../lib/polarity';
 import { formatCategory } from '../lib/categories';
 import { Button } from '../components/Button';
+import { GoalsSection } from './GoalsSection';
 
 /** How many trailing months the per-category sparkline shows. */
 const SPARKLINE_MONTHS = 6;
@@ -203,6 +204,8 @@ export function BudgetTab() {
         </div>
       </div>
 
+      <GoalsSection />
+
       {allItems.length === 0 ? (
         <div className="rounded-md bg-surface-2 p-6 text-center text-ink-muted">
           No budget data available.
@@ -341,9 +344,7 @@ function BudgetItemRow({
           </div>
         )}
 
-        {drift && !isEditing && (
-          <p className="mt-1 text-xs text-neg-text">{drift}</p>
-        )}
+        {drift && !isEditing && <p className="mt-1 text-xs text-neg-text">{drift}</p>}
 
         {item.details.length > 0 && !isEditing && (
           <div className="mt-1">
@@ -403,19 +404,10 @@ function BudgetItemRow({
       <div className="flex gap-2 sm:w-auto">
         {isEditing ? (
           <>
-            <Button
-              variant="primary"
-              onClick={onSave}
-              disabled={isLoading}
-              className="flex-1 sm:flex-auto"
-            >
+            <Button variant="primary" onClick={onSave} disabled={isLoading} className="flex-1 sm:flex-auto">
               {isLoading ? 'Saving...' : 'Save'}
             </Button>
-            <Button
-              onClick={onCancel}
-              disabled={isLoading}
-              className="flex-1 bg-surface-3 sm:flex-auto"
-            >
+            <Button onClick={onCancel} disabled={isLoading} className="flex-1 bg-surface-3 sm:flex-auto">
               Cancel
             </Button>
           </>

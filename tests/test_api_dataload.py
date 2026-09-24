@@ -159,7 +159,6 @@ class SharedFrameIsNotMutatedTests(unittest.TestCase):
     def test_a_full_builder_pass_leaves_the_cached_frame_untouched(self) -> None:
         from api.filters import DashboardFilters, apply_filters
         from api.viewmodels import (
-            build_anomalies,
             build_budget,
             build_cash_flow,
             build_ledger,
@@ -180,7 +179,6 @@ class SharedFrameIsNotMutatedTests(unittest.TestCase):
         build_overview(real, acct, exclude_duplicate_rows(all_time))
         build_cash_flow(real)
         build_budget(real, [{"category": "Shopping", "period": "2020-01", "monthly_limit": 100.0}])
-        build_anomalies(real)
         build_ledger(filtered)
 
         # Any builder that mutated in place instead of copying would corrupt every other
