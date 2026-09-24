@@ -92,7 +92,14 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   `anomalies.py` (Phase 34), `recurring.py` (Phase 30), `budget_periods.py` (Phase 28), `goals.py` (Phase 33) and
   `forecast.py` (Phase 32) are all pure and DB-free, so their rules are unit-testable without a database. When changing
   the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and `pipeline/runner.py`'s classification block.
-- `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
+- `database/` — **The transactions date column is `transaction_date`.** `date` is only ever an *alias*,
+  introduced by `load_financial_data` (`app/dashboard.py:330`, `t.transaction_date AS date`) and carried by
+  every DataFrame built from it — so `date`, `month` and `adjusted_amount` are analytics vocabulary and must
+  never appear in SQL against the table. Migration 026 shipped with `MIN(t.date)` and took down every entry
+  point that calls `ensure_schema()`. Because the repo mocks psycopg everywhere else, SQL is only ever
+  verified by `tests/test_migrations_execute.py` and `tests/test_db_roundtrip.py`, which need a real Postgres
+  (`MIGRATION_TEST_DATABASE_URL`; CI's `migrations` job supplies one). Add new raw SQL to one of them.
+  `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
   (currently 001–029) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
   (`DATABASE_URL`). `pipeline_runs` (migration 013) is where per-run detail lives — `pipeline/runner.py::main()`
   writes one row per run via `log_pipeline_run()` (counts on success; `error_class`/a truncated `error_message` on
@@ -107,9 +114,12 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   (where `user_category IS NULL`, so existing corrections are never overwritten). Returns the backfill count, which surfaces in
   the UI as the number of rows affected. See `docs/adr/0004-transaction-categorization.md` for the full rationale and the
   exact-match-backfill limitation.
-  Phases 28–34 add four migrations (026–029): `budget_periods` (per-month caps, with a seed **guarded on an empty
-  table** — `ensure_schema()` re-runs every `.sql` on every call, so an unguarded seed resurrects a cap the user
-  cleared), `recurring_streams`, `savings_goals`/`savings_goal_accounts`, and `anomalies`/`anomaly_feedback`.
+  Phases 28–34 add four migrations (026–029): `budget_periods` (per-month caps, with a seed **guarded on a row in
+  `schema_seeds`** — `ensure_schema()` re-runs every `.sql` on every call, so an unguarded seed resurrects a cap
+  the user cleared; guarding on `budget_periods` being empty is not enough, since clearing the *last* cap empties
+  the table and re-fires the seed), `recurring_streams`, `savings_goals`/`savings_goal_accounts`, and
+  `anomalies`/`anomaly_feedback`. `schema_seeds` records one-time **data** seeds; it is not a migration-version
+  table, and the DDL still re-runs every call.
   **`budgets` (migration 002) is now Streamlit-owned and must not be written by the new path.** `app/dashboard.py` both
   reads it (`:1116`) and *writes* it (`:1186`), so mirroring resolved caps into it would silently discard budgets saved
   from Streamlit. `transactions.is_outlier` is likewise kept written only as a compatibility shim for that frozen

@@ -160,13 +160,25 @@ class MigrationSeedGuardTests(unittest.TestCase):
     def test_unique_on_category_and_period(self):
         self.assertRegex(self.sql, r"UNIQUE\s*\(\s*category\s*,\s*period\s*\)")
 
-    def test_seed_is_guarded_on_an_empty_table(self):
+    def test_seed_is_guarded_on_a_persistent_marker(self):
+        """Guarding on an empty `budget_periods` was not enough: clearing the
+        last remaining cap empties the table and the seed re-fires. The marker
+        records that the upgrade happened, which stays true regardless of what
+        the user later deletes.
+
+        The behaviour itself is pinned by
+        `tests/test_migrations_execute.py::test_the_seed_does_not_resurrect_a_cleared_cap`,
+        which executes this SQL. These string assertions only guard against the
+        clause being dropped when no database is available.
+        """
         normalized = re.sub(r"\s+", " ", self.sql)
         self.assertIn(
-            "WHERE NOT EXISTS (SELECT 1 FROM budget_periods)",
+            "WHERE NOT EXISTS (SELECT 1 FROM schema_seeds WHERE name = "
+            "'budget_periods_from_budgets')",
             normalized,
             "the one-time seed must not re-run, or a cleared cap is resurrected",
         )
+        self.assertIn("CREATE TABLE IF NOT EXISTS schema_seeds", normalized)
 
     def test_seed_cannot_collide(self):
         self.assertIn("ON CONFLICT (category, period) DO NOTHING", self.sql)
