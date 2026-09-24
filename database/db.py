@@ -519,6 +519,62 @@ class DatabaseClient:
         """
         self._execute_many(sql, [(category, monthly_limit)])
 
+    def update_recurring_for_stream(self, stream_id: str, recurring: bool) -> int:
+        """Set `is_recurring` on every transaction belonging to a stream.
+
+        Phase 31's fix for "the same charge can be checked recurring over and
+        over": the flag is per-row, so each occurrence was independently
+        checkable and the Overview list then showed near-duplicates. Toggling a
+        stream moves every member row at once.
+
+        Membership is by `merchant_key`, which is what the stream is grouped on
+        in the first place — so this stays correct for streams from Plaid and
+        from local derivation alike. Returns the number of rows changed.
+        """
+        sql = """
+        UPDATE transactions
+        SET is_recurring = %s
+        WHERE transaction_hash = ANY(%s)
+        """
+        hashes = self.transaction_hashes_for_stream(stream_id)
+        if not hashes:
+            return 0
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (recurring, hashes))
+                changed = cur.rowcount
+            conn.commit()
+        return changed
+
+    def transaction_hashes_for_stream(self, stream_id: str) -> list[str]:
+        """Hashes of the transactions belonging to a stream.
+
+        `merchant_key` is derived in Python (`analytics.categorizer.merchant_key`),
+        not stored as a column, so membership is resolved here rather than in SQL:
+        fetch the stream's key and the candidate rows' merchant fields, then match
+        using the same normalizer the categorizer uses. Doing it in SQL would mean
+        reimplementing that normalization in two places.
+        """
+        from analytics.categorizer import merchant_key as _merchant_key
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT merchant_key FROM recurring_streams WHERE stream_id = %s",
+                    (stream_id,),
+                )
+                row = cur.fetchone()
+                if not row or not row[0]:
+                    return []
+                target = row[0]
+
+                cur.execute(
+                    "SELECT transaction_hash, merchant_name, description FROM transactions"
+                )
+                return [
+                    r[0] for r in cur.fetchall() if _merchant_key(r[1], str(r[2] or "")) == target
+                ]
+
     def get_recurring_streams(self, active_only: bool = True) -> list[dict]:
         """Return detected recurring streams (Phase 30)."""
         sql = """

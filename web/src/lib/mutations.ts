@@ -176,15 +176,38 @@ export function useUpdateRecurring() {
       if (context) restoreLedgerSnapshot(queryClient, context.snapshot);
     },
     onSettled: () => {
-      // `is_recurring` is read nowhere in api/viewmodels.py's aggregates (only in
-      // `build_ledger`), so it affects the ledger row and nothing else -- analytics is
-      // deliberately never invalidated here.
-      //
-      // This holds only while that stays true. PLAN.md Phase 15 Fix 12 proposes a
-      // "committed monthly spend" figure derived from `is_recurring`; the day any
-      // aggregate reads that column, this must invalidate analytics like the other two
-      // mutations, or toggling Recurring will leave the new figure silently stale.
+      // This used to skip analytics on the grounds that no aggregate read
+      // `is_recurring`. That stopped being true: `build_overview` reads it for
+      // the Committed/Recurring Spend card (api/viewmodels.py:800), which is
+      // exactly the case the old comment warned about. Without this, toggling
+      // Recurring left that card showing a figure that no longer matched.
       void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+/** Toggle recurring for a whole detected stream (Phase 31).
+ *
+ * The per-row mutation above still applies to transactions belonging to no
+ * stream. This one exists because `is_recurring` is per-row: every occurrence
+ * of the same charge was independently checkable, so the same bill could be
+ * flagged over and over and Upcoming then listed near-duplicates.
+ *
+ * No optimistic patch here: one click changes an unknown number of rows, so
+ * there is nothing honest to write into the cache up front. The ledger is
+ * refetched instead. */
+export function useUpdateStreamRecurring() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ streamId, recurring }: { streamId: string; recurring: boolean }) =>
+      apiFetch<{ updated_count: number }>(`/streams/${encodeURIComponent(streamId)}/recurring`, {
+        method: 'PATCH',
+        body: { recurring },
+      }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
     },
   });
 }

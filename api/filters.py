@@ -71,6 +71,7 @@ class DashboardFilters(BaseModel):
     search: str | None = None
     outliers_only: bool = False
     duplicates_only: bool = False
+    recurring_only: bool = False
     date_from: date | None = Field(
         default=None,
         description=(
@@ -100,6 +101,7 @@ class DashboardFilters(BaseModel):
             and not self.search
             and not self.outliers_only
             and not self.duplicates_only
+            and not self.recurring_only
             and self.date_from is None
             and self.date_to is None
         )
@@ -116,6 +118,7 @@ def dashboard_filters(
     search: Annotated[str | None, Query()] = None,
     outliers_only: Annotated[bool, Query()] = False,
     duplicates_only: Annotated[bool, Query()] = False,
+    recurring_only: Annotated[bool, Query()] = False,
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
 ) -> DashboardFilters:
@@ -133,6 +136,7 @@ def dashboard_filters(
         search=search,
         outliers_only=outliers_only,
         duplicates_only=duplicates_only,
+        recurring_only=recurring_only,
         date_from=date_from,
         date_to=date_to,
     )
@@ -205,6 +209,12 @@ def _non_date_mask(df: pd.DataFrame, filters: DashboardFilters) -> pd.Series:
 
     if filters.outliers_only:
         mask &= df["is_outlier"].fillna(False).astype(bool)
+
+    if filters.recurring_only:
+        # NULL is "ingested before this column existed", i.e. unknown -- but for a
+        # *filter* the only honest reading of unknown is "don't show it", since the
+        # user asked for rows that are recurring, not rows that might be.
+        mask &= df["is_recurring"].fillna(False).astype(bool)
 
     if filters.duplicates_only:
         # Grouped on `account_key`, NOT `account_name`: two distinct accounts can share a

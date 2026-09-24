@@ -17,6 +17,10 @@ function tx(overrides: Partial<LedgerItem>): LedgerItem {
     pfc_detailed: null,
     category_source: null,
     linked_transaction_hash: null,
+
+    stream_id: null,
+
+    stream_description: null,
     ...overrides,
   };
 }

@@ -172,9 +172,15 @@ export interface BiggestExpenseItem {
 export interface UpcomingRecurringItem {
   description: string;
   amount: number;
-  /** A median-interval projection, not a confirmed billing date. */
+  /** A projection — a detected stream's predicted next date, or (with no
+   *  streams yet) last occurrence plus the median interval. Not a confirmed
+   *  billing date. */
   next_expected_date: string;
-  typical_interval_days: number;
+  typical_interval_days: number | null;
+  /** 'early_detection' marks a stream with fewer than three occurrences, shown
+   *  as lower confidence rather than asserted. null on the legacy fallback. */
+  status: string | null;
+  stream_id: string | null;
 }
 
 export interface Overview {
@@ -325,6 +331,12 @@ export interface LedgerItem {
   pfc_detailed: string | null;
   category_source: string | null;
   linked_transaction_hash: string | null;
+  /** When set, this row belongs to a detected recurring series and its
+   *  recurring control toggles the WHOLE series; when null the control is
+   *  per-row. The two have different consequences, so they must look
+   *  different before the click. */
+  stream_id: string | null;
+  stream_description: string | null;
 }
 
 export interface LedgerResponse {

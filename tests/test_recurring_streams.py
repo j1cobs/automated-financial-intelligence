@@ -19,6 +19,8 @@ from analytics.recurring import (
     cadence_from_days,
     derive_streams,
     predict_next_date,
+    resolve_is_recurring,
+    upcoming_from_streams,
 )
 
 
@@ -217,6 +219,153 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS recurring_streams", sql)
         self.assertIn("stream_id            TEXT PRIMARY KEY", sql)
         self.assertIn("CREATE INDEX IF NOT EXISTS", sql)
+
+
+class ResolveIsRecurringTests(unittest.TestCase):
+    """The pipeline never overwrites a user decision -- the same rule
+    user_category and is_duplicate already follow."""
+
+    def test_user_flag_wins_even_with_no_matching_stream(self):
+        self.assertTrue(resolve_is_recurring(True, in_stream=False))
+
+    def test_stream_membership_applies_when_the_user_has_not_decided(self):
+        self.assertTrue(resolve_is_recurring(False, in_stream=True))
+        self.assertTrue(resolve_is_recurring(None, in_stream=True))
+
+    def test_neither_means_not_recurring(self):
+        self.assertFalse(resolve_is_recurring(False, in_stream=False))
+
+    def test_null_flag_is_unknown_not_false(self):
+        """NULL means "ingested before this column existed", so it must fall
+        through to stream membership rather than being read as a decision."""
+        self.assertTrue(resolve_is_recurring(None, in_stream=True))
+        self.assertFalse(resolve_is_recurring(None, in_stream=False))
+
+
+class UpcomingFromStreamsTests(unittest.TestCase):
+    def _stream(self, **overrides):
+        base = {
+            "stream_id": "local:NETFLIX",
+            "merchant_key": "NETFLIX",
+            "description": "NETFLIX.COM",
+            "cadence": CADENCE_MONTHLY,
+            "direction": "outflow",
+            "last_amount": -16.99,
+            "predicted_next_date": date(2026, 9, 20),
+            "status": "mature",
+            "is_active": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_one_entry_per_stream(self):
+        rows = upcoming_from_streams([self._stream()], today=date(2026, 9, 10))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["description"], "NETFLIX.COM")
+        self.assertAlmostEqual(rows[0]["amount"], 16.99)
+
+    def test_amount_is_reported_as_a_positive_magnitude(self):
+        rows = upcoming_from_streams([self._stream()], today=date(2026, 9, 10))
+        self.assertGreater(rows[0]["amount"], 0)
+
+    def test_income_streams_are_excluded(self):
+        """Mixing payroll in made the card read as though income were a bill."""
+        rows = upcoming_from_streams(
+            [self._stream(direction="inflow", last_amount=2500.0)], today=date(2026, 9, 10)
+        )
+        self.assertEqual(rows, [])
+
+    def test_inactive_streams_are_excluded(self):
+        rows = upcoming_from_streams([self._stream(is_active=False)], today=date(2026, 9, 10))
+        self.assertEqual(rows, [])
+
+    def test_streams_with_no_prediction_are_skipped_not_blank(self):
+        rows = upcoming_from_streams(
+            [self._stream(predicted_next_date=None)], today=date(2026, 9, 10)
+        )
+        self.assertEqual(rows, [])
+
+    def test_a_stale_prediction_rolls_forward_by_whole_cadences(self):
+        """A missed or late charge should not leave a date in the past on the card."""
+        rows = upcoming_from_streams(
+            [self._stream(predicted_next_date=date(2026, 6, 20))], today=date(2026, 9, 10)
+        )
+        self.assertEqual(rows[0]["next_expected_date"], "2026-09-18")
+
+    def test_sorted_soonest_first(self):
+        rows = upcoming_from_streams(
+            [
+                self._stream(stream_id="a", description="LATER", predicted_next_date=date(2026, 9, 25)),
+                self._stream(stream_id="b", description="SOONER", predicted_next_date=date(2026, 9, 12)),
+            ],
+            today=date(2026, 9, 10),
+        )
+        self.assertEqual([r["description"] for r in rows], ["SOONER", "LATER"])
+
+    def test_accepts_an_iso_string_date(self):
+        """Rows read back from Postgres may arrive as strings."""
+        rows = upcoming_from_streams(
+            [self._stream(predicted_next_date="2026-09-20")], today=date(2026, 9, 10)
+        )
+        self.assertEqual(rows[0]["next_expected_date"], "2026-09-20")
+
+    def test_status_is_carried_through_for_confidence_labelling(self):
+        rows = upcoming_from_streams(
+            [self._stream(status="early_detection")], today=date(2026, 9, 10)
+        )
+        self.assertEqual(rows[0]["status"], "early_detection")
+
+
+class StreamRecurringToggleTests(unittest.TestCase):
+    """Phase 31's fix for "the same charge can be checked recurring over and
+    over": toggling a stream moves every member row at once."""
+
+    def test_membership_uses_the_same_normalizer_as_the_categorizer(self):
+        from unittest.mock import MagicMock, patch
+
+        from database.db import DatabaseClient
+
+        cursor = MagicMock()
+        # First fetch: the stream's merchant_key. Second: candidate rows.
+        cursor.fetchone.return_value = ("NETFLIX.COM",)
+        cursor.fetchall.return_value = [
+            ("hash-a", None, "NETFLIX.COM"),
+            ("hash-b", "NETFLIX.COM", "Purchase / NETFLIX.COM"),
+            ("hash-c", None, "SPOTIFY"),
+        ]
+        cursor.__enter__.return_value = cursor
+        cursor.__exit__.return_value = False
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        connection.__enter__.return_value = connection
+        connection.__exit__.return_value = False
+
+        with patch("database.db.psycopg.connect", MagicMock(return_value=connection)):
+            hashes = DatabaseClient("postgresql://x/y").transaction_hashes_for_stream(
+                "local:NETFLIX.COM"
+            )
+
+        # hash-b matches via merchant_name even though its raw description differs.
+        self.assertEqual(sorted(hashes), ["hash-a", "hash-b"])
+
+    def test_unknown_stream_touches_nothing(self):
+        from unittest.mock import MagicMock, patch
+
+        from database.db import DatabaseClient
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+        cursor.__enter__.return_value = cursor
+        cursor.__exit__.return_value = False
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        connection.__enter__.return_value = connection
+        connection.__exit__.return_value = False
+
+        with patch("database.db.psycopg.connect", MagicMock(return_value=connection)):
+            client = DatabaseClient("postgresql://x/y")
+            self.assertEqual(client.transaction_hashes_for_stream("nope"), [])
+            self.assertEqual(client.update_recurring_for_stream("nope", True), 0)
 
 
 if __name__ == "__main__":

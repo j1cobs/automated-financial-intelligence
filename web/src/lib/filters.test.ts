@@ -267,9 +267,10 @@ describe('countActiveFilters', () => {
       search: 'coffee',
       outliers_only: true,
       duplicates_only: true,
+      recurring_only: true,
       date_from: null,
       date_to: null,
     };
-    expect(countActiveFilters(filters)).toBe(9);
+    expect(countActiveFilters(filters)).toBe(10);
   });
 });

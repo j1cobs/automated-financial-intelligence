@@ -388,9 +388,15 @@ class UpcomingRecurringItem(BaseModel):
     description: str
     amount: float
     next_expected_date: str
-    """A projection (last occurrence + median inter-occurrence interval), not a
-    confirmed billing date -- the frontend hedges its copy accordingly."""
-    typical_interval_days: int
+    """A projection (a detected stream's predicted next date, or -- with no
+    streams yet -- last occurrence plus the median inter-occurrence interval),
+    not a confirmed billing date; the frontend hedges its copy accordingly."""
+    typical_interval_days: int | None = None
+    # Phase 31. `early_detection` marks a stream with fewer than three
+    # occurrences, which the UI shows as lower confidence rather than asserting
+    # it. None on the legacy median-gap fallback, which has no such notion.
+    status: str | None = None
+    stream_id: str | None = None
 
 
 class LedgerItem(BaseModel):
@@ -407,6 +413,12 @@ class LedgerItem(BaseModel):
     pfc_detailed: str | None
     category_source: str | None
     linked_transaction_hash: str | None
+    # Phase 31. When set, this row belongs to a detected recurring series and
+    # its recurring control toggles the WHOLE series; when null the control is
+    # per-row. Two different consequences, so the UI must show which before the
+    # click, not after.
+    stream_id: str | None = None
+    stream_description: str | None = None
 
 
 class LedgerResponse(BaseModel):
@@ -469,6 +481,10 @@ def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -
                 # baselines use -- a status surface that changed shape under an active
                 # period filter would defeat its own purpose (Phase 23).
                 db.get_net_worth_history(),
+                # Phase 31: detected streams drive Upcoming Recurring Charges when any
+                # exist. Each stream is already one deduplicated charge, so the card
+                # stops listing the same bill under near-identical descriptions.
+                db.get_recurring_streams(),
             )
         ),
     )
@@ -511,7 +527,11 @@ def get_budget(
 def get_ledger(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> LedgerResponse:
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
     # Duplicate-flagged rows stay: the ledger checkbox is the only way to un-flag one.
-    return LedgerResponse(transactions=[LedgerItem(**item) for item in build_ledger(filtered)])
+    return LedgerResponse(
+        transactions=[
+            LedgerItem(**item) for item in build_ledger(filtered, db.get_recurring_streams())
+        ]
+    )
 
 
 @router.get("/anomalies", response_model=AnomaliesResponse)
@@ -659,6 +679,33 @@ def update_transaction_category(
     backfilled_count = db.update_transaction_category(transaction_hash, category, key or None)
     invalidate_cache(db.database_url)
     return CategoryUpdateResponse(backfilled_count=backfilled_count)
+
+
+class StreamRecurringUpdate(BaseModel):
+    recurring: bool
+
+
+class StreamRecurringResponse(BaseModel):
+    updated_count: int
+
+
+@router.patch("/streams/{stream_id}/recurring", response_model=StreamRecurringResponse)
+def update_stream_recurring(
+    stream_id: str,
+    body: StreamRecurringUpdate,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> StreamRecurringResponse:
+    """Toggle recurring for a whole detected stream (Phase 31).
+
+    The per-row endpoint below still exists for transactions that belong to no
+    stream. This one fixes "the same charge can be checked recurring over and
+    over": the flag is per-row, so every occurrence was independently checkable
+    and Upcoming then listed near-duplicates."""
+    updated = db.update_recurring_for_stream(stream_id, body.recurring)
+    invalidate_cache(db.database_url)
+    return StreamRecurringResponse(updated_count=updated)
 
 
 @router.patch("/transactions/{transaction_hash}/recurring", status_code=status.HTTP_204_NO_CONTENT)

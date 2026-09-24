@@ -271,6 +271,8 @@ const mockOverviewData: OverviewResponse = {
         amount: 15.99,
         next_expected_date: '2026-09-01',
         typical_interval_days: 30,
+        status: 'mature',
+        stream_id: 'local:NETFLIX',
       },
     ],
   },

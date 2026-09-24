@@ -38,6 +38,8 @@ from typing import Any
 import pandas as pd
 
 from analytics.budget_periods import resolve_caps_detailed
+from analytics.categorizer import merchant_key
+from analytics.recurring import upcoming_from_streams
 
 from app.dashboard import (
     _effective_credit_limit,
@@ -542,11 +544,47 @@ def build_net_worth(
     }
 
 
+def _upcoming_from_median_gaps(recurring: pd.DataFrame) -> list[dict[str, Any]]:
+    """Pre-Phase-31 projection: group hand-flagged rows by RAW description and
+    project the next charge from the MEDIAN gap between occurrences (median, not
+    mean, so one skipped or late month doesn't skew it the way an outlier would).
+
+    Kept as the fallback for a database with no detected streams yet -- the first
+    run after migration 027, or an account with no periodic spend. It is strictly
+    worse than the stream path: grouping on raw description lists the same charge
+    several times under near-identical strings.
+    """
+    rows: list[dict[str, Any]] = []
+    for description, group in recurring.groupby("description"):
+        occurrence_dates = group["date"].sort_values()
+        if len(occurrence_dates) < 2:
+            continue
+        intervals = occurrence_dates.diff().dropna().dt.days
+        typical_interval_days = float(intervals.median())
+        if typical_interval_days <= 0:
+            continue
+        last_date = occurrence_dates.iloc[-1]
+        next_expected = last_date + pd.Timedelta(days=typical_interval_days)
+        rows.append(
+            {
+                "description": description,
+                "amount": float(group["adjusted_amount"].abs().mean()),
+                "next_expected_date": next_expected.strftime("%Y-%m-%d"),
+                "typical_interval_days": round(typical_interval_days),
+                "status": None,
+                "stream_id": None,
+            }
+        )
+    rows.sort(key=lambda row: row["next_expected_date"])
+    return rows
+
+
 def build_overview(
     df: pd.DataFrame,
     acct_df: pd.DataFrame,
     all_time_df: pd.DataFrame | None = None,
     net_worth_history: list[dict[str, Any]] | None = None,
+    recurring_streams: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Port of `_section_overview`'s data. `df` must already be enriched
     (`prepare_transactions`) and duplicate-excluded.
@@ -816,29 +854,15 @@ def build_overview(
                 else str(row["date"]),
             }
 
-    # Upcoming recurring charges -- projects each recurring description's next expected
-    # charge from the MEDIAN gap between its own past occurrences (median, not mean, so
-    # one skipped or late month doesn't skew the projection the way an outlier would).
-    upcoming_recurring: list[dict[str, Any]] = []
-    for description, group in recurring.groupby("description"):
-        occurrence_dates = group["date"].sort_values()
-        if len(occurrence_dates) < 2:
-            continue
-        intervals = occurrence_dates.diff().dropna().dt.days
-        typical_interval_days = float(intervals.median())
-        if typical_interval_days <= 0:
-            continue
-        last_date = occurrence_dates.iloc[-1]
-        next_expected = last_date + pd.Timedelta(days=typical_interval_days)
-        upcoming_recurring.append(
-            {
-                "description": description,
-                "amount": float(group["adjusted_amount"].abs().mean()),
-                "next_expected_date": next_expected.strftime("%Y-%m-%d"),
-                "typical_interval_days": round(typical_interval_days),
-            }
-        )
-    upcoming_recurring.sort(key=lambda row: row["next_expected_date"])
+    # Upcoming recurring charges. Phase 31: detected streams are the source of truth when
+    # any exist -- a stream is already the deduplicated unit, whereas the legacy path below
+    # groups by RAW description and so lists the same charge several times under
+    # near-identical strings. The legacy path stays as the fallback for a database with no
+    # streams detected yet (first run after the migration, or no periodic spend at all).
+    if recurring_streams:
+        upcoming_recurring = upcoming_from_streams(recurring_streams)
+    else:
+        upcoming_recurring = _upcoming_from_median_gaps(recurring)
 
     # An account frame can legitimately be empty (dashboard-only deploys, or a fresh
     # database), in which case there is no liquid balance to divide by.
@@ -1278,13 +1302,44 @@ def build_anomalies(df: pd.DataFrame) -> list[dict[str, Any]]:
     ]
 
 
-def build_ledger(df: pd.DataFrame) -> list[dict[str, Any]]:
+def build_ledger(
+    df: pd.DataFrame,
+    recurring_streams: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Port of `_section_ledger`'s data. `df` must already be enriched. Unlike every
     other builder, `is_duplicate` rows are kept — the ledger's checkbox is the only
-    way to un-flag one."""
+    way to un-flag one.
+
+    Phase 31: each row carries the stream it belongs to, if any. The ledger's
+    recurring control means two different things depending on that — toggle the
+    whole series, or just this row — and the UI must be able to *show* which
+    before the user clicks, not after."""
     if df.empty:
         return []
+
+    # merchant_key is derived, not stored, so membership is resolved here with
+    # the same normalizer the categorizer uses rather than re-deriving it in SQL.
+    streams_by_key: dict[str, dict[str, Any]] = {}
+    for stream in recurring_streams or []:
+        key = stream.get("merchant_key")
+        if key:
+            streams_by_key[key] = stream
+
     ordered = df.sort_values("date", ascending=False)
+
+    row_keys: list[str | None] = []
+    if streams_by_key:
+        merchant_names = (
+            ordered["merchant_name"] if "merchant_name" in ordered.columns else None
+        )
+        for position, (_, row) in enumerate(ordered.iterrows()):
+            name = merchant_names.iloc[position] if merchant_names is not None else None
+            row_keys.append(
+                merchant_key(None if pd.isna(name) else name, str(row["description"] or ""))
+            )
+    else:
+        row_keys = [None] * len(ordered)
+
     return [
         {
             "hash": row["transaction_hash"],
@@ -1300,6 +1355,16 @@ def build_ledger(df: pd.DataFrame) -> list[dict[str, Any]]:
             "pfc_detailed": _clean(row["pfc_detailed"]),
             "category_source": _clean(row["category_source"]),
             "linked_transaction_hash": _clean(row["linked_transaction_hash"]),
+            "stream_id": (
+                streams_by_key[row_keys[position]]["stream_id"]
+                if row_keys[position] and row_keys[position] in streams_by_key
+                else None
+            ),
+            "stream_description": (
+                streams_by_key[row_keys[position]].get("description")
+                if row_keys[position] and row_keys[position] in streams_by_key
+                else None
+            ),
         }
-        for _, row in ordered.iterrows()
+        for position, (_, row) in enumerate(ordered.iterrows())
     ]

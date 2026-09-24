@@ -242,9 +242,19 @@ export function FilterBar() {
             type="checkbox"
             checked={filters.duplicates_only}
             onChange={(event) => patchFilters({ duplicates_only: event.target.checked })}
-            className="h-4 w-4"
+            className="h-4 w-4 cursor-pointer"
           />
           Possible duplicates only
+        </label>
+
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <input
+            type="checkbox"
+            checked={filters.recurring_only}
+            onChange={(event) => patchFilters({ recurring_only: event.target.checked })}
+            className="h-4 w-4 cursor-pointer"
+          />
+          Recurring only
         </label>
       </div>
     );

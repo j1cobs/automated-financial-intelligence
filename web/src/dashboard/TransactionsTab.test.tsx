@@ -39,6 +39,7 @@ vi.mock('../lib/queries', () => ({
 vi.mock('../lib/mutations', () => ({
   useUpdateCategory: vi.fn(),
   useUpdateRecurring: vi.fn(),
+  useUpdateStreamRecurring: vi.fn(),
   useUpdateDuplicate: vi.fn(),
   useLinkTransaction: vi.fn(),
   useUnlinkTransaction: vi.fn(),
@@ -48,6 +49,7 @@ import { useLedger, useAnomalies, useCategories } from '../lib/queries';
 import {
   useUpdateCategory,
   useUpdateRecurring,
+  useUpdateStreamRecurring,
   useUpdateDuplicate,
   useLinkTransaction,
   useUnlinkTransaction,
@@ -58,6 +60,7 @@ const mockedUseAnomalies = vi.mocked(useAnomalies);
 const mockedUseCategories = vi.mocked(useCategories);
 const mockedUseUpdateCategory = vi.mocked(useUpdateCategory);
 const mockedUseUpdateRecurring = vi.mocked(useUpdateRecurring);
+const mockedUseUpdateStreamRecurring = vi.mocked(useUpdateStreamRecurring);
 const mockedUseUpdateDuplicate = vi.mocked(useUpdateDuplicate);
 const mockedUseLinkTransaction = vi.mocked(useLinkTransaction);
 const mockedUseUnlinkTransaction = vi.mocked(useUnlinkTransaction);
@@ -167,6 +170,9 @@ function setDefaultMutations() {
     mockMutation(vi.fn().mockResolvedValue({ backfilled_count: 0 } satisfies CategoryUpdateResponse)),
   );
   mockedUseUpdateRecurring.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
+  mockedUseUpdateStreamRecurring.mockReturnValue(
+    mockMutation(vi.fn().mockResolvedValue({ updated_count: 0 })),
+  );
   mockedUseUpdateDuplicate.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
   mockedUseLinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
   mockedUseUnlinkTransaction.mockReturnValue(mockMutation(vi.fn().mockResolvedValue(undefined)));
@@ -255,6 +261,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-2',
@@ -270,6 +280,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -306,6 +320,10 @@ describe('TransactionsTab', () => {
           pfc_detailed: null,
           category_source: null,
           linked_transaction_hash: null,
+
+          stream_id: null,
+
+          stream_description: null,
         })),
       };
       mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
@@ -346,6 +364,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           })),
         };
         mockedUseLedger.mockReturnValue(mockQuerySuccess(mockLedgerData));
@@ -421,6 +443,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-big',
@@ -436,6 +462,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -485,6 +515,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -605,6 +639,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -658,6 +696,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -712,6 +754,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -764,6 +810,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -813,6 +863,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
             category_source: 'plaid',
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -851,6 +905,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
             category_source: 'plaid',
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-2',
@@ -866,6 +924,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -913,6 +975,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: 'TEST_DETAILED',
             category_source: 'plaid',
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -964,6 +1030,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: 'CUSTOM_MERCHANT_CATEGORY',
             category_source: 'merchant',
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-plaid',
@@ -979,6 +1049,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: 'TRANSPORTATION_FUEL',
             category_source: 'plaid',
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-null-source',
@@ -994,6 +1068,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: 'SOME_CATEGORY',
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1046,6 +1124,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1079,6 +1161,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: 'tx-2',
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1113,6 +1199,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-reimbursement',
@@ -1128,6 +1218,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-same-sign',
@@ -1143,6 +1237,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1196,6 +1294,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-reimburse',
@@ -1211,6 +1313,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1269,6 +1375,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
           {
             hash: 'tx-reimburse',
@@ -1284,6 +1394,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1345,6 +1459,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: 'tx-reimburse',
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1388,6 +1506,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: null,
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1429,6 +1551,10 @@ describe('TransactionsTab', () => {
             pfc_detailed: null,
             category_source: null,
             linked_transaction_hash: 'tx-2',
+
+            stream_id: null,
+
+            stream_description: null,
           },
         ],
       };
@@ -1507,6 +1633,10 @@ describe('plain ledger table column discipline', () => {
           pfc_detailed: 'FOOD_AND_DRINK_GROCERIES',
           category_source: 'plaid',
           linked_transaction_hash: null,
+
+          stream_id: null,
+
+          stream_description: null,
         },
       ],
     };
@@ -1535,5 +1665,99 @@ describe('plain ledger table column discipline', () => {
 
     const total = cols.reduce((sum, col) => sum + Number.parseFloat((col as HTMLElement).style.width), 0);
     expect(total).toBeCloseTo(100, 5);
+  });
+});
+
+// Phase 31. `is_recurring` is per-row, so every occurrence of the same charge
+// used to be independently checkable -- which is why the same bill could be
+// flagged over and over and Upcoming then listed near-duplicates.
+describe('recurring control: series vs single row', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  function renderWith(
+    stream: { stream_id: string | null; stream_description: string | null },
+    afterDefaults?: () => void,
+  ) {
+    const ledger: LedgerResponse = {
+      transactions: [
+        {
+          hash: 'tx-1',
+          date: '2024-01-15',
+          account_name: 'Checking',
+          owner_name: null,
+          description: 'NETFLIX.COM',
+          amount: -16.99,
+          category: 'ENTERTAINMENT',
+          tx_type: 'expense',
+          is_recurring: false,
+          is_duplicate: false,
+          pfc_detailed: null,
+          category_source: null,
+          linked_transaction_hash: null,
+          ...stream,
+        },
+      ],
+    };
+    mockedUseLedger.mockReturnValue(mockQuerySuccess(ledger));
+    mockedUseAnomalies.mockReturnValue(mockQuerySuccess({ anomalies: [] }));
+    mockedUseCategories.mockReturnValue(mockQuerySuccess({ categories: [] }));
+    setDefaultMutations();
+    // Applied after the defaults, or they would clobber a test's own spies.
+    afterDefaults?.();
+    return renderComponent();
+  }
+
+  it('labels a row in a detected series as affecting the series', () => {
+    renderWith({ stream_id: 'local:NETFLIX', stream_description: 'NETFLIX.COM' });
+
+    expect(screen.getByText('series')).toBeInTheDocument();
+    expect(screen.queryByText('this row')).not.toBeInTheDocument();
+  });
+
+  it('labels a standalone row as affecting only that row', () => {
+    renderWith({ stream_id: null, stream_description: null });
+
+    expect(screen.getByText('this row')).toBeInTheDocument();
+    expect(screen.queryByText('series')).not.toBeInTheDocument();
+  });
+
+  it('toggling a series row calls the stream mutation, not the per-row one', async () => {
+    const streamMutate = vi.fn().mockResolvedValue({ updated_count: 4 });
+    const rowMutate = vi.fn().mockResolvedValue(undefined);
+
+    renderWith({ stream_id: 'local:NETFLIX', stream_description: 'NETFLIX.COM' }, () => {
+      mockedUseUpdateStreamRecurring.mockReturnValue(mockMutation(streamMutate));
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(rowMutate));
+    });
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /whole .* series/i }));
+
+    await waitFor(() => {
+      expect(streamMutate).toHaveBeenCalledWith({
+        streamId: 'local:NETFLIX',
+        recurring: true,
+      });
+    });
+    expect(rowMutate).not.toHaveBeenCalled();
+  });
+
+  it('toggling a standalone row calls the per-row mutation, not the stream one', async () => {
+    const streamMutate = vi.fn().mockResolvedValue({ updated_count: 0 });
+    const rowMutate = vi.fn().mockResolvedValue(undefined);
+
+    renderWith({ stream_id: null, stream_description: null }, () => {
+      mockedUseUpdateStreamRecurring.mockReturnValue(mockMutation(streamMutate));
+      mockedUseUpdateRecurring.mockReturnValue(mockMutation(rowMutate));
+    });
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /this row only/i }));
+
+    await waitFor(() => {
+      expect(rowMutate).toHaveBeenCalledWith({ hash: 'tx-1', recurring: true });
+    });
+    expect(streamMutate).not.toHaveBeenCalled();
   });
 });

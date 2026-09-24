@@ -16,6 +16,7 @@ import { useLedger, useAnomalies, useCategories } from '../lib/queries';
 import {
   useUpdateCategory,
   useUpdateRecurring,
+  useUpdateStreamRecurring,
   useUpdateDuplicate,
   useLinkTransaction,
   useUnlinkTransaction,
@@ -344,6 +345,7 @@ interface LedgerRowProps {
   onCategoryChange: (hash: string, category: string) => void;
   onStopEdit: () => void;
   onToggleRecurring: (hash: string, current: boolean) => void;
+  onToggleStreamRecurring: (streamId: string, current: boolean) => void;
   onToggleDuplicate: (hash: string, current: boolean) => void;
   onStartLinking: (hash: string | null) => void;
   onSelectLinkedHash: (hash: string) => void;
@@ -367,6 +369,7 @@ function LedgerRow({
   onCategoryChange,
   onStopEdit,
   onToggleRecurring,
+  onToggleStreamRecurring,
   onToggleDuplicate,
   onStartLinking,
   onSelectLinkedHash,
@@ -451,15 +454,35 @@ function LedgerRow({
           </div>
         </td>
       )}
+      {/* Two different consequences behind one column, so they must look
+          different BEFORE the click: a row in a detected series toggles the
+          whole series, a standalone row toggles only itself. Previously both
+          were an identical bare checkbox, which is why the same charge could
+          be flagged over and over, once per occurrence. */}
       <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
-        <input
-          type="checkbox"
-          checked={tx.is_recurring}
-          onChange={() => onToggleRecurring(tx.hash, tx.is_recurring)}
-          disabled={isRecurringPending}
-          className="h-5 w-5 cursor-pointer"
-          aria-label={`Mark ${tx.description} as ${tx.is_recurring ? 'non-recurring' : 'recurring'}`}
-        />
+        <label className="flex flex-col items-center gap-0.5">
+          <input
+            type="checkbox"
+            checked={tx.is_recurring}
+            onChange={() =>
+              tx.stream_id
+                ? onToggleStreamRecurring(tx.stream_id, tx.is_recurring)
+                : onToggleRecurring(tx.hash, tx.is_recurring)
+            }
+            disabled={isRecurringPending}
+            className="h-5 w-5 cursor-pointer"
+            aria-label={
+              tx.stream_id
+                ? `Mark the whole ${tx.stream_description ?? tx.description} series as ${
+                    tx.is_recurring ? 'non-recurring' : 'recurring'
+                  }`
+                : `Mark ${tx.description} as ${tx.is_recurring ? 'non-recurring' : 'recurring'} (this row only)`
+            }
+          />
+          <span className="text-[10px] leading-tight text-ink-muted">
+            {tx.stream_id ? 'series' : 'this row'}
+          </span>
+        </label>
       </td>
       <td className="px-2 py-2 text-center sm:px-4 sm:py-3">
         <input
@@ -708,6 +731,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
 
   const updateCategory = useUpdateCategory();
   const updateRecurring = useUpdateRecurring();
+  const updateStreamRecurring = useUpdateStreamRecurring();
   const updateDuplicate = useUpdateDuplicate();
   const linkTransaction = useLinkTransaction();
   const unlinkTransaction = useUnlinkTransaction();
@@ -767,6 +791,14 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
       await updateRecurring.mutateAsync({ hash, recurring: !currentValue });
     } catch {
       /* surfaced via updateRecurring.isError below */
+    }
+  };
+
+  const handleStreamRecurringToggle = async (streamId: string, currentValue: boolean) => {
+    try {
+      await updateStreamRecurring.mutateAsync({ streamId, recurring: !currentValue });
+    } catch {
+      /* surfaced via updateStreamRecurring.isError below */
     }
   };
 
@@ -950,6 +982,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                 onCategoryChange={handleCategoryChange}
                 onStopEdit={() => setEditingHash(null)}
                 onToggleRecurring={handleRecurringToggle}
+                onToggleStreamRecurring={handleStreamRecurringToggle}
                 onToggleDuplicate={handleDuplicateToggle}
                 onStartLinking={handleStartLinking}
                 onSelectLinkedHash={handleSelectLinkedHash}
@@ -1007,6 +1040,7 @@ export function TransactionsTab({ returnTo = null, onReturn }: TransactionsTabPr
                           onCategoryChange={handleCategoryChange}
                           onStopEdit={() => setEditingHash(null)}
                           onToggleRecurring={handleRecurringToggle}
+                          onToggleStreamRecurring={handleStreamRecurringToggle}
                           onToggleDuplicate={handleDuplicateToggle}
                           onStartLinking={handleStartLinking}
                           onSelectLinkedHash={handleSelectLinkedHash}

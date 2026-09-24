@@ -710,10 +710,19 @@ export function OverviewTab() {
           {ov.upcoming_recurring.length > 0 ? (
             <ul className="space-y-1.5">
               {ov.upcoming_recurring.map((row) => (
-                <li key={row.description} className="flex items-center justify-between text-sm">
+                <li
+                  key={row.stream_id ?? row.description}
+                  className="flex items-center justify-between text-sm"
+                >
                   <span className="text-ink-secondary">
                     {row.description}{' '}
                     <span className="text-ink-muted">· {formatRelativeDate(row.next_expected_date)}</span>
+                    {/* Fewer than three observed occurrences: say so rather than
+                        presenting the prediction with the same confidence as a
+                        settled one. */}
+                    {row.status === 'early_detection' && (
+                      <span className="text-ink-muted"> · low confidence</span>
+                    )}
                   </span>
                   <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
                 </li>
