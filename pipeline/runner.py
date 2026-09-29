@@ -66,10 +66,20 @@ def _load_enriched_history(database: DatabaseClient) -> pd.DataFrame:
     supplies `transaction_hash`, which `PlaidIngestor._normalize` does not
     produce (the hash is computed inside `upsert_transactions`) and which the
     `is_outlier` shim needs to flag anything at all.
+
+    Precondition this helper must satisfy for `_enrich_transactions`: `date` is
+    converted to datetime64 first. `load_financial_data` hands it back as object
+    dtype (datetime.date), which `_enrich_transactions` cannot handle.
     """
     tx_df, _acct_df = load_financial_data(database.database_url)
     if tx_df is None or tx_df.empty:
         return pd.DataFrame()
+    # `_enrich_transactions` calls `.dt` immediately, so `date` must already be
+    # datetime64. psycopg returns datetime.date for a DATE column, so it arrives
+    # as object dtype. Both other callers convert here too
+    # (app/dashboard.py:1358, api/viewmodels.py:247); the frozen helper cannot be
+    # made defensive itself.
+    tx_df["date"] = pd.to_datetime(tx_df["date"])
     enriched = _enrich_transactions(tx_df)
     # Duplicate-flagged rows are excluded from analytics everywhere else; an
     # anomaly built on a known double-post would be an artefact.
@@ -90,9 +100,7 @@ def _detect_and_store_anomalies(
     found = detect_anomalies(history, streams, period)
     found = suppress_dismissed(found, database.get_anomaly_feedback())
 
-    database.upsert_anomalies(
-        [{k: v for k, v in row.items() if k != "contributing_hashes"} for row in found]
-    )
+    database.upsert_anomalies([{k: v for k, v in row.items() if k != "contributing_hashes"} for row in found])
 
     # Compatibility shim, not a feature -- see DatabaseClient.set_outlier_flags.
     hashes: list[str] = []
@@ -218,7 +226,12 @@ def run_pipeline(days_back: int = 90) -> PipelineResult:
             database.upsert_recurring_streams(streams)
     except Exception as error:  # noqa: BLE001 - enrichment must not sink the pipeline
         history = pd.DataFrame()
-        LOGGER.warning("Recurring-stream detection skipped: %s", type(error).__name__)
+        # Anomaly detection reads the same frame and returns early when it is
+        # empty, so naming only streams understates the failure by half.
+        LOGGER.warning(
+            "History load failed (%s): skipping BOTH recurring-stream and anomaly detection",
+            type(error).__name__,
+        )
 
     # Step 6c: anomaly detection (Phase 34). Same reasoning as streams -- an enrichment over
     # already-committed rows, so a failure here is logged and the run still succeeds. Nothing

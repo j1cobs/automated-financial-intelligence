@@ -9,7 +9,7 @@ import psycopg
 
 from core.config import ConfigError
 from ingestion.plaid_ingestor import SyncResult
-from pipeline.runner import _build_ingestor, main, run_pipeline
+from pipeline.runner import _build_ingestor, _load_enriched_history, main, run_pipeline
 
 _NORMALIZED_COLUMNS = [
     "transaction_id",
@@ -384,12 +384,15 @@ class RunPipelineTests(unittest.TestCase):
 
         # Token A fingerprint and B fingerprint (SHA256 hashes of the tokens)
         import hashlib
+
         fp_a = hashlib.sha256("token-1".encode()).hexdigest()
         fp_b = hashlib.sha256("token-2".encode()).hexdigest()
 
         # Token A: sync succeeds (produces transactions) but fetch_accounts fails
         # Token B: both succeed
-        accounts_b = [{"account_key": f"plaid:acc-{fp_b[:8]}", "account_name": "B Checking", "_token_fingerprint": fp_b}]
+        accounts_b = [
+            {"account_key": f"plaid:acc-{fp_b[:8]}", "account_name": "B Checking", "_token_fingerprint": fp_b}
+        ]
         accounts_failed = {fp_a: "Item error: NO_ACCOUNTS"}
 
         added_a = self._added_frame_with_fingerprint(fp_a)
@@ -451,9 +454,7 @@ class RunPipelineTests(unittest.TestCase):
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = ([], {fp_a: "NO_ACCOUNTS", fp_b: "INVALID_REQUEST"})
-        ingestor.sync_transactions.return_value = _sync_result(
-            failed_tokens={fp_a: "ITEM_LOGIN_REQUIRED"}
-        )
+        ingestor.sync_transactions.return_value = _sync_result(failed_tokens={fp_a: "ITEM_LOGIN_REQUIRED"})
 
         with (
             patch("pipeline.runner.load_settings", return_value=settings),
@@ -803,6 +804,154 @@ class MainTests(unittest.TestCase):
             "2/2 accounts failed: Alex (NO_ACCOUNTS); Sam (INVALID_REQUEST)",
         )
         self.assertNotIn("transactions_inserted", kwargs)
+
+
+class LoadEnrichedHistoryDtypeTests(unittest.TestCase):
+    """Regression tests for _load_enriched_history dtype handling.
+
+    Every other fixture builds frames with pd.Timestamp, which is why nothing
+    caught the real driver's object dtype (datetime.date). The psycopg driver
+    returns datetime.date for a DATE column, which arrives as object dtype —
+    _enrich_transactions immediately calls .dt, which requires datetime64.
+    """
+
+    def _database(self) -> MagicMock:
+        database = MagicMock()
+        database.database_url = "postgresql://unused"
+        return database
+
+    def test_object_dtype_dates_from_the_driver_are_converted(self) -> None:
+        """Dates arriving from psycopg as datetime.date (object dtype) are converted
+        to datetime64 before being passed to _enrich_transactions."""
+        from datetime import date as date_type
+
+        # Build a frame with datetime.date objects (not pd.Timestamp)
+        tx_df = pd.DataFrame.from_records(
+            [
+                {
+                    "date": date_type(2026, 7, 1),
+                    "transaction_hash": "hash1",
+                    "account_key": "acc:1",
+                    "account_name": "Checking",
+                    "owner_name": "Alice",
+                    "account_type": "depository",
+                    "account_subtype": "checking",
+                    "description": "Coffee",
+                    "amount": -5.0,
+                    "category": "FOOD_AND_DRINK",
+                    "outlier_score": 0.0,
+                    "is_outlier": False,
+                    "is_recurring": False,
+                    "is_duplicate": False,
+                },
+                {
+                    "date": date_type(2026, 7, 2),
+                    "transaction_hash": "hash2",
+                    "account_key": "acc:1",
+                    "account_name": "Checking",
+                    "owner_name": "Alice",
+                    "account_type": "depository",
+                    "account_subtype": "checking",
+                    "description": "Lunch",
+                    "amount": -35.0,
+                    "category": "FOOD_AND_DRINK",
+                    "outlier_score": 0.0,
+                    "is_outlier": False,
+                    "is_recurring": False,
+                    "is_duplicate": False,
+                },
+                {
+                    "date": date_type(2026, 7, 15),
+                    "transaction_hash": "hash3",
+                    "account_key": "acc:1",
+                    "account_name": "Checking",
+                    "owner_name": "Alice",
+                    "account_type": "depository",
+                    "account_subtype": "checking",
+                    "description": "Salary",
+                    "amount": -1500.0,
+                    "category": "INCOME",
+                    "outlier_score": 0.0,
+                    "is_outlier": False,
+                    "is_recurring": False,
+                    "is_duplicate": False,
+                },
+            ]
+        )
+
+        # Verify the precondition: date column is object dtype
+        self.assertEqual(tx_df["date"].dtype, object)
+
+        database = self._database()
+        with patch("pipeline.runner.load_financial_data", return_value=(tx_df, pd.DataFrame())):
+            result = _load_enriched_history(database)
+
+        # Should not raise, result should be non-empty
+        self.assertFalse(result.empty)
+        self.assertEqual(len(result), 3)
+
+        # Should have month column in the expected format (YYYY-MM)
+        self.assertIn("month", result.columns)
+        months = result["month"].unique()
+        self.assertEqual(len(months), 1)
+        self.assertEqual(months[0], "2026-07")
+
+    def test_duplicate_rows_are_excluded(self) -> None:
+        """_load_enriched_history filters out rows where is_duplicate=True."""
+        from datetime import date as date_type
+
+        tx_df = pd.DataFrame.from_records(
+            [
+                {
+                    "date": date_type(2026, 7, 1),
+                    "transaction_hash": "hash1",
+                    "account_key": "acc:1",
+                    "account_name": "Checking",
+                    "owner_name": "Alice",
+                    "account_type": "depository",
+                    "account_subtype": "checking",
+                    "description": "Coffee",
+                    "amount": -5.0,
+                    "category": "FOOD_AND_DRINK",
+                    "outlier_score": 0.0,
+                    "is_outlier": False,
+                    "is_recurring": False,
+                    "is_duplicate": False,
+                },
+                {
+                    "date": date_type(2026, 7, 2),
+                    "transaction_hash": "hash2",
+                    "account_key": "acc:1",
+                    "account_name": "Checking",
+                    "owner_name": "Alice",
+                    "account_type": "depository",
+                    "account_subtype": "checking",
+                    "description": "Duplicate Lunch",
+                    "amount": -35.0,
+                    "category": "FOOD_AND_DRINK",
+                    "outlier_score": 0.0,
+                    "is_outlier": False,
+                    "is_recurring": False,
+                    "is_duplicate": True,
+                },
+            ]
+        )
+
+        database = self._database()
+        with patch("pipeline.runner.load_financial_data", return_value=(tx_df, pd.DataFrame())):
+            result = _load_enriched_history(database)
+
+        # Should have 1 row (the non-duplicate one)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["description"], "Coffee")
+
+    def test_empty_frame_returns_empty(self) -> None:
+        """_load_enriched_history returns empty when load_financial_data returns empty."""
+        database = self._database()
+        with patch("pipeline.runner.load_financial_data", return_value=(pd.DataFrame(), pd.DataFrame())):
+            result = _load_enriched_history(database)
+
+        self.assertTrue(result.empty)
 
 
 if __name__ == "__main__":
