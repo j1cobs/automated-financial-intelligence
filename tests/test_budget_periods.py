@@ -178,8 +178,8 @@ class MigrationSeedGuardTests(unittest.TestCase):
         self.assertIn("ON CONFLICT (category, period) DO NOTHING", self.sql)
 
     def test_does_not_write_to_the_legacy_budgets_table(self):
-        """`budgets` is Streamlit-owned: it reads AND writes that table, so any
-        write from this path would discard budgets saved from Streamlit."""
+        """`budgets` is the legacy flat-cap table (migration 002). Per-month caps live
+        in `budget_periods`, so no write from this path may touch `budgets`."""
         statements = [s.strip().upper() for s in self.sql.split(";")]
         writes = [
             s

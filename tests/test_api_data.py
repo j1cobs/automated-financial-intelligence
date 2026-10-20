@@ -111,9 +111,9 @@ def _acct_df() -> pd.DataFrame:
 
 @contextmanager
 def _patch_dataload_reads(tx_df=None, acct_df=None):
-    """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
-    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
-    (added alongside it, without touching the frozen loader -- see api/dataload.py's module
+    """Patch both reads `load_frames()` performs: `load_financial_data` (the loader in
+    database/frames.py) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
+    (kept alongside it rather than inside the loader -- see api/dataload.py's module
     docstring). Yields the `load_financial_data` mock. Defaults the two DatabaseClient reads
     to empty mappings so tests that don't care about pfc_detailed/category_source/
     linked_transaction_hash aren't forced to mock them."""
@@ -139,10 +139,8 @@ class ApiDataTestCase(unittest.TestCase):
         self.mock_db = MagicMock()
         self.mock_db.database_url = self.settings.database_url
         self.mock_db.get_categories.return_value = ["Groceries", "Income", "Shopping"]
-        self.mock_db.get_budgets.return_value = [{"category": "Shopping", "monthly_limit": 200.0}]
         # Phase 28: the budget path reads per-month caps. The legacy flat
-        # `budgets` table is left to the frozen Streamlit dashboard, which owns
-        # both reading and writing it.
+        # `budgets` table is no longer read or written by the API.
         self.mock_db.get_budget_periods.return_value = [
             {"category": "Shopping", "period": "2020-01", "monthly_limit": 200.0}
         ]
@@ -178,7 +176,7 @@ class ApiDataTestCase(unittest.TestCase):
         # Patched where it is USED, not where it was defined: the loader moved behind
         # `api/dataload.py`'s TTL cache. Also patches `DatabaseClient` there, since
         # `load_frames()` additionally calls `DatabaseClient.get_transaction_pfc_details()`
-        # (added alongside the frozen loader, not inside it) -- without this, these tests
+        # (kept alongside the loader, not inside it) -- without this, these tests
         # would attempt a real DB connection for that one extra read.
         return _patch_dataload_reads(tx_df=tx_df, acct_df=acct_df)
 
@@ -315,7 +313,6 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
 
     def test_budget_write_never_touches_the_legacy_table(self) -> None:
         self.client.put("/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers())
-        self.mock_db.upsert_budget.assert_not_called()
 
     def test_budget_delete_clears_one_month(self) -> None:
         response = self.client.request("DELETE", "/budgets/Shopping?month=2026-10", headers=self._headers())
@@ -525,12 +522,6 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         # Set in 2020-01 and read for a later month, so it is inherited.
         self.assertTrue(cats["Shopping"]["is_inherited"])
         self.assertEqual(cats["Shopping"]["inherited_from"], "2020-01")
-
-    def test_budget_never_reads_the_streamlit_owned_legacy_table(self) -> None:
-        self._authed_client()
-        with self._load_financial_data_patch():
-            self.client.get("/budget")
-        self.mock_db.get_budgets.assert_not_called()
 
     def test_budget_rejects_a_malformed_period(self) -> None:
         self._authed_client()

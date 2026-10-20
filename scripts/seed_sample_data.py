@@ -2,7 +2,7 @@
 """Seed curated demo data directly into Postgres — no ingestion, no Plaid credentials.
 
 Sign convention (Plaid): positive amount = outflow (money leaving the account),
-negative amount = inflow. This matches app/dashboard.py's `adjusted_amount = -amount`.
+negative amount = inflow. This matches the `adjusted_amount = -amount` convention in analytics/enrichment.py.
 
 This is a deterministic *generator* (random.seed(42)), not a static dump, because the
 dashboard only shows the trailing window relative to today — a static dump goes stale

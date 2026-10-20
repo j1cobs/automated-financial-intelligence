@@ -23,7 +23,7 @@ from .security import COOKIE_NAME, decode_session_jwt
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Settings are process-wide and immutable once loaded, so cache the single instance
-    rather than re-reading env/secrets.toml on every request."""
+    rather than re-reading env/.env on every request."""
     return load_settings()
 
 

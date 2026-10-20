@@ -1,32 +1,28 @@
 """Period/owner/category/... filtering for the dashboard read endpoints.
 
-This is a **port**, not an extraction, of `app/dashboard.py::_build_sidebar_filters`
-(lines 710-812). `app/dashboard.py` is frozen as of PLAN.md Phase 15, so the masking
-logic is reimplemented here rather than lifted into a module both callers share. That
-buys a real drift risk, which `tests/test_api_filters.py` exists to catch: every
-non-obvious behaviour below is pinned by a test naming the Streamlit line it mirrors.
+This module is the source of truth for dashboard filtering. The React dashboard reads
+every filter through `FiltersDep`, and `tests/test_api_filters.py` pins the non-obvious
+behaviour below.
 
-Three invariants carried over deliberately — each is load-bearing and each is easy to
-"clean up" into a bug:
+Three invariants are load-bearing, and each is easy to "clean up" into a bug:
 
 1. **Two frames, not one.** `apply_filters` returns `(filtered, all_time)`. `all_time`
    has every non-date filter applied but ignores the period, because trend charts and
    the emergency-fund metric must not collapse to a single point when the user picks a
-   30-day window. Mirrors `_build_sidebar_filters`'s two return values.
+   30-day window.
 
 2. **Filtering happens strictly downstream of enrichment.** `prepare_transactions` runs
    once over the complete dataset so internal-transfer pair matching sees both legs of a
    transfer even when one leg's account is filtered out. Never filter before enriching.
 
-3. **The period selects whole MONTHS, not a date range.** `_preset_month_keys` resolves a
+3. **The period selects whole MONTHS, not a date range.** `preset_month_keys` resolves a
    preset to a date window, then keeps every month that window *touches* — so "last 30
    days" spanning a month boundary includes both months in full. This looks like a bug
    and is not: every aggregate downstream (budgets, month-over-month, the monthly trend
    lines) groups by month, and admitting half a month would render a partial month's
    spend as if it were a whole one. Month granularity in, month granularity out.
 
-Anchoring also follows Streamlit: windows are measured back from the **latest transaction
-date**, not from today. With a daily pipeline those coincide; when ingestion has stalled,
+Windows are anchored to the **latest transaction date**, not to today. With a daily pipeline those coincide; when ingestion has stalled,
 anchoring to `today` would silently return an empty dashboard instead of the most recent
 data that exists.
 """
@@ -50,14 +46,14 @@ PeriodPreset = Literal[
     "custom",
 ]
 
-# Streamlit defaults to last_30_days. The React dashboard defaults wider: with a 30-day
-# window every "average monthly" figure averages exactly one month, which is the metric
-# the user reported as misleading in the first place. See PLAN.md Phase 15, Fix 9.
+# Defaults wider than last_30_days: with a 30-day window every "average monthly" figure
+# averages exactly one month, which is the metric the user reported as misleading in the
+# first place. See PLAN.md Phase 15, Fix 9.
 DEFAULT_PERIOD: PeriodPreset = "last_3_months"
 
 
 class DashboardFilters(BaseModel):
-    """The 10 Streamlit sidebar filters, as query parameters."""
+    """The dashboard filters, as query parameters."""
 
     period: PeriodPreset = DEFAULT_PERIOD
     months: list[str] | None = Field(
@@ -148,9 +144,8 @@ FiltersDep = Annotated[DashboardFilters, Depends(dashboard_filters)]
 def preset_month_keys(preset: PeriodPreset, df: pd.DataFrame) -> set[str]:
     """Month keys a quick-range preset touches, anchored to the latest transaction date.
 
-    Port of `app/dashboard.py::_preset_month_keys` (lines 689-707). Reuses the `month`
-    column `_enrich_transactions` already computes rather than recomputing Streamlit's
-    private `_month_key` — same formula (`date.dt.to_period("M").astype(str)`).
+    Reuses the `month` column that `enrich_transactions` already computes
+    (`date.dt.to_period("M").astype(str)`), so the frame must be enriched first.
     """
     if df.empty:
         return set()
@@ -177,7 +172,7 @@ def preset_month_keys(preset: PeriodPreset, df: pd.DataFrame) -> set[str]:
 
 
 def _non_date_mask(df: pd.DataFrame, filters: DashboardFilters) -> pd.Series:
-    """Every filter except the period. Port of `app/dashboard.py` lines 782-805."""
+    """Every filter except the period."""
     mask = pd.Series(True, index=df.index)
 
     if filters.owners:
@@ -191,8 +186,7 @@ def _non_date_mask(df: pd.DataFrame, filters: DashboardFilters) -> pd.Series:
         abs_amount = df["amount"].abs()
         lo = filters.amount_min
         hi = filters.amount_max
-        # Tolerate an inverted range rather than silently returning zero rows —
-        # `app/dashboard.py:768` makes the same allowance.
+        # Tolerate an inverted range rather than silently returning zero rows.
         if lo is not None and hi is not None and lo > hi:
             lo, hi = hi, lo
         if lo is not None:
@@ -201,9 +195,8 @@ def _non_date_mask(df: pd.DataFrame, filters: DashboardFilters) -> pd.Series:
             mask &= abs_amount <= hi
 
     if filters.search:
-        # `regex=False` is a deliberate divergence from Streamlit, which leaves
-        # `str.contains` in its default regex mode. Over HTTP that turns a description
-        # search for "(" into a 500; a literal substring match is also what someone
+        # `regex=False` matches a literal substring. In regex mode a description search for
+        # "(" would raise over HTTP and return a 500; a literal match is also what someone
         # typing into a search box actually means.
         mask &= df["description"].str.contains(filters.search, case=False, na=False, regex=False)
 
@@ -219,7 +212,6 @@ def _non_date_mask(df: pd.DataFrame, filters: DashboardFilters) -> pd.Series:
     if filters.duplicates_only:
         # Grouped on `account_key`, NOT `account_name`: two distinct accounts can share a
         # display name, and collapsing them would invent duplicates that don't exist.
-        # Mirrors `app/dashboard.py:788-792`.
         group_sizes = df.groupby(["account_key", "date", "description", "amount"], dropna=False)[
             "amount"
         ].transform("size")

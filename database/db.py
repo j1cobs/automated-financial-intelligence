@@ -163,14 +163,13 @@ class DatabaseClient:
             connection.commit()
 
     def store_pending_oauth_state(self, state: str, code_verifier: str) -> None:
-        """Persist a PKCE pending state for the API's OAuth flow (replaces the in-process
-        dict `app/auth.py` uses, which does not survive multiple workers/restarts).
+        """Persist a PKCE pending state for the API's OAuth flow. Keeping it in the database
+        rather than in-process lets it survive multiple workers and restarts.
 
-        Mirrors `app/auth.py::_prune_pending_sessions`: prunes rows older than
+        Prunes rows older than
         `_PENDING_TTL_SECONDS` (600s) and, if the table would still hold `_PENDING_MAX_ENTRIES`
         (32) or more rows after the insert, deletes the oldest down to that cap. Pruning runs
-        in the same call/transaction as the insert, same as the dict version pruning on every
-        `start_google_sign_in`.
+        in the same call/transaction as the insert, so every `start_google_sign_in` prunes.
         """
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
@@ -199,8 +198,7 @@ class DatabaseClient:
         """One-time-use lookup of a PKCE pending state: returns the stored `code_verifier`
         for `state` and deletes it, or None if the state is unknown or expired (older than
         `_PENDING_TTL_SECONDS` = 600s) — checked here too, since a stale row might not yet
-        have been pruned by `store_pending_oauth_state`. Mirrors the dict's `.pop()` semantics
-        in `app/auth.py::consume_google_callback`.
+        have been pruned by `store_pending_oauth_state`.
         """
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
@@ -499,26 +497,6 @@ class DatabaseClient:
                 rows = cur.fetchall()
         return [r[0] for r in rows]
 
-    def get_budgets(self) -> list[dict]:
-        """Return all budget rows as a list of dicts: {category, monthly_limit}."""
-        sql = "SELECT category, monthly_limit::double precision FROM budgets ORDER BY category"
-        with psycopg.connect(self.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                rows = cur.fetchall()
-        return [{"category": r[0], "monthly_limit": r[1]} for r in rows]
-
-    def upsert_budget(self, category: str, monthly_limit: float) -> None:
-        """Insert or update a budget row."""
-        sql = """
-        INSERT INTO budgets (category, monthly_limit)
-        VALUES (%s, %s)
-        ON CONFLICT (category) DO UPDATE
-        SET monthly_limit = EXCLUDED.monthly_limit,
-            updated_at    = NOW()
-        """
-        self._execute_many(sql, [(category, monthly_limit)])
-
     def get_savings_goals(self, include_archived: bool = False) -> list[dict]:
         """Goals with their linked account keys attached."""
         sql = """
@@ -734,12 +712,9 @@ class DatabaseClient:
     def set_outlier_flags(self, transaction_hashes: list[str]) -> int:
         """Point `transactions.is_outlier` at the rows behind live anomalies.
 
-        A compatibility shim, not a feature. The frozen Streamlit dashboard
-        reads `is_outlier`/`outlier_score` (app/dashboard.py:339, :787,
-        :1195-1209) and the freeze forbids editing it, so if Phase 34 simply
-        stopped writing that column its anomalies view would sit permanently
-        empty. Flagging the transactions that actually drive a current anomaly
-        keeps that view showing relevant rows.
+        `is_outlier` is read by the React outliers-only filter (api/filters.py) and by
+        the flagged counts in api/viewmodels.py. Flagging the transactions that actually
+        drive a current anomaly keeps those views showing relevant rows.
         """
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
@@ -965,9 +940,8 @@ class DatabaseClient:
     def get_transaction_pfc_details(self) -> dict[str, tuple[str | None, str | None]]:
         """transaction_hash -> (pfc_detailed, category_source) for every transaction.
 
-        Pure data access for the API's optional PFC-detail columns, kept out of
-        app/dashboard.py::load_financial_data (frozen) per the precedent in
-        api/dataload.py's module docstring."""
+        Pure data access for the API's optional PFC-detail columns. These are merged in
+        api/dataload.py rather than in load_financial_data."""
         sql = "SELECT transaction_hash, pfc_detailed, category_source FROM transactions"
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:
@@ -979,8 +953,7 @@ class DatabaseClient:
         """transaction_hash -> linked_transaction_hash for every transaction.
 
         Pure data access for the API's linked-transaction netting (net_linked_transactions
-        in api/viewmodels.py), kept out of app/dashboard.py::load_financial_data (frozen)
-        per the same precedent as get_transaction_pfc_details."""
+        in api/viewmodels.py), kept out of load_financial_data like get_transaction_pfc_details."""
         sql = "SELECT transaction_hash, linked_transaction_hash FROM transactions"
         with psycopg.connect(self.database_url) as conn:
             with conn.cursor() as cur:

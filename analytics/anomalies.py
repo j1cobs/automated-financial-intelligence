@@ -170,8 +170,8 @@ def detect_category_drift(
                     f"{pct:.0%} above your usual {_money(median)} by day {day_of_month} "
                     f"(based on {len(baselines)} month{'s' if len(baselines) != 1 else ''})."
                 ),
-                # The Streamlit compatibility shim flags these rows, so its
-                # anomalies view shows something relevant rather than nothing.
+                # These rows feed the `is_outlier` flags, so the outliers view has
+                # something relevant to show.
                 "contributing_hashes": _top_contributors(current_rows),
             }
         )

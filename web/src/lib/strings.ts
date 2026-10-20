@@ -4,9 +4,7 @@
  *
  * English-only for now. The point of routing every string through here is
  * that adding a second locale later is a translation pass over this one
- * module, not a hunt through JSX for hardcoded text -- mirrors the intent of
- * Streamlit's `_STRINGS` en/fr toggle (`app/dashboard.py:1335`) without
- * committing to its shape.
+ * module, not a hunt through JSX for hardcoded text.
  *
  * Deliberately NOT a framework: a flat object of constants and small pure
  * formatter functions. No lookup-by-key indirection, no ICU message syntax --

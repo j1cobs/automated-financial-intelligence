@@ -10,12 +10,10 @@ The pipeline writes once a day, so a short TTL is close to free: within the wind
 endpoint on a page load shares one read.
 
 **Why this is a cache and not a bounded query.** The obvious fix is to push the date
-window into SQL, but `load_financial_data` lives in `app/dashboard.py`, which Phase 15
-freezes. The alternatives were duplicating the schema into a second query (a worse trade
-than this) or unfreezing that function. This wraps the frozen loader instead. If read
-latency ever justifies it, the right move is to relocate `load_financial_data` into
-`database/` — it is a data-access function that happens to live in the Streamlit module —
-rather than to add a second copy of the query.
+window into SQL. That change would have to be made in `load_financial_data`
+(`database/frames.py`), which the pipeline also uses, so this module wraps it as it is.
+Duplicating the schema into a second, bounded query here would be a worse trade than the
+cache.
 
 **Writes must invalidate.** Every write endpoint calls `invalidate(...)`. Without it, a
 category edit would return 204, the frontend would refetch, and the API would serve the
@@ -61,8 +59,9 @@ def load_frames(database_url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     tx_df, acct_df = load_financial_data(database_url)
 
     # Merge pfc_detailed, category_source, and linked_transaction_hash from the database —
-    # none of these are part of the frozen app/dashboard.py::load_financial_data, so we
-    # fetch them separately.
+    # none of these are part of load_financial_data, so they are fetched separately here.
+    # This merge could move into database/frames.py::load_financial_data later; it stays
+    # here for now.
     db = DatabaseClient(database_url)
     pfc_details = db.get_transaction_pfc_details()
     tx_df["pfc_detailed"] = tx_df["transaction_hash"].map(lambda h: pfc_details.get(h, (None, None))[0])

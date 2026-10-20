@@ -484,31 +484,6 @@ class GetCategoriesTests(unittest.TestCase):
         self.assertEqual(result, ["Groceries", "Transport"])
 
 
-class GetBudgetsTests(unittest.TestCase):
-    def test_returns_list(self) -> None:
-        connect, cursor = _mock_connect([("Groceries", 400.0), ("Dining", 150.0)])
-        with patch("database.db.psycopg.connect", connect):
-            result = DatabaseClient("postgresql://x").get_budgets()
-        self.assertEqual(
-            result,
-            [
-                {"category": "Groceries", "monthly_limit": 400.0},
-                {"category": "Dining", "monthly_limit": 150.0},
-            ],
-        )
-
-
-class UpsertBudgetTests(unittest.TestCase):
-    def test_calls_execute(self) -> None:
-        with patch.object(DatabaseClient, "_execute_many") as execute_many:
-            DatabaseClient("postgresql://x").upsert_budget("Groceries", 400.0)
-
-        execute_many.assert_called_once()
-        sql, rows = execute_many.call_args[0]
-        self.assertIn("INSERT INTO budgets", sql)
-        self.assertEqual(rows, [("Groceries", 400.0)])
-
-
 class UpdateTransactionCategoryTests(unittest.TestCase):
     def test_writes_user_category_with_none_merchant_key(self) -> None:
         """merchant_key=None: only the target row's user_category is set, no merchant

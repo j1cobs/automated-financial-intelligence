@@ -351,8 +351,7 @@ class AnomalyRoundTripTests(PostgresBackedTestCase):
 
 
 class OutlierShimTests(PostgresBackedTestCase):
-    """`set_outlier_flags` keeps the frozen Streamlit dashboard's anomalies view
-    populated. It clears the previous run's flags before setting the new ones, so
+    """`set_outlier_flags` keeps the React outliers view populated. It clears the previous run's flags before setting the new ones, so
     both halves need checking against real rows."""
 
     def setUp(self):

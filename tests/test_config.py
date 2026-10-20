@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.config import ConfigError, enforce_tls, load_settings
 
@@ -43,17 +43,30 @@ class LoadSettingsTests(unittest.TestCase):
         settings = self._load({"DATABASE_URL": "postgresql://localhost/db"})
         self.assertEqual(settings.plaid_base_url, "https://sandbox.plaid.com")
 
-    def test_env_over_secrets_precedence(self) -> None:
+    def _load_with_fake_dotenv(self, env: dict, dotenv_values: dict) -> tuple[object, MagicMock]:
+        # Simulates load_dotenv(override=False): only fills keys the environment lacks.
+        def fake_load_dotenv(*args: object, **kwargs: object) -> bool:
+            for key, value in dotenv_values.items():
+                os.environ.setdefault(key, value)
+            return True
+
         with (
-            patch("core.config.load_dotenv"),
-            patch(
-                "core.config._load_secrets_file",
-                return_value={"DATABASE_URL": "postgresql://localhost/from-secrets"},
-            ),
-            patch.dict(os.environ, {"DATABASE_URL": "postgresql://localhost/from-env"}, clear=True),
+            patch("core.config.load_dotenv", side_effect=fake_load_dotenv) as mock_dotenv,
+            patch.dict(os.environ, env, clear=True),
         ):
-            settings = load_settings()
+            return load_settings(), mock_dotenv
+
+    def test_env_over_dotenv_precedence(self) -> None:
+        settings, mock_dotenv = self._load_with_fake_dotenv(
+            {"DATABASE_URL": "postgresql://localhost/from-env"},
+            {"DATABASE_URL": "postgresql://localhost/from-dotenv"},
+        )
         self.assertIn("from-env", settings.database_url)
+        self.assertIs(mock_dotenv.call_args.kwargs["override"], False)
+
+    def test_dotenv_value_used_when_env_empty(self) -> None:
+        settings, _ = self._load_with_fake_dotenv({}, {"DATABASE_URL": "postgresql://localhost/from-dotenv"})
+        self.assertIn("from-dotenv", settings.database_url)
 
     def test_google_allowed_emails_split(self) -> None:
         settings = self._load(

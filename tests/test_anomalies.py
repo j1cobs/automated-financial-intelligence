@@ -157,7 +157,7 @@ class CategoryDriftTests(unittest.TestCase):
         frame["tx_type"] = "income"
         self.assertEqual(detect_category_drift(frame, "2026-09", today=date(2026, 9, 9)), [])
 
-    def test_contributing_hashes_are_reported_for_the_streamlit_shim(self):
+    def test_contributing_hashes_are_reported_for_the_is_outlier_flags(self):
         history = _steady_history()
         history["2026-09"] = [(5, 400.0), (9, 400.0)]
         frame = _rows(history)
@@ -340,8 +340,7 @@ class ContributingHashesTests(unittest.TestCase):
     `PlaidIngestor._normalize` does NOT produce `transaction_hash` -- it is
     computed inside `upsert_transactions` and never written back. Feeding the
     ingested frame here therefore yielded no hashes, and `set_outlier_flags([])`
-    cleared every flag without setting any: the shim guaranteed exactly the
-    empty Streamlit view it exists to prevent.
+    cleared every flag without setting any: the outliers view came up empty.
     """
 
     def test_no_hashes_when_the_column_is_absent(self):

@@ -3,36 +3,18 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from dotenv import load_dotenv
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore
 
 
 class ConfigError(RuntimeError):
     """Raised when required configuration is missing."""
 
 
-def _load_secrets_file(path: Path | None = None) -> dict[str, Any]:
-    secrets_path = path or Path(".streamlit/secrets.toml")
-    if not secrets_path.exists():
-        load_dotenv(dotenv_path=Path(".env"), override=False)
-        return {}
-    with secrets_path.open("rb") as file:
-        return tomllib.load(file)
-
-
-def _read_value(key: str, secrets: dict[str, Any], default: str | None = None) -> str | None:
+def _read_value(key: str, default: str | None = None) -> str | None:
     if key in os.environ:
         return os.environ[key]
-    if key in secrets:
-        value = secrets[key]
-        return str(value) if value is not None else None
     return default
 
 
@@ -78,47 +60,39 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    secrets = _load_secrets_file()
+    # Precedence: environment -> .env -> default (override=False keeps real env vars on top).
+    load_dotenv(dotenv_path=Path(".env"), override=False)
 
-    database_url = _read_value("DATABASE_URL", secrets)
+    database_url = _read_value("DATABASE_URL")
     if not database_url:
-        raise ConfigError("DATABASE_URL is required in env vars or secrets.toml")
+        raise ConfigError("DATABASE_URL is required in env vars or .env")
 
-    google_oauth_client_id = _read_value("GOOGLE_OAUTH_CLIENT_ID", secrets)
-    google_oauth_client_secret = _read_value("GOOGLE_OAUTH_CLIENT_SECRET", secrets)
-    google_oauth_redirect_uri = _read_value("GOOGLE_OAUTH_REDIRECT_URI", secrets)
-    google_allowed_emails = [
-        email.lower()
-        for email in _split_csv(
-            _read_value(
-                "GOOGLE_ALLOWED_EMAILS",
-                secrets,
-            )
-        )
-    ]
+    google_oauth_client_id = _read_value("GOOGLE_OAUTH_CLIENT_ID")
+    google_oauth_client_secret = _read_value("GOOGLE_OAUTH_CLIENT_SECRET")
+    google_oauth_redirect_uri = _read_value("GOOGLE_OAUTH_REDIRECT_URI")
+    google_allowed_emails = [email.lower() for email in _split_csv(_read_value("GOOGLE_ALLOWED_EMAILS"))]
 
-    seed_database_url = _read_value("SEED_DATABASE_URL", secrets)
+    seed_database_url = _read_value("SEED_DATABASE_URL")
 
     return Settings(
-        supabase_url=_read_value("SUPABASE_URL", secrets),
+        supabase_url=_read_value("SUPABASE_URL"),
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         google_oauth_redirect_uri=google_oauth_redirect_uri,
         google_allowed_emails=google_allowed_emails,
-        plaid_client_id=_read_value("PLAID_CLIENT_ID", secrets),
-        plaid_secret=_read_value("PLAID_SECRET", secrets),
-        plaid_access_tokens=_split_csv(_read_value("PLAID_ACCESS_TOKENS", secrets, "")),
-        plaid_access_token_owners=_split_csv(_read_value("PLAID_ACCESS_TOKEN_OWNERS", secrets, "")),
-        plaid_base_url=_read_value("PLAID_BASE_URL", secrets, "https://sandbox.plaid.com")
+        plaid_client_id=_read_value("PLAID_CLIENT_ID"),
+        plaid_secret=_read_value("PLAID_SECRET"),
+        plaid_access_tokens=_split_csv(_read_value("PLAID_ACCESS_TOKENS", "")),
+        plaid_access_token_owners=_split_csv(_read_value("PLAID_ACCESS_TOKEN_OWNERS", "")),
+        plaid_base_url=_read_value("PLAID_BASE_URL", "https://sandbox.plaid.com")
         or "https://sandbox.plaid.com",
         database_url=enforce_tls(database_url),
         seed_database_url=enforce_tls(seed_database_url) if seed_database_url else None,
-        github_event_name=_read_value("GITHUB_EVENT_NAME", secrets),
-        model_path=_read_value("MODEL_PATH", secrets, "artifacts/classifier.joblib")
-        or "artifacts/classifier.joblib",
-        labeled_dataset_path=_read_value("LABELED_DATASET_PATH", secrets, "labeled_transactions.csv")
+        github_event_name=_read_value("GITHUB_EVENT_NAME"),
+        model_path=_read_value("MODEL_PATH", "artifacts/classifier.joblib") or "artifacts/classifier.joblib",
+        labeled_dataset_path=_read_value("LABELED_DATASET_PATH", "labeled_transactions.csv")
         or "labeled_transactions.csv",
-        jwt_secret=_read_value("JWT_SECRET", secrets),
-        frontend_origin=_read_value("FRONTEND_ORIGIN", secrets),
-        categorizer_mode=_read_value("CATEGORIZER_MODE", secrets, "cascade") or "cascade",
+        jwt_secret=_read_value("JWT_SECRET"),
+        frontend_origin=_read_value("FRONTEND_ORIGIN"),
+        categorizer_mode=_read_value("CATEGORIZER_MODE", "cascade") or "cascade",
     )

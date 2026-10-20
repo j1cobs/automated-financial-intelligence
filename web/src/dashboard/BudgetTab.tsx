@@ -3,13 +3,10 @@
  * Uses `useBudget()` from `lib/queries.ts` (returns `BudgetResponse` from
  * `lib/types.ts`) and `useUpsertBudget()` from `lib/mutations.ts` for editing limits.
  *
- * Port of `_section_budget` (`app/dashboard.py:1110-1188`), with one deliberate
- * capability fix over the first React port (PLAN.md Phase 15, Fix 10 audit):
- * Streamlit's editor lists *every* canonical category (`db.get_categories()`),
- * not just the ones with spend or an existing limit, because `_section_budget`
- * builds its editor list from a second, separate query. `api/viewmodels.py`'s
- * `build_budget` only returns `period_expenses ∪ budget_map` — a category with
- * neither could never be offered here. This file closes that gap by merging in
+ * The editor lists *every* canonical category, not just the ones with spend or an
+ * existing limit (PLAN.md Phase 15, Fix 10 audit). `api/viewmodels.py`'s
+ * `build_budget` only returns `period_expenses ∪ budget_map`, so a category with
+ * neither would never be offered here. This file closes that gap by merging in
  * `useCategories()` (GET /categories, the canonical list) client-side, rather
  * than requesting an API change.
  *
@@ -106,8 +103,7 @@ export function BudgetTab() {
 
   // Canonical categories (GET /categories) ∪ whatever the budget response already
   // covers — a defensive union in case a category with a stored budget limit was
-  // since retired from the canonical list. Sorted, matching Streamlit's
-  // `sorted(set(...) | set(...))`.
+  // since retired from the canonical list. Sorted, so rows render alphabetically.
   const allItems = useMemo(() => {
     const byCategory = new Map(budgetItems.map((item) => [item.category, item]));
     const names = new Set<string>([...(categoriesData?.categories ?? []), ...byCategory.keys()]);

@@ -5,7 +5,7 @@ failure points at the arithmetic rather than at FastAPI. `tests/test_api_data.py
 covers the endpoint/auth/shape layer above them.
 
 Each test names the fix it pins. Several assert on behaviour that deliberately differs
-from the frozen `app/dashboard.py` — see the divergence table at the end of Phase 15.
+from the original dashboard -- see the divergence table at the end of Phase 15.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ class SavingsRateTrendTests(unittest.TestCase):
         )
         trend = {p["month"]: p for p in build_overview(df, pd.DataFrame([]))["savings_rate_trend"]}
         self.assertAlmostEqual(trend["2026-04"]["savings_rate"], 0.75)
-        # Frozen Streamlit clips income to 0.01 and reports -3,000,000% here.
+        # Clipping income to 0.01 would report -3,000,000% here.
         self.assertIsNone(trend["2026-05"]["savings_rate"])
         self.assertEqual(trend["2026-05"]["income"], 0.0)
         self.assertEqual(trend["2026-05"]["expenses"], 300.0)
@@ -304,7 +304,7 @@ class StaleAndDormantTests(unittest.TestCase):
         self.assertEqual(names, ["stale"])
 
     def test_a_recently_refreshed_account_is_not_stale_at_three_days(self) -> None:
-        # The frozen Streamlit threshold is 3 days, which flagged nearly everything.
+        # The legacy 3-day threshold flagged nearly everything.
         now = pd.Timestamp.now(tz="UTC")
         acct = pd.DataFrame(
             [_account("a", "Jacob", "depository", 10.0, updated_at=now - pd.Timedelta(days=3))]
@@ -781,7 +781,7 @@ class ApplyCategoryDrivenTxTypeTests(unittest.TestCase):
     """Tests for `_apply_category_driven_tx_type` and its integration in
     `prepare_transactions`. The override map forces tx_type for INCOME/TRANSFER_IN/
     TRANSFER_OUT categories, while non-override categories keep the heuristic value
-    from `_enrich_transactions`/`_classify_tx_type`."""
+    from `enrich_transactions`/`classify_tx_type`."""
 
     def test_income_category_overrides_expense_amount_sign(self) -> None:
         # A positive amount (outflow) would normally be "expense" per the sign heuristic,
@@ -837,7 +837,7 @@ class ApplyCategoryDrivenTxTypeTests(unittest.TestCase):
     def test_transfer_in_category_still_caught_by_internal_transfer_detection(self) -> None:
         # Even with a Plaid-sourced (unverified) TRANSFER_IN guess that this override
         # now leaves alone, a GENUINE self-transfer is still independently caught by
-        # _detect_internal_transfers (matching amount/date across the user's own
+        # detect_internal_transfers (matching amount/date across the user's own
         # accounts) -- this override being narrower doesn't weaken that detection.
         outflow = _tx(
             "2026-05-01",

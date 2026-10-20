@@ -1,9 +1,9 @@
 """Dashboard data endpoints for the React frontend: pre-shaped view models for the
 Overview/Cash-flow/Budget/Anomalies/Ledger sections, plus the 5 write paths the
-Streamlit dashboard exposes today (credit limit, budget, and the 3 ledger edits).
+(credit limit, budget, and the 3 ledger edits).
 
-Reads compute view models server-side from `app/dashboard.py`'s already-tested pure
-functions (via `api/viewmodels.py`) rather than exposing raw rows for the frontend
+Reads compute view models server-side from the already-tested pure functions in
+`analytics/enrichment.py` (via `api/viewmodels.py`) rather than exposing raw rows for the frontend
 to interpret — see the R2 section of the migration plan. Writes are thin wrappers
 around the existing `DatabaseClient` methods; no new DB logic lives here.
 
@@ -679,9 +679,8 @@ def update_budget(
     db: DbDep,
 ) -> Response:
     """Set one category's cap for one month. Other months are untouched; they
-    keep whatever they inherit. Writes only `budget_periods` — the legacy
-    `budgets` table belongs to the frozen Streamlit dashboard, which writes it
-    itself, so touching it here would discard budgets saved from there."""
+    keep whatever they inherit. Writes only `budget_periods`; the legacy flat
+    `budgets` table (migration 002) is not written."""
     month = body.month or date.today().strftime("%Y-%m")
     if not PERIOD_PATTERN.match(month):
         raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")

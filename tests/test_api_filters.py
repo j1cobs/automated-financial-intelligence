@@ -1,9 +1,7 @@
 """Coverage for `api/filters.py` — PLAN.md Phase 15, Fix 9.
 
-`api/filters.py` is a hand-written port of `app/dashboard.py::_build_sidebar_filters`,
-which is frozen and therefore cannot be shared. The two can drift silently; this file is
-the thing that notices. Tests are grouped by the invariant they defend, and the
-non-obvious ones name the Streamlit line they mirror.
+Tests are grouped by the invariant they defend; each non-obvious case has a test of its
+own.
 """
 
 from __future__ import annotations
@@ -289,7 +287,7 @@ class NonDateFilterTests(unittest.TestCase):
         self.assertEqual(set(filtered["transaction_hash"]), {"b"})
 
     def test_inverted_amount_range_returns_rows(self) -> None:
-        # Mirrors app/dashboard.py:768 — tolerate the mistake instead of showing nothing.
+        # Tolerate the mistake instead of showing nothing.
         filtered, _ = apply_filters(
             self._mixed(), _filters(period="all_time", amount_min=1000.0, amount_max=100.0)
         )
@@ -300,8 +298,8 @@ class NonDateFilterTests(unittest.TestCase):
         self.assertEqual(set(filtered["transaction_hash"]), {"a"})
 
     def test_search_is_literal_not_regex(self) -> None:
-        # Streamlit leaves str.contains in regex mode; over HTTP an unbalanced paren
-        # would be a 500 rather than "no matches".
+        # Regex mode would fail on an unbalanced paren; over HTTP that is a 500 rather
+        # than "no matches".
         filtered, _ = apply_filters(self._mixed(), _filters(period="all_time", search="("))
         self.assertEqual(len(filtered), 0)
 
@@ -320,7 +318,6 @@ class DuplicatesOnlyTests(unittest.TestCase):
     def test_groups_on_account_key_not_account_name(self) -> None:
         # Two DIFFERENT accounts that happen to share a display name. Grouping on the
         # name would call these duplicates of each other; they are not.
-        # Mirrors app/dashboard.py:788-792.
         df = _frame(
             [
                 _row(

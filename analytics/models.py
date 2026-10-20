@@ -31,8 +31,8 @@ def build_models(mode: str) -> PlaceholderModelBundle:
     and never wired up) rather than activating it: its score cannot be explained, and a fixed
     `contamination=0.03` flags ~3% of rows however ordinary the month was. Real anomaly
     detection now lives in `analytics/anomalies.py` and writes its own table; the placeholder
-    survives only to zero the legacy `outlier_score`/`is_outlier` columns each run, which the
-    frozen Streamlit dashboard still reads. See docs/adr/0007-anomaly-detection-without-ml.md.
+    survives only to zero the legacy `outlier_score`/`is_outlier` columns each run. See
+    docs/adr/0007-anomaly-detection-without-ml.md.
     """
     if mode == "cascade":
         return PlaceholderModelBundle(

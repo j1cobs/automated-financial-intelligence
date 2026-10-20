@@ -147,8 +147,8 @@ class LegacyBudgetSeedTests(PostgresBackedTestCase):
         )
 
     def test_the_seed_does_not_write_to_the_legacy_budgets_table(self):
-        """`budgets` is Streamlit-owned: `app/dashboard.py` reads it at :1116 and
-        writes it at :1186. Any write from this path discards what Streamlit saved."""
+        """`budgets` is the legacy flat-cap table (migration 002). Per-month caps live
+        in `budget_periods`, so no write from this path may touch `budgets`."""
         client = self._seed_legacy_state()
         before = self.execute("SELECT category, monthly_limit FROM budgets ORDER BY category")
         client.ensure_schema()

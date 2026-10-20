@@ -22,10 +22,10 @@ _settings = get_settings()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Run every pending migration exactly once at process startup — not per-request (see
-    `api/deps.py::get_db`, which deliberately does NOT do this). `app/` (Streamlit) has always
-    relied on the pipeline or seed script having been run against a database at least once
-    first; `api/` is often the *first* process to touch a fresh/local database, so it can't
-    make that same assumption. `ensure_schema()`'s migrations are idempotent (CLAUDE.md), so
+    `api/deps.py::get_db`, which deliberately does NOT do this). The pipeline and seed
+    scripts normally run against a database before the API does, but `api/` is often the
+    *first* process to touch a fresh/local database, so it can't make that same
+    assumption. `ensure_schema()`'s migrations are idempotent (CLAUDE.md), so
     this is safe to run on every boot, including redeploys. Let a failure here propagate —
     the app should refuse to start against a broken DATABASE_URL rather than boot and 500 on
     the first request.

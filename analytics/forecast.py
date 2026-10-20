@@ -71,8 +71,7 @@ def starting_balance(accounts: pd.DataFrame) -> float:
     balances move with the market, which transaction history cannot forecast —
     projecting them would present noise as a prediction.
 
-    This is the same filter already used at `api/viewmodels.py:393`/`:844` and
-    `app/dashboard.py:919`, not a new convention.
+    This is the same filter already used by api/viewmodels.py, not a new convention.
     """
     if accounts is None or accounts.empty:
         return 0.0

@@ -476,8 +476,7 @@ function emergencyFundTone(months: number): MeterTone {
   return 'serious';
 }
 
-/** Per-card row: "{account} — {owner} — $current / $limit (n% used)". Mirrors
- * `app/dashboard.py:604-627`. A null limit shows "$X owed — no credit limit
+/** Per-card row: "{account} — {owner} — $current / $limit (n% used)". A null limit shows "$X owed — no credit limit
  * set" with no bar, since there's nothing to measure against. */
 function CreditUtilizationRow({ item }: { item: CreditUtilizationItem }) {
   const owner = item.owner_name ?? '—';
@@ -510,8 +509,7 @@ function CreditUtilizationRow({ item }: { item: CreditUtilizationItem }) {
 }
 
 /** Collapsible editor wired to `useSetCreditLimit()` (previously unused).
- * Mirrors `app/dashboard.py:630-675`'s data-editor + save button, one row
- * per card, keyed on `account_key`. */
+ * One row per card, keyed on `account_key`. */
 function CreditLimitEditor({ items }: { items: CreditUtilizationItem[] }) {
   const { mutate, isPending } = useSetCreditLimit();
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -815,7 +813,7 @@ export function OverviewTab() {
         )}
       </div>
 
-      {/* Duplicate-account warning — mirrors app/dashboard.py:537-543 */}
+      {/* Duplicate-account warning */}
       {nw.forked_accounts.length > 0 && (
         <div className="rounded-lg border border-strong bg-surface-2 p-3 sm:p-6">
           <h3 className="font-semibold text-sm sm:text-base text-warn-text">
@@ -844,7 +842,7 @@ export function OverviewTab() {
           generated, not a score to interpret. */}
       <AnomaliesCard />
 
-      {/* Credit Utilization + limit editor — mirrors app/dashboard.py:604-675.
+      {/* Credit Utilization + limit editor.
           Full-width, fixed above the masonry pool below (not part of it) --
           its own row count varies with card count, not with the pool's other
           cards, so it doesn't belong in their height-balancing pool. */}
@@ -1032,7 +1030,7 @@ export function OverviewTab() {
           </Card>
         )}
 
-        {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) */}
+        {/* Top Categories (horizontal, sorted) */}
         {ov?.top_categories && ov.top_categories.length > 0 && (
           <Card
             title="Top Expense Categories"
@@ -1072,7 +1070,7 @@ export function OverviewTab() {
           </Card>
         )}
 
-        {/* Month-over-month by category (app/dashboard.py:891-912) */}
+        {/* Month-over-month by category */}
         {monthOverMonthRows.length > 0 && (
           <Card
             title="Month-over-Month by Category"

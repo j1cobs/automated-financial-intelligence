@@ -29,9 +29,9 @@ DB_B = "postgresql://localhost/b"
 
 @contextmanager
 def _patch_dataload_reads(tx_df: pd.DataFrame | None = None, acct_df: pd.DataFrame | None = None):
-    """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
-    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
-    (added alongside it, without touching the frozen loader -- see api/dataload.py's module
+    """Patch both reads `load_frames()` performs: `load_financial_data` (the loader in
+    database/frames.py) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
+    (kept alongside it rather than inside the loader -- see api/dataload.py's module
     docstring). Yields the `load_financial_data` mock, since that's what existing tests
     assert call counts against; defaults the two DatabaseClient reads to empty mappings so
     tests that don't care about pfc_detailed/category_source/linked_transaction_hash aren't

@@ -812,7 +812,7 @@ class LoadEnrichedHistoryDtypeTests(unittest.TestCase):
     Every other fixture builds frames with pd.Timestamp, which is why nothing
     caught the real driver's object dtype (datetime.date). The psycopg driver
     returns datetime.date for a DATE column, which arrives as object dtype —
-    _enrich_transactions immediately calls .dt, which requires datetime64.
+    enrich_transactions immediately calls .dt, which requires datetime64.
     """
 
     def _database(self) -> MagicMock:
@@ -822,7 +822,7 @@ class LoadEnrichedHistoryDtypeTests(unittest.TestCase):
 
     def test_object_dtype_dates_from_the_driver_are_converted(self) -> None:
         """Dates arriving from psycopg as datetime.date (object dtype) are converted
-        to datetime64 before being passed to _enrich_transactions."""
+        to datetime64 before being passed to enrich_transactions."""
         from datetime import date as date_type
 
         # Build a frame with datetime.date objects (not pd.Timestamp)

@@ -156,7 +156,7 @@ const mockBudgetData: BudgetResponse = {
   ],
 };
 
-/** Rows render alphabetically (matching Streamlit's `sorted(...)`), not in API
+/** Rows render alphabetically, not in API
  * response order, so tests target a category's own row rather than an index. */
 function rowFor(category: string): HTMLElement {
   return screen.getByText(category).closest('div.border-l-4') as HTMLElement;
@@ -265,7 +265,7 @@ describe('BudgetTab', () => {
     // 166.7% rounds to 167%
     expect(screen.getByText('— 167% of limit')).toBeInTheDocument();
 
-    // Entertainment has spend but no limit -- Streamlit's "no budget set" path.
+    // Entertainment has spend but no limit -- the "no budget set" path.
     const entertainmentContainer = screen.getByText('Entertainment').closest('div.min-w-0');
     expect(entertainmentContainer).toHaveTextContent('$50.00');
     expect(entertainmentContainer).toHaveTextContent('no budget set');
@@ -313,7 +313,7 @@ describe('BudgetTab', () => {
     // Entertainment is current-month but has no limit and (per build_budget)
     // no projected_eom is computed unless is_current_month -- it still is
     // here, so the projection should show once a limit exists; without one
-    // Streamlit shows "Actual" only for historical periods, so nothing extra
+    // the "Actual" label appears only for historical periods, so nothing extra
     // is asserted for Entertainment beyond the no-budget-set text above.
   });
 

@@ -22,8 +22,8 @@ const VALID_PERIODS: ReadonlySet<string> = new Set<PeriodPreset>([
   'custom',
 ]);
 
-// Mirrors api/filters.py::DEFAULT_PERIOD. Deliberately wider than Streamlit's
-// last_30_days — see that module's comment.
+// Mirrors api/filters.py::DEFAULT_PERIOD. Deliberately wider than last_30_days;
+// see that module's comment.
 export const DEFAULT_PERIOD: PeriodPreset = 'last_3_months';
 
 export const PERIOD_LABELS: Record<PeriodPreset, string> = {

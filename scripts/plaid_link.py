@@ -17,7 +17,7 @@ to .env or GitHub Secrets -- this only fixes errors like NO_ACCOUNTS / ITEM_LOGI
 on a token you already have.
 
 Credentials are read the same way the rest of this app reads them: via
-core.config.load_settings() (env vars / .streamlit/secrets.toml / .env).
+core.config.load_settings() (env vars / .env).
 """
 
 from __future__ import annotations

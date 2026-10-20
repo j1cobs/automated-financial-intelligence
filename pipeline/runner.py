@@ -61,11 +61,11 @@ def _load_enriched_history(database: DatabaseClient) -> pd.DataFrame:
     baseline, so both are structurally incapable of working on a delta: they
     would return nothing every day forever while their unit tests passed.
 
-    Reuses the frozen `load_financial_data` + `enrich_transactions` rather
+    Reuses `load_financial_data` + `enrich_transactions` rather
     than re-deriving `month`/`tx_type`/`adjusted_amount` here. That also
     supplies `transaction_hash`, which `PlaidIngestor._normalize` does not
     produce (the hash is computed inside `upsert_transactions`) and which the
-    `is_outlier` shim needs to flag anything at all.
+    `is_outlier` flags need in order to mark any row.
 
     Precondition this helper must satisfy for `enrich_transactions`: `date` is
     converted to datetime64 first. `load_financial_data` hands it back as object
@@ -77,8 +77,7 @@ def _load_enriched_history(database: DatabaseClient) -> pd.DataFrame:
     # `enrich_transactions` calls `.dt` immediately, so `date` must already be
     # datetime64. psycopg returns datetime.date for a DATE column, so it arrives
     # as object dtype. Both other callers convert here too
-    # (app/dashboard.py:1358, api/viewmodels.py:247); the frozen helper cannot be
-    # made defensive itself.
+    # (api/viewmodels.py does the same); `enrich_transactions` itself is left unchanged.
     tx_df["date"] = pd.to_datetime(tx_df["date"])
     enriched = enrich_transactions(tx_df)
     # Duplicate-flagged rows are excluded from analytics everywhere else; an
@@ -92,7 +91,7 @@ def _detect_and_store_anomalies(
     streams: list[dict],
 ) -> None:
     """Detect anomalies for the current month, persist them, and refresh the
-    legacy `is_outlier` flags the frozen Streamlit dashboard still reads."""
+    `is_outlier` flags on the transactions behind them."""
     if history is None or history.empty:
         return
 

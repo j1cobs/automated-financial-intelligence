@@ -4,7 +4,7 @@
 `load_financial_data` and *assumes* the driver hands `date` back as object dtype
 (`datetime.date`). That assumption is what the `pd.to_datetime` fix in
 `_load_enriched_history` rests on, and a mock cannot notice if psycopg ever stops
-behaving that way. Without the conversion, `_enrich_transactions` raised on `.dt`
+behaving that way. Without the conversion, `enrich_transactions` raised on `.dt`
 and stream detection silently produced zero rows in production.
 
 These tests read real rows through the real query, so the assumption is checked

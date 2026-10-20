@@ -1,8 +1,7 @@
 /**
  * Shared Recharts styling (PLAN.md Phase 15, Fix 11).
  *
- * The React equivalent of `_style_chart()` (`app/dashboard.py:306-324`): one
- * place that decides axis, grid, tooltip, legend, margin and mark geometry, so
+ * One place decides axis, grid, tooltip, legend, margin and mark geometry, so
  * every chart on the page reads as one system instead of each file inventing
  * its own hexes.
  *

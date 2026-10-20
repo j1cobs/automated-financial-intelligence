@@ -1,7 +1,7 @@
 """Shared harness for the tests that need a *real* Postgres.
 
 Every other test in this repo mocks `psycopg`, which is why migration 026 shipped
-reading `t.date` (the DataFrame alias from `app/dashboard.py:330`) instead of the
+reading `t.date` (the DataFrame alias that `load_financial_data` produces) instead of the
 real column `transaction_date`: 614 green tests, and `ensure_schema()` raising
 `UndefinedColumn` on the first startup against an actual server. SQL that is only
 ever handed to a mock is SQL nobody has checked.

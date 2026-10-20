@@ -1,20 +1,17 @@
 """Pure JSON-view-model builders for the React dashboard's read endpoints.
 
-Ports the section renderers in `app/dashboard.py` (`_section_net_worth`,
-`_section_overview`, `_section_cash_flow`, `_section_budget`, `_section_anomalies`,
-`_section_ledger`) from Streamlit widget calls to plain dict/list return values.
-Reuses (does not reimplement) the pure functions those renderers call — see the
-`analytics.enrichment` imports below — so the underlying business logic (net worth,
-cash-flow, tx-type classification, credit-limit resolution) stays covered by the
-tests already in `tests/test_dashboard_classify.py` / `tests/test_dashboard_helpers.py`.
+Builds the JSON view models for the net-worth, overview, cash-flow, budget, anomaly and
+ledger sections of the React dashboard. Each builder returns plain dict/list values.
+The pure functions they rely on (net worth, cash-flow, tx-type classification,
+credit-limit resolution) live in `analytics.enrichment` and are covered by
+`tests/test_enrichment.py`; these builders reuse them rather than reimplementing them.
 
-Scope decision (judgment call — the plan left exact view-model shapes open): unlike
-the Streamlit sidebar, these builders take no period/owner/category filter params in
-R2 — they compute over the full history (minus rows flagged `is_duplicate`, mirroring
-the Streamlit "enriched" frame). The ledger view model is the one exception: it keeps
-duplicate-flagged rows, same as `_section_ledger`, because the ledger's checkbox is
-the only way to un-flag a row. Adding query-param filtering later is additive to this
-shape, not breaking.
+Scope decision (judgment call — the plan left exact view-model shapes open): these
+builders take no period/owner/category filter params — they compute over the full
+history, minus rows flagged `is_duplicate`. The ledger view model is the one exception:
+it keeps duplicate-flagged rows, because the ledger's checkbox is the only way to
+un-flag a row. Adding query-param filtering later is additive to this shape, not
+breaking.
 
 **Unit contract (PLAN.md Phase 15, Fix 1).** Every ratio this module returns is a
 *fraction*, not percentage points: a 60% savings rate is `0.6`. `credit_utilization.pct`
@@ -22,10 +19,11 @@ and `budget.pct` were already fractions while `savings_rate` was percentage poin
 the frontend applied one `formatPercent` to both — so one was always wrong. Do not
 reintroduce a `* 100` here; formatting belongs to the UI.
 
-**Divergence from Streamlit is intentional (PLAN.md Phase 15).** `app/dashboard.py` is
-frozen, so it keeps the old percentage-point savings rate, the row-based rolling window,
-and the 3-day stale-balance threshold. The five expected divergences are tabulated at the
-end of Phase 15; anything else differing is a bug here.
+**Divergences from the original dashboard are intentional (PLAN.md Phase 15).**
+The legacy version used a percentage-point savings rate, a row-based rolling window and a
+3-day stale-balance threshold; this module does not. The five expected divergences are
+tabulated at the end of Phase 15; anything else differing from the legacy numbers is a bug
+here.
 """
 
 from __future__ import annotations
@@ -84,8 +82,8 @@ def _label_subtype(subtype: str | None, lang: str) -> str:
 
 _IDENTITY_COLS = ["official_name", "account_subtype", "account_type", "mask"]
 
-# Deliberately *not* imported from `app.dashboard._STALE_BALANCE_DAYS` (= 3), which is
-# frozen. That constant conflated two different questions; Fix 5 splits them.
+# Deliberately *not* the old single 3-day stale-balance constant, which conflated two different
+# questions; Fix 5 splits them.
 #   SYNC_STALE_DAYS  — `accounts.updated_at` is the last *balance refresh*. A gap here
 #                      means the Plaid Item may be broken (see scripts/plaid_link.py
 #                      repair), not that the account is unused.
@@ -95,8 +93,8 @@ SYNC_STALE_DAYS = 7
 DORMANT_DAYS = 90
 
 # A month whose income is below this contributes no savings rate. Dividing a full month
-# of expenses by a near-zero income produces a number with no meaning (the frozen
-# Streamlit version clips income to $0.01 and reports -24,000,000%).
+# of expenses by a near-zero income produces a number with no meaning (clipping income to
+# $0.01 reports -24,000,000%).
 MIN_MONTHLY_INCOME_FOR_RATE = 100.0
 
 # A calendar month needs at least this many days of observed coverage to count toward a
@@ -107,8 +105,8 @@ _ROLLING_SPEND_WINDOW_DAYS = 30
 
 
 def exclude_duplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop rows the user has hand-flagged `is_duplicate`, same as the Streamlit
-    "enriched" frame used by every section except the ledger."""
+    """Drop rows the user has hand-flagged `is_duplicate`. Every section except the
+    ledger works on the result."""
     if df.empty:
         return df
     return df[~df["is_duplicate"].fillna(False).astype(bool)]
@@ -227,7 +225,7 @@ def _apply_category_driven_tx_type(df: pd.DataFrame) -> pd.DataFrame:
     """Override `tx_type` for the categories where cash-flow direction is unambiguous
     from the category alone. Every other category (including LOAN_PAYMENTS, OTHER,
     UNCATEGORIZED, and all spend categories) keeps whatever
-    `_enrich_transactions`/`_classify_tx_type` (app/dashboard.py, frozen) already
+    `enrich_transactions`/`classify_tx_type` (analytics/enrichment.py) already
     computed from account_type + amount sign + description keywords.
 
     INCOME always overrides to "income", regardless of `category_source` -- pulling a
@@ -243,7 +241,7 @@ def _apply_category_driven_tx_type(df: pd.DataFrame) -> pd.DataFrame:
     recognized institution, with no way to tell "your own account" from "someone
     else's money" -- trusting that guess unconditionally silently deletes real income.
     Genuine self-transfers are still caught independently by
-    `_detect_internal_transfers` (app/dashboard.py), which matches on
+    `detect_internal_transfers` (analytics/enrichment.py), which matches on
     amount/date/account rather than Plaid's category guess. `category_source` may be
     absent (older test fixtures, or a caller that hasn't merged it in) -- treated the
     same as "not merchant-sourced", i.e. no transfer override.
@@ -269,9 +267,8 @@ def _apply_category_driven_tx_type(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_transactions(tx_df: pd.DataFrame) -> pd.DataFrame:
-    """Mirror `render_dashboard`'s prep: parse dates, enrich once on the full frame
-    so internal-transfer pair matching sees both legs of a transfer regardless of
-    which rows get filtered out downstream."""
+    """Parse dates and enrich once on the full frame, so internal-transfer pair matching
+    sees both legs of a transfer regardless of which rows get filtered out downstream."""
     if tx_df.empty:
         return tx_df
     tx = tx_df.copy()
@@ -410,9 +407,7 @@ def _monthly_savings_rates(real: pd.DataFrame, months: set[str]) -> pd.Series:
 def build_net_worth(
     acct_df: pd.DataFrame, tx_df: pd.DataFrame | None = None, lang: str = "en"
 ) -> dict[str, Any]:
-    """Port of `_section_net_worth`'s data (not its widgets). No owner filtering —
-    the Streamlit version's `selected_owners` came from the sidebar, which R2 has
-    no equivalent of yet.
+    """Net-worth view model. No owner filtering: it covers every owner's accounts.
 
     `tx_df` is the **unfiltered** enriched transaction frame, used only to date each
     account's last activity for the dormant-account signal. It must stay unfiltered: a
@@ -497,8 +492,8 @@ def build_net_worth(
     # --- Owner balances: one row per OWNER, not per account (Fix 4) -----------------
     # Emitting a row per account left Recharts drawing N bars whose x-axis label took
     # only two distinct values, so "Alexie"/"Jacob" repeated at irregular intervals.
-    # Streamlit's equivalent is a stacked bar (x=owner, colour=account_type); this is
-    # that shape. Per-account detail moves into `accounts` for the tooltip.
+    # One stacked bar per owner (x=owner, colour=account_type) keeps the x-axis to one
+    # label per owner. Per-account detail moves into `accounts` for the tooltip.
     owner_rows: dict[str, dict[str, Any]] = {}
     for _, row in acct_df.iterrows():
         owner = _clean(row["owner_name"]) or "Unknown"
@@ -623,7 +618,7 @@ def build_overview(
     net_worth_history: list[dict[str, Any]] | None = None,
     recurring_streams: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Port of `_section_overview`'s data. `df` must already be enriched
+    """Overview view model. `df` must already be enriched
     (`prepare_transactions`) and duplicate-excluded.
 
     `all_time_df` is the same frame with every filter EXCEPT the period applied — see
@@ -929,8 +924,8 @@ def build_overview(
     ]
 
     # --- Savings-rate trend (Fix 2) -------------------------------------------------
-    # The frozen Streamlit version divides by `income.clip(lower=0.01)`, so a $0-income
-    # month reports millions of percent. A month with no meaningful income has no
+    # Dividing by `income.clip(lower=0.01)` would make a $0-income month report millions
+    # of percent. A month with no meaningful income has no
     # meaningful savings rate; say so with None and let the chart draw a gap.
     savings_rate_trend = []
     non_transfer = all_time_df[all_time_df["tx_type"] != "transfer"]
@@ -1109,7 +1104,7 @@ def _wide_flow_series(df: pd.DataFrame, key: str) -> list[dict[str, Any]]:
 
 
 def build_cash_flow(df: pd.DataFrame) -> dict[str, Any]:
-    """Port of `_section_cash_flow`'s data. `df` must already be enriched and
+    """Cash-flow view model. `df` must already be enriched and
     duplicate-excluded."""
     empty_result = {
         "income": 0.0,
@@ -1209,7 +1204,7 @@ def build_budget(
     budget_rows: list[dict[str, Any]],
     period: str | None = None,
 ) -> dict[str, Any]:
-    """Port of `_section_budget`'s data, extended to per-month caps (Phase 28).
+    """Budget view model, with per-month caps (Phase 28).
 
     `df` must already be enriched and duplicate-excluded. `budget_rows` is
     `DatabaseClient.get_budget_periods()`'s return value — rows for the months a
@@ -1314,7 +1309,7 @@ def build_ledger(
     df: pd.DataFrame,
     recurring_streams: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Port of `_section_ledger`'s data. `df` must already be enriched. Unlike every
+    """Ledger view model. `df` must already be enriched. Unlike every
     other builder, `is_duplicate` rows are kept — the ledger's checkbox is the only
     way to un-flag one.
 
