@@ -11,7 +11,9 @@ import type {
 } from '../lib/types';
 import { MetricTile, MetricInfoBadge } from './MetricTile';
 import { NetWorthTrendChart } from './NetWorthTrendChart';
-import { MasonryColumns } from './MasonryColumns';
+import { MasonryColumns, ScrollBody, Stack } from './MasonryColumns';
+import { useInMasonrySlot } from './masonrySlot';
+import { MIN_BODY_CHART } from './masonryLayout';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { formatCategory } from '../lib/categories';
@@ -52,6 +54,12 @@ import {
  *  labels without eating most of the chart's plottable area. Paired with
  *  `truncateTickLabel`'s character budget in `chartTheme.ts`. */
 const CATEGORY_AXIS_WIDTH = 160;
+
+/** Month-over-Month chart spacing: each category holds three bars of about
+ *  12 px, with 3 px between bars and 6 px between categories, so 48 px per
+ *  category. `MOM_CHART_CHROME` is the x-axis strip below the rows. */
+const MOM_ROW_HEIGHT = 48;
+const MOM_CHART_CHROME = 32;
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -303,6 +311,9 @@ function Card({
   metricKey,
   className,
   contentClassName,
+  headerExtra,
+  minBody,
+  elasticHeight,
   children,
 }: {
   title: string;
@@ -314,8 +325,17 @@ function Card({
   /** Extra classes on the content wrapper below the title/caption, e.g. to
    *  vertically center short content within a taller card (Item 2). */
   contentClassName?: string;
+  /** Fixed header content below the caption (e.g. a legend). It stays put
+   *  while the body scrolls. */
+  headerExtra?: ReactNode;
+  /** Smallest body height before the card scrolls (see `ScrollBody`). */
+  minBody?: number;
+  /** A chart's natural height: the body fills extra height, and scrolls
+   *  rather than compressing the chart below this (see `ScrollBody`). */
+  elasticHeight?: number;
   children: ReactNode;
 }) {
+  const inSlot = useInMasonrySlot();
   return (
     <div
       className={`relative flex h-full flex-col rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4 ${className ?? ''}`}
@@ -330,7 +350,29 @@ function Card({
       )}
       <h3 className="pr-6 text-base sm:text-lg font-semibold text-ink">{title}</h3>
       {caption && <p className="mt-1 text-xs text-ink-muted">{caption}</p>}
-      <div className={`mt-4 ${contentClassName ?? ''}`}>{children}</div>
+      {headerExtra && <div className="mt-4">{headerExtra}</div>}
+      <div
+        className={`${headerExtra ? 'mt-2' : 'mt-4'} ${inSlot ? 'flex min-h-0 flex-1 flex-col' : ''} ${contentClassName ?? ''}`}
+      >
+        <ScrollBody minBody={minBody} elasticHeight={elasticHeight}>
+          {children}
+        </ScrollBody>
+      </div>
+    </div>
+  );
+}
+
+/** A row of color swatches with labels, for a card's `headerExtra` -- an HTML
+ *  legend stays visible while the card body scrolls, unlike a chart's own. */
+function SwatchLegend({ entries }: { entries: { label: string; color: string }[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+      {entries.map((entry) => (
+        <span key={entry.label} className="flex items-center gap-1.5 text-xs text-ink-secondary">
+          <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: entry.color }} />
+          {entry.label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -597,6 +639,10 @@ export function OverviewTab() {
       : `avg of ${ov.complete_months} complete ${ov.complete_months === 1 ? 'month' : 'months'}`;
   const dormantCount = nw.dormant_accounts.length;
   const monthOverMonthRows = ov.month_over_month;
+  const monthOverMonthChartHeight = Math.max(
+    250,
+    monthOverMonthRows.length * MOM_ROW_HEIGHT + MOM_CHART_CHROME,
+  );
   const sortedIncomeBreakdown = [...ov.income_breakdown].sort((a, b) => b.amount - a.amount);
   const assetMixTotal = nw.asset_mix.reduce((sum, item) => sum + item.balance, 0);
   // Fixed order (depository, investment, credit, other), filtered to types
@@ -766,22 +812,32 @@ export function OverviewTab() {
           its row partner's (e.g. Owner Balances' small-multiples list next to
           Income Sources' short one), leaving dead whitespace under the
           shorter card. Treating all 10 as one pool lets the layout balance by
-          actual rendered height instead of by row position. */}
+          actual rendered height instead of by row position.
+
+          Both columns end on the same line. A card scrolls only when its
+          content passes the ceiling (70% of the viewport, floored at 560px),
+          and only its body scrolls: the title, caption and any header legend
+          stay put. Then the shorter column is filled in order: its clipped
+          cards and charts grow back, the taller column's clipped cards give
+          up height (scrolling a bit more), and only what is left is spread
+          evenly through the shorter column's cards. */}
       <MasonryColumns>
         <Card title="Biggest Expense This Month">
-          {ov.biggest_expense_this_month ? (
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-ink-secondary">
-                {ov.biggest_expense_this_month.description}{' '}
-                <span className="text-ink-muted">· {ov.biggest_expense_this_month.date}</span>
-              </span>
-              <span className="tabular-nums font-medium text-ink">
-                {formatCurrency(ov.biggest_expense_this_month.amount)}
-              </span>
-            </div>
-          ) : (
-            <p className="text-sm text-ink-muted">No expenses recorded this month.</p>
-          )}
+          <Stack>
+            {ov.biggest_expense_this_month ? (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-ink-secondary">
+                  {ov.biggest_expense_this_month.description}{' '}
+                  <span className="text-ink-muted">· {ov.biggest_expense_this_month.date}</span>
+                </span>
+                <span className="tabular-nums font-medium text-ink">
+                  {formatCurrency(ov.biggest_expense_this_month.amount)}
+                </span>
+              </div>
+            ) : (
+              <p className="text-sm text-ink-muted">No expenses recorded this month.</p>
+            )}
+          </Stack>
         </Card>
 
         <Card
@@ -789,7 +845,7 @@ export function OverviewTab() {
           caption="Projected next charge date, based on your typical interval between charges."
         >
           {ov.upcoming_recurring.length > 0 ? (
-            <ul className="space-y-1.5">
+            <Stack as="ul" className="gap-1.5">
               {ov.upcoming_recurring.map((row) => (
                 <li
                   key={row.stream_id ?? row.description}
@@ -808,41 +864,47 @@ export function OverviewTab() {
                   <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
                 </li>
               ))}
-            </ul>
+            </Stack>
           ) : (
-            <p className="text-sm text-ink-muted">No recurring charges with a predictable cadence yet.</p>
+            <Stack>
+              <p className="text-sm text-ink-muted">No recurring charges with a predictable cadence yet.</p>
+            </Stack>
           )}
         </Card>
 
         <Card title="Top Merchants (Trailing 12 Months)">
           {ov.top_merchants.length > 0 ? (
-            <ul className="space-y-1.5">
+            <Stack as="ul" className="gap-1.5">
               {ov.top_merchants.map((row) => (
                 <li key={row.description} className="flex items-center justify-between text-sm">
                   <span className="text-ink-secondary">{row.description}</span>
                   <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
                 </li>
               ))}
-            </ul>
+            </Stack>
           ) : (
-            <p className="text-sm text-ink-muted">Not enough expense history yet.</p>
+            <Stack>
+              <p className="text-sm text-ink-muted">Not enough expense history yet.</p>
+            </Stack>
           )}
         </Card>
 
         <Card title="Committed / Recurring Spend" caption="All-time total per recurring item.">
           {ov.recurring_items.length > 0 ? (
-            <ul className="space-y-1.5">
+            <Stack as="ul" className="gap-1.5">
               {ov.recurring_items.map((row) => (
                 <li key={row.description} className="flex items-center justify-between text-sm">
                   <span className="text-ink-secondary">{row.description}</span>
                   <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
                 </li>
               ))}
-            </ul>
+            </Stack>
           ) : (
-            <p className="text-sm text-ink-muted">
-              Nothing flagged recurring yet — mark a transaction recurring in the Transactions tab.
-            </p>
+            <Stack>
+              <p className="text-sm text-ink-muted">
+                Nothing flagged recurring yet — mark a transaction recurring in the Transactions tab.
+              </p>
+            </Stack>
           )}
         </Card>
 
@@ -852,11 +914,16 @@ export function OverviewTab() {
             caption="Liquid savings ÷ average monthly expenses."
             metricKey="emergency_fund_months"
           >
-            <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
-            <div className="mt-3">
-              <Meter pct={ov.emergency_fund_months / 6} tone={emergencyFundTone(ov.emergency_fund_months)} />
-            </div>
-            <p className="mt-2 text-xs text-ink-muted">Goal: 6 months of expenses covered.</p>
+            <Stack className="gap-2.5">
+              <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
+              <div>
+                <Meter
+                  pct={ov.emergency_fund_months / 6}
+                  tone={emergencyFundTone(ov.emergency_fund_months)}
+                />
+              </div>
+              <p className="text-xs text-ink-muted">Goal: 6 months of expenses covered.</p>
+            </Stack>
           </Card>
         )}
 
@@ -865,59 +932,59 @@ export function OverviewTab() {
             part-to-whole data. Same color assignment as before
             (`categoricalScale(n)[index]`), just a different mark. */}
         {nw?.asset_mix && nw.asset_mix.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Asset Mix</h3>
-            <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
-              <BarChart
-                data={[buildAssetMixRow(nw.asset_mix)]}
-                layout="vertical"
-                margin={CHART_MARGIN.compact}
-              >
-                <XAxis type="number" hide domain={[0, assetMixTotal]} />
-                <YAxis dataKey="category" type="category" hide />
-                <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
-                <Legend {...legendProps()} verticalAlign="bottom" />
-                {nw.asset_mix.map((item, index) => {
-                  const fill = categoricalScale(nw.asset_mix.length)[index];
-                  const pct = assetMixTotal > 0 ? item.balance / assetMixTotal : 0;
-                  return (
-                    <Bar
-                      key={item.subtype_label}
-                      dataKey={item.subtype_label}
-                      stackId="assets"
-                      fill={fill}
-                      name={item.subtype_label}
-                      {...surfaceGapProps()}
-                    >
-                      <LabelList
+          <Card title="Asset Mix">
+            <Stack>
+              <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
+                <BarChart
+                  data={[buildAssetMixRow(nw.asset_mix)]}
+                  layout="vertical"
+                  margin={CHART_MARGIN.compact}
+                >
+                  <XAxis type="number" hide domain={[0, assetMixTotal]} />
+                  <YAxis dataKey="category" type="category" hide />
+                  <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
+                  <Legend {...legendProps()} verticalAlign="bottom" />
+                  {nw.asset_mix.map((item, index) => {
+                    const fill = categoricalScale(nw.asset_mix.length)[index];
+                    const pct = assetMixTotal > 0 ? item.balance / assetMixTotal : 0;
+                    return (
+                      <Bar
+                        key={item.subtype_label}
                         dataKey={item.subtype_label}
-                        content={(props: object) =>
-                          renderAssetMixSegmentLabel(
-                            props as AssetMixLabelProps,
-                            item.subtype_label,
-                            pct,
-                            fill,
-                          )
-                        }
-                      />
-                    </Bar>
-                  );
-                })}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+                        stackId="assets"
+                        fill={fill}
+                        name={item.subtype_label}
+                        {...surfaceGapProps()}
+                      >
+                        <LabelList
+                          dataKey={item.subtype_label}
+                          content={(props: object) =>
+                            renderAssetMixSegmentLabel(
+                              props as AssetMixLabelProps,
+                              item.subtype_label,
+                              pct,
+                              fill,
+                            )
+                          }
+                        />
+                      </Bar>
+                    );
+                  })}
+                </BarChart>
+              </ResponsiveContainer>
+            </Stack>
+          </Card>
         )}
 
         {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) */}
         {ov?.top_categories && ov.top_categories.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
-            <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>
-            <ResponsiveContainer
-              width="100%"
-              height={Math.max(250, ov.top_categories.length * 32)}
-              minWidth="100%"
-            >
+          <Card
+            title="Top Expense Categories"
+            caption={strings.crossFilter.categoryHint}
+            minBody={MIN_BODY_CHART}
+            elasticHeight={Math.max(250, ov.top_categories.length * 32)}
+          >
+            <ResponsiveContainer width="100%" height="100%" minWidth="100%">
               <BarChart data={ov.top_categories} layout="vertical" margin={CHART_MARGIN.default}>
                 <CartesianGrid {...gridProps()} />
                 <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
@@ -943,22 +1010,32 @@ export function OverviewTab() {
                 />
               </BarChart>
             </ResponsiveContainer>
-          </div>
+          </Card>
         )}
 
         {/* Month-over-month by category (app/dashboard.py:891-912) */}
         {monthOverMonthRows.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Month-over-Month by Category</h3>
-            <ResponsiveContainer
-              width="100%"
-              height={Math.max(250, monthOverMonthRows.length * 32)}
-              minWidth="100%"
-            >
+          <Card
+            title="Month-over-Month by Category"
+            headerExtra={
+              <SwatchLegend
+                entries={[
+                  { label: 'Last month', color: categoricalColor(1) },
+                  { label: 'This month', color: categoricalColor(0) },
+                  { label: 'Usual', color: categoricalColor(2) },
+                ]}
+              />
+            }
+            minBody={MIN_BODY_CHART}
+            elasticHeight={monthOverMonthChartHeight}
+          >
+            <ResponsiveContainer width="100%" height="100%" minWidth="100%">
               <BarChart
                 data={monthOverMonthRows}
                 layout="vertical"
                 margin={{ ...CHART_MARGIN.default, right: 56 }}
+                barCategoryGap={6}
+                barGap={3}
               >
                 <CartesianGrid {...gridProps()} />
                 <XAxis
@@ -981,7 +1058,6 @@ export function OverviewTab() {
                   formatter={(value) => formatCurrency(value as number)}
                   labelFormatter={(label) => formatCategory(label as string)}
                 />
-                <Legend {...legendProps()} />
                 <Bar
                   dataKey="last_month"
                   name="Last month"
@@ -1029,7 +1105,7 @@ export function OverviewTab() {
                 />
               </BarChart>
             </ResponsiveContainer>
-          </div>
+          </Card>
         )}
 
         {/* Owner Balances -- small multiples: one plain-HTML mini list per
@@ -1039,31 +1115,29 @@ export function OverviewTab() {
             dimension (account type via `categoricalScale`) per the `dataviz`
             skill's categorical-hue rule -- owner is disambiguated by spatial
             separation, not a second hue. One shared legend covers account
-            type for the whole group instead of repeating per list. Content
-            still caps at `max-h-[420px] overflow-y-auto` -- masonry balances
-            by real measured height regardless, but a cap still protects
-            against one card becoming absurdly tall on a household with many
-            accounts. */}
+            type for the whole group instead of repeating per list; it sits in
+            the card header, so it stays put while the body scrolls. The body
+            scrolls only when its content passes the masonry ceiling (70% of
+            the viewport, floored at 560px); below that, the card is sized by
+            the balance-then-stretch rule (see `MasonryColumns`). */}
         {nw?.owner_balances && nw.owner_balances.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
-            <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-              {ownerBalanceAccountTypes.map((type) => (
-                <span key={type} className="flex items-center gap-1.5 text-xs text-ink-secondary">
-                  <span
-                    className="inline-block h-2.5 w-2.5 rounded-full"
-                    style={{ backgroundColor: accountTypeColor(type) }}
-                  />
-                  {ACCOUNT_TYPE_LABELS[type] ?? type}
-                </span>
-              ))}
-            </div>
-            <div className="grid max-h-[420px] grid-cols-1 gap-4 overflow-y-auto">
+          <Card
+            title="Owner Balances"
+            headerExtra={
+              <SwatchLegend
+                entries={ownerBalanceAccountTypes.map((type) => ({
+                  label: ACCOUNT_TYPE_LABELS[type] ?? type,
+                  color: accountTypeColor(type),
+                }))}
+              />
+            }
+          >
+            <Stack className="gap-4">
               {nw.owner_balances.map((owner) => (
                 <OwnerBalanceMiniList key={owner.owner} owner={owner} maxBalance={maxOwnerAccountBalance} />
               ))}
-            </div>
-          </div>
+            </Stack>
+          </Card>
         )}
 
         {/* Income Sources -- built from the same `LabeledBarRow` as Owner
@@ -1073,10 +1147,8 @@ export function OverviewTab() {
             the active period filter instead, which was inconsistent with
             every other "top N" card on this tab. */}
         {sortedIncomeBreakdown.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="text-base sm:text-lg font-semibold text-ink">Income Sources</h3>
-            <p className="mb-4 text-xs text-ink-muted">Trailing 12 Months</p>
-            <div className="space-y-1.5">
+          <Card title="Income Sources" caption="Trailing 12 Months">
+            <Stack className="gap-1.5">
               {sortedIncomeBreakdown.map((source, index) => (
                 <LabeledBarRow
                   key={`${source.description}-${index}`}
@@ -1087,8 +1159,8 @@ export function OverviewTab() {
                   color={incomeColor()}
                 />
               ))}
-            </div>
-          </div>
+            </Stack>
+          </Card>
         )}
       </MasonryColumns>
 

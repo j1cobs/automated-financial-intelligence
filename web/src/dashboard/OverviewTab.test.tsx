@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
+import { BarChart } from 'recharts';
 import { OverviewTab, renderDriftLabel } from './OverviewTab';
 import { FilterProvider } from '../lib/FilterContext';
 import type { OverviewResponse, MonthOverMonthItem } from '../lib/types';
@@ -37,6 +38,9 @@ vi.mock('recharts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('recharts')>();
   return {
     ...actual,
+    // Wrapped in a spy so a test can read the props OverviewTab passes to each
+    // BarChart (e.g. barCategoryGap); those props aren't visible in the jsdom SVG.
+    BarChart: vi.fn((props: object) => React.createElement(actual.BarChart, props as never)),
     ResponsiveContainer: ({
       children,
     }: {
@@ -813,6 +817,81 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Usual')).toBeInTheDocument();
     expect(screen.getByText('This month')).toBeInTheDocument();
     expect(screen.getByText('Last month')).toBeInTheDocument();
+  });
+
+  it('does not cap the Owner Balances list at a fixed 420px height (the masonry ceiling replaces it)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const card = screen.getByText('Owner Balances').closest('div');
+    expect(card).not.toBeNull();
+    expect(card!.querySelector('.max-h-\\[420px\\]')).toBeNull();
+    expect(within(card!).getByText('Alice')).toBeInTheDocument();
+  });
+
+  it('renders the Owner Balances legend in the card header, outside the scrolling body', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const card = screen.getByText('Owner Balances').closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    for (const label of ['Depository', 'Investment', 'Credit']) {
+      expect(withinCard.getByText(label)).toBeInTheDocument();
+      expect(withinCard.getByText(label).closest('.overflow-y-auto')).toBeNull();
+    }
+    // Positive control: the owner lists do sit inside the scroll body.
+    expect(withinCard.getByText('Alice').closest('.overflow-y-auto')).not.toBeNull();
+  });
+
+  it('renders the Month-over-Month legend in the card header, outside the scrolling body, with no Recharts legend', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const card = screen.getByText('Month-over-Month by Category').closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    for (const label of ['Last month', 'This month', 'Usual']) {
+      expect(withinCard.getByText(label)).toBeInTheDocument();
+      expect(withinCard.getByText(label).closest('.overflow-y-auto')).toBeNull();
+    }
+    // The legend moved out of Recharts into the card header.
+    expect(card!.querySelector('.recharts-legend-wrapper')).toBeNull();
+    // Positive control: the chart itself sits inside the scroll body.
+    expect(card!.querySelector('.overflow-y-auto .recharts-wrapper')).not.toBeNull();
+  });
+
+  it('gives the month-over-month chart tighter bar spacing (barCategoryGap 6, barGap 3)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const momChartProps = vi
+      .mocked(BarChart)
+      .mock.calls.map(([props]) => props as { data?: unknown; barCategoryGap?: number; barGap?: number })
+      .find((props) => props.data === mockOverviewData.overview!.month_over_month);
+    expect(momChartProps).toBeDefined();
+    expect(momChartProps!.barCategoryGap).toBe(6);
+    expect(momChartProps!.barGap).toBe(3);
   });
 
   describe('renderDriftLabel', () => {

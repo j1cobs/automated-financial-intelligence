@@ -300,12 +300,13 @@ describe('MasonryColumns sizing (ScrollBody cards)', () => {
     expect(['A', 'B', 'C', 'D'].map(heightOf)).toEqual([560, 160, 160, 110]);
   });
 
-  it('measures content from the Stack rows, so re-measuring a sized layout changes nothing', () => {
+  it('measures content from the Stack rows, so re-measuring a sized layout changes nothing', async () => {
     setup();
     render(pool());
     const before = ['A', 'B', 'C', 'D'].map(heightOf);
-    act(() => {
+    await act(async () => {
       window.dispatchEvent(new Event('resize'));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     });
     expect(['A', 'B', 'C', 'D'].map(heightOf)).toEqual(before);
   });
@@ -350,18 +351,20 @@ describe('MasonryColumns sizing (ScrollBody cards)', () => {
     expect(inner.style.minHeight).toBe('300px');
   });
 
-  it('re-clips when the viewport height changes', () => {
+  it('re-clips when the viewport height changes, once per animation frame', async () => {
     setup();
     render(pool());
     expect(heightOf('A')).toBe(560);
     const original = window.innerHeight;
     Object.defineProperty(window, 'innerHeight', { value: 1000, configurable: true });
     try {
-      // Ceiling 700: A shows all 660.
+      // Ceiling 700: A shows all 660, after the coalesced frame.
       act(() => {
         window.dispatchEvent(new Event('resize'));
+        window.dispatchEvent(new Event('resize'));
       });
-      expect(heightOf('A')).toBe(660);
+      expect(heightOf('A')).toBe(560);
+      await waitFor(() => expect(heightOf('A')).toBe(660));
     } finally {
       Object.defineProperty(window, 'innerHeight', { value: original, configurable: true });
     }
@@ -377,6 +380,17 @@ describe('MasonryColumns sizing (ScrollBody cards)', () => {
 });
 
 describe('ScrollBody and Stack outside MasonryColumns', () => {
+  it('give an elastic chart its natural height instead of collapsing it', () => {
+    const { container } = render(
+      <ScrollBody elasticHeight={300}>
+        <div>chart</div>
+      </ScrollBody>,
+    );
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.style.height).toBe('300px');
+    expect(container.querySelector('.overflow-y-auto')).toBeNull();
+  });
+
   it('render the rows as a plain column, with no scroll wrapper or even spacing', () => {
     const { container } = render(
       <ScrollBody>

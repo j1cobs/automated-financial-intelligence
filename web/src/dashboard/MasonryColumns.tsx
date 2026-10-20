@@ -198,9 +198,18 @@ export function MasonryColumns({ children, gapClassName = 'gap-4 sm:gap-6' }: Ma
   }, [plan, twoColumn, rebalance, bodyVersion, itemCount]);
 
   useEffect(() => {
-    // The ceiling follows the viewport height.
-    window.addEventListener('resize', rebalance);
-    return () => window.removeEventListener('resize', rebalance);
+    // The ceiling follows the viewport height. A drag fires many resize
+    // events per frame; re-measure once per frame, not once per event.
+    let frame = 0;
+    const onResize = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(rebalance);
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', onResize);
+    };
   }, [rebalance]);
 
   useEffect(() => {
@@ -276,7 +285,14 @@ export function ScrollBody({ children, minBody = MIN_BODY_LIST, elasticHeight }:
     return () => slot.register(null);
   }, [slot, stack, minBody, elasticHeight]);
 
-  if (!slot) return <>{children}</>;
+  // Outside the pool nothing sizes the card, so a chart (which fills its
+  // parent) gets its natural height explicitly instead of collapsing to 0.
+  if (!slot)
+    return elasticHeight !== undefined ? (
+      <div style={{ height: elasticHeight }}>{children}</div>
+    ) : (
+      <>{children}</>
+    );
   return (
     <div ref={outer} className="min-h-0 flex-1 overflow-y-auto">
       {elasticHeight !== undefined ? (
