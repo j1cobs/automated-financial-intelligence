@@ -24,7 +24,6 @@ from api.viewmodels import (  # noqa: E402
     MIN_MONTHLY_INCOME_FOR_RATE,
     SPARKLINE_MONTHS,
     SYNC_STALE_DAYS,
-    _apply_category_driven_tx_type,
     _build_last_period_metric,
     _build_metric,
     _weekly_series,

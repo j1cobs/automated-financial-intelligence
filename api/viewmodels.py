@@ -41,12 +41,17 @@ from analytics.budget_periods import resolve_caps_detailed
 from analytics.categorizer import merchant_key
 from analytics.goals import (
     contested_amounts,
+)
+from analytics.goals import (
     pace as goal_pace,
+)
+from analytics.goals import (
     progress as goal_progress,
+)
+from analytics.goals import (
     projection as goal_projection,
 )
 from analytics.recurring import upcoming_from_streams
-
 from app.dashboard import (
     _effective_credit_limit,
     _enrich_transactions,
@@ -131,7 +136,7 @@ def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
         return result
 
     result = df.copy()
-    hash_to_index = {h: i for i, h in zip(result.index, result["transaction_hash"])}
+    hash_to_index = {h: i for i, h in zip(result.index, result["transaction_hash"], strict=True)}
     drop_indices: set = set()
     processed: set = set()
     synthetic_rows: list[dict] = []

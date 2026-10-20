@@ -846,7 +846,7 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 cur.execute(sql)
                 rows = cur.fetchall()
-        return [dict(zip(columns, row)) for row in rows]
+        return [dict(zip(columns, row, strict=True)) for row in rows]
 
     def upsert_recurring_streams(self, streams: list[dict]) -> int:
         """Insert or refresh detected streams, keyed on `stream_id`.

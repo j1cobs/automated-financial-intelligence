@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { BarChart } from 'recharts';
-import { OverviewTab, renderDriftLabel } from './OverviewTab';
+import { OverviewTab, renderDriftLabel, FloatingTooltipContent } from './OverviewTab';
 import { FilterProvider } from '../lib/FilterContext';
 import type { OverviewResponse, MonthOverMonthItem } from '../lib/types';
 import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
@@ -874,6 +874,84 @@ describe('OverviewTab', () => {
     expect(card!.querySelector('.recharts-legend-wrapper')).toBeNull();
     // Positive control: the chart itself sits inside the scroll body.
     expect(card!.querySelector('.overflow-y-auto .recharts-wrapper')).not.toBeNull();
+  });
+
+  it('portals the scrolling bar chart tooltips out of the card body and fixes them at the hovered point', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    for (const title of ['Top Expense Categories', 'Month-over-Month by Category']) {
+      const card = screen.getByText(title).closest('div');
+      expect(card).not.toBeNull();
+      // The chart scrolls inside the card body, but its tooltip doesn't live
+      // there, so the body's overflow can't clip it.
+      expect(card!.querySelector('.overflow-y-auto .recharts-wrapper')).not.toBeNull();
+      expect(card!.querySelector('.recharts-tooltip-wrapper')).toBeNull();
+    }
+    // One portaled wrapper per scrolling chart, mounted straight on <body>.
+    const wrappers = Array.from(document.body.querySelectorAll(':scope > .recharts-tooltip-wrapper'));
+    expect(wrappers).toHaveLength(2);
+    for (const wrapper of wrappers) expect(wrapper).toHaveStyle({ position: 'fixed' });
+  });
+
+  describe('FloatingTooltipContent', () => {
+    // Stands in for the element a chart fills, scrolled so its origin sits at
+    // (100, -300) on screen: the top of the chart is out of view.
+    const anchor = {
+      getBoundingClientRect: () => ({ left: 100, top: -300 }) as DOMRect,
+    } as HTMLElement;
+    const payload = [{ name: 'Last month', value: 120, dataKey: 'last_month' }];
+
+    beforeEach(() => {
+      vi.stubGlobal('innerWidth', 1000);
+      vi.stubGlobal('innerHeight', 800);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('fixes the tooltip at the hovered point in viewport coordinates, opening down-right in the top-left', () => {
+      render(
+        <FloatingTooltipContent
+          anchor={anchor}
+          coordinate={{ x: 50, y: 400 }}
+          active
+          payload={payload as never}
+          label="Groceries"
+        />,
+      );
+      const tooltip = screen.getByTestId('floating-tooltip');
+      // 100 + 50 + 12, -300 + 400 + 12
+      expect(tooltip).toHaveStyle({
+        position: 'fixed',
+        left: '162px',
+        top: '112px',
+        transform: 'translate(0, 0)',
+      });
+      expect(within(tooltip).getByText('Groceries')).toBeInTheDocument();
+    });
+
+    it('flips the tooltip up and to the left past the viewport centre, so it never runs off the edge', () => {
+      render(
+        <FloatingTooltipContent
+          anchor={anchor}
+          coordinate={{ x: 700, y: 1000 }}
+          active
+          payload={payload as never}
+        />,
+      );
+      const tooltip = screen.getByTestId('floating-tooltip');
+      // 100 + 700 - 12, -300 + 1000 - 12
+      expect(tooltip).toHaveStyle({ left: '788px', top: '688px', transform: 'translate(-100%, -100%)' });
+    });
+
+    it('renders nothing until the chart element and a hovered point exist', () => {
+      const { container } = render(<FloatingTooltipContent anchor={null} coordinate={{ x: 1, y: 1 }} />);
+      expect(container).toBeEmptyDOMElement();
+    });
   });
 
   it('gives the month-over-month chart tighter bar spacing (barCategoryGap 6, barGap 3)', () => {

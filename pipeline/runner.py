@@ -8,11 +8,10 @@ from typing import NamedTuple
 import pandas as pd
 import psycopg
 
-from app.dashboard import _enrich_transactions, load_financial_data
-
-from analytics.models import build_models
 from analytics.anomalies import detect_anomalies, suppress_dismissed
+from analytics.models import build_models
 from analytics.recurring import derive_streams
+from app.dashboard import _enrich_transactions, load_financial_data
 from core.config import ConfigError, load_settings
 from database.db import DatabaseClient
 from ingestion.plaid_ingestor import PlaidIngestor

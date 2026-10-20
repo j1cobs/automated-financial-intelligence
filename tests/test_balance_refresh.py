@@ -8,7 +8,7 @@ moves. `/accounts/balance/get` needs no re-link and works with existing tokens.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from ingestion.plaid_ingestor import PlaidIngestor
 

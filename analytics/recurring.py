@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import statistics
 from datetime import date, timedelta
+from itertools import pairwise
 from typing import Any
 
 import pandas as pd
@@ -119,7 +120,7 @@ def derive_streams(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
         gaps = [
             (later - earlier).days
-            for earlier, later in zip(occurrence_dates, occurrence_dates[1:])
+            for earlier, later in pairwise(occurrence_dates)
         ]
         median_gap = statistics.median(gaps)
         cadence = cadence_from_days(median_gap)

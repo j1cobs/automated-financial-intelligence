@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type CSSProperties, type ReactNode } from 'react';
 import { useOverview, useAnomalies } from '../lib/queries';
 import { useSetCreditLimit, useDismissAnomaly, useRefreshBalances } from '../lib/mutations';
 import { useFilters } from '../lib/FilterContext';
@@ -28,6 +28,9 @@ import {
   Legend,
   ResponsiveContainer,
   LabelList,
+  DefaultTooltipContent,
+  type DefaultTooltipContentProps,
+  type TooltipContentProps,
 } from 'recharts';
 import {
   useChartTheme,
@@ -362,6 +365,55 @@ function Card({
   );
 }
 
+/** Gap between the hovered point and the floating tooltip's nearest corner. */
+const FLOATING_TOOLTIP_OFFSET = 12;
+
+/**
+ * Tooltip props for a chart inside a scrolling card body. Recharts renders its
+ * tooltip inside the chart and keeps it within the chart's own box, but a chart
+ * taller than its card scrolls inside `ScrollBody`'s `overflow-y-auto`, so a
+ * tooltip near the visible edge was clipped. Portaling into `document.body`
+ * escapes that clip; Recharts then drops its own positioning (it only knows
+ * chart coordinates), so `FloatingTooltipContent` places the tooltip in
+ * viewport coordinates instead. `anchor` is the element the chart fills, whose
+ * on-screen origin turns Recharts' chart-relative coordinate into a viewport one.
+ */
+function floatingTooltipProps(anchor: HTMLElement | null) {
+  return {
+    portal: document.body,
+    wrapperStyle: { position: 'fixed', top: 0, left: 0, pointerEvents: 'none', zIndex: 50 } as CSSProperties,
+    content: <FloatingTooltipContent anchor={anchor} />,
+  };
+}
+
+/** Recharts' default tooltip box, fixed at the hovered point and flipped
+ *  toward the viewport's centre, so it opens into whichever side has room. */
+export function FloatingTooltipContent({
+  anchor,
+  coordinate,
+  ...rest
+}: Partial<TooltipContentProps> & { anchor: HTMLElement | null }) {
+  if (!anchor || coordinate?.x == null || coordinate?.y == null) return null;
+  const origin = anchor.getBoundingClientRect();
+  const x = origin.left + coordinate.x;
+  const y = origin.top + coordinate.y;
+  const flipX = x > window.innerWidth / 2;
+  const flipY = y > window.innerHeight / 2;
+  return (
+    <div
+      data-testid="floating-tooltip"
+      style={{
+        position: 'fixed',
+        left: x + (flipX ? -FLOATING_TOOLTIP_OFFSET : FLOATING_TOOLTIP_OFFSET),
+        top: y + (flipY ? -FLOATING_TOOLTIP_OFFSET : FLOATING_TOOLTIP_OFFSET),
+        transform: `translate(${flipX ? '-100%' : '0'}, ${flipY ? '-100%' : '0'})`,
+      }}
+    >
+      <DefaultTooltipContent {...(rest as DefaultTooltipContentProps)} />
+    </div>
+  );
+}
+
 /** A row of color swatches with labels, for a card's `headerExtra` -- an HTML
  *  legend stays visible while the card body scrolls, unlike a chart's own. */
 function SwatchLegend({ entries }: { entries: { label: string; color: string }[] }) {
@@ -597,6 +649,10 @@ export function OverviewTab() {
   const { filters, patchFilters } = useFilters();
   // Re-render charts (their colours are resolved from CSS vars in JS) when the theme flips.
   useChartTheme();
+  // The elements the two scrolling bar charts fill (see `floatingTooltipProps`).
+  // State rather than refs: the tooltip reads them while rendering.
+  const [topCategoriesAnchor, setTopCategoriesAnchor] = useState<HTMLDivElement | null>(null);
+  const [monthOverMonthAnchor, setMonthOverMonthAnchor] = useState<HTMLDivElement | null>(null);
 
   // Cross-filtering (Fix 14): clicking a category bar adds it to the active
   // filters via the shared FilterContext -- no separate filter mechanism.
@@ -984,32 +1040,35 @@ export function OverviewTab() {
             minBody={MIN_BODY_CHART}
             elasticHeight={Math.max(250, ov.top_categories.length * 32)}
           >
-            <ResponsiveContainer width="100%" height="100%" minWidth="100%">
-              <BarChart data={ov.top_categories} layout="vertical" margin={CHART_MARGIN.default}>
-                <CartesianGrid {...gridProps()} />
-                <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis
-                  dataKey="category"
-                  type="category"
-                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
-                />
-                <Tooltip
-                  {...tooltipProps()}
-                  formatter={(value) => formatCurrency(value as number)}
-                  labelFormatter={(label) => formatCategory(label as string)}
-                />
-                <Bar
-                  dataKey="amount"
-                  fill={expenseColor()}
-                  name="Amount"
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                  cursor="pointer"
-                  onClick={(entry) => addCategoryFilter((entry.payload as TopCategoryItem).category)}
-                />
-              </BarChart>
-            </ResponsiveContainer>
+            <div ref={setTopCategoriesAnchor} className="h-full">
+              <ResponsiveContainer width="100%" height="100%" minWidth="100%">
+                <BarChart data={ov.top_categories} layout="vertical" margin={CHART_MARGIN.default}>
+                  <CartesianGrid {...gridProps()} />
+                  <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
+                  <YAxis
+                    dataKey="category"
+                    type="category"
+                    {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                    tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
+                  />
+                  <Tooltip
+                    {...tooltipProps()}
+                    {...floatingTooltipProps(topCategoriesAnchor)}
+                    formatter={(value) => formatCurrency(value as number)}
+                    labelFormatter={(label) => formatCategory(label as string)}
+                  />
+                  <Bar
+                    dataKey="amount"
+                    fill={expenseColor()}
+                    name="Amount"
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                    cursor="pointer"
+                    onClick={(entry) => addCategoryFilter((entry.payload as TopCategoryItem).category)}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </Card>
         )}
 
@@ -1029,82 +1088,85 @@ export function OverviewTab() {
             minBody={MIN_BODY_CHART}
             elasticHeight={monthOverMonthChartHeight}
           >
-            <ResponsiveContainer width="100%" height="100%" minWidth="100%">
-              <BarChart
-                data={monthOverMonthRows}
-                layout="vertical"
-                margin={{ ...CHART_MARGIN.default, right: 56 }}
-                barCategoryGap={6}
-                barGap={3}
-              >
-                <CartesianGrid {...gridProps()} />
-                <XAxis
-                  type="number"
-                  {...xAxisProps()}
-                  // Headroom past the data max so a drift-% label past the longest
-                  // bar's end (rendered outside the bar -- see renderDriftLabel)
-                  // never gets clipped by the plot's right edge.
-                  domain={[0, (dataMax: number) => dataMax * 1.2]}
-                  tickFormatter={(value) => formatCurrency(value)}
-                />
-                <YAxis
-                  dataKey="category"
-                  type="category"
-                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
-                />
-                <Tooltip
-                  {...tooltipProps()}
-                  formatter={(value) => formatCurrency(value as number)}
-                  labelFormatter={(label) => formatCategory(label as string)}
-                />
-                <Bar
-                  dataKey="last_month"
-                  name="Last month"
-                  fill={categoricalColor(1)}
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
+            <div ref={setMonthOverMonthAnchor} className="h-full">
+              <ResponsiveContainer width="100%" height="100%" minWidth="100%">
+                <BarChart
+                  data={monthOverMonthRows}
+                  layout="vertical"
+                  margin={{ ...CHART_MARGIN.default, right: 56 }}
+                  barCategoryGap={6}
+                  barGap={3}
                 >
-                  <LabelList
+                  <CartesianGrid {...gridProps()} />
+                  <XAxis
+                    type="number"
+                    {...xAxisProps()}
+                    // Headroom past the data max so a drift-% label past the longest
+                    // bar's end (rendered outside the bar -- see renderDriftLabel)
+                    // never gets clipped by the plot's right edge.
+                    domain={[0, (dataMax: number) => dataMax * 1.2]}
+                    tickFormatter={(value) => formatCurrency(value)}
+                  />
+                  <YAxis
+                    dataKey="category"
+                    type="category"
+                    {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                    tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
+                  />
+                  <Tooltip
+                    {...tooltipProps()}
+                    {...floatingTooltipProps(monthOverMonthAnchor)}
+                    formatter={(value) => formatCurrency(value as number)}
+                    labelFormatter={(label) => formatCategory(label as string)}
+                  />
+                  <Bar
                     dataKey="last_month"
-                    content={(props: object) =>
-                      renderDriftLabel(
-                        props as DriftLabelProps,
-                        monthOverMonthRows,
-                        'last_month_drift_pct',
-                        categoricalColor(1),
-                      )
-                    }
-                  />
-                </Bar>
-                <Bar
-                  dataKey="this_month"
-                  name="This month"
-                  fill={categoricalColor(0)}
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                >
-                  <LabelList
+                    name="Last month"
+                    fill={categoricalColor(1)}
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                  >
+                    <LabelList
+                      dataKey="last_month"
+                      content={(props: object) =>
+                        renderDriftLabel(
+                          props as DriftLabelProps,
+                          monthOverMonthRows,
+                          'last_month_drift_pct',
+                          categoricalColor(1),
+                        )
+                      }
+                    />
+                  </Bar>
+                  <Bar
                     dataKey="this_month"
-                    content={(props: object) =>
-                      renderDriftLabel(
-                        props as DriftLabelProps,
-                        monthOverMonthRows,
-                        'this_month_drift_pct',
-                        categoricalColor(0),
-                      )
-                    }
+                    name="This month"
+                    fill={categoricalColor(0)}
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                  >
+                    <LabelList
+                      dataKey="this_month"
+                      content={(props: object) =>
+                        renderDriftLabel(
+                          props as DriftLabelProps,
+                          monthOverMonthRows,
+                          'this_month_drift_pct',
+                          categoricalColor(0),
+                        )
+                      }
+                    />
+                  </Bar>
+                  <Bar
+                    dataKey="usual"
+                    name="Usual"
+                    fill={categoricalColor(2)}
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
                   />
-                </Bar>
-                <Bar
-                  dataKey="usual"
-                  name="Usual"
-                  fill={categoricalColor(2)}
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                />
-              </BarChart>
-            </ResponsiveContainer>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </Card>
         )}
 

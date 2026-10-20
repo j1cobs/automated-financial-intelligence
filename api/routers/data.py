@@ -20,14 +20,18 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
 from analytics.budget_periods import PERIOD_PATTERN, resolve_caps
+from analytics.categories import CANONICAL_CATEGORIES, canonicalize
+from analytics.categorizer import merchant_key
 from analytics.forecast import (
     DEFAULT_HORIZON_MONTHS,
     MAX_HORIZON_MONTHS,
+)
+from analytics.forecast import (
     project as forecast_project,
+)
+from analytics.forecast import (
     starting_balance as forecast_starting_balance,
 )
-from analytics.categories import CANONICAL_CATEGORIES, canonicalize
-from analytics.categorizer import merchant_key
 from ingestion.plaid_ingestor import PlaidIngestor
 
 from ..dataload import invalidate as invalidate_cache
@@ -35,9 +39,9 @@ from ..dataload import load_frames
 from ..deps import CurrentUserDep, DbDep, RequireCsrfDep, SettingsDep
 from ..filters import FiltersDep, apply_filters, build_filter_options
 from ..viewmodels import (
-    build_goals,
     build_budget,
     build_cash_flow,
+    build_goals,
     build_ledger,
     build_net_worth,
     build_overview,

@@ -385,8 +385,8 @@ class RunPipelineTests(unittest.TestCase):
         # Token A fingerprint and B fingerprint (SHA256 hashes of the tokens)
         import hashlib
 
-        fp_a = hashlib.sha256("token-1".encode()).hexdigest()
-        fp_b = hashlib.sha256("token-2".encode()).hexdigest()
+        fp_a = hashlib.sha256(b"token-1").hexdigest()
+        fp_b = hashlib.sha256(b"token-2").hexdigest()
 
         # Token A: sync succeeds (produces transactions) but fetch_accounts fails
         # Token B: both succeed
@@ -449,8 +449,8 @@ class RunPipelineTests(unittest.TestCase):
         settings = _settings()
         database = self._database()
 
-        fp_a = hashlib.sha256("token-1".encode()).hexdigest()
-        fp_b = hashlib.sha256("token-2".encode()).hexdigest()
+        fp_a = hashlib.sha256(b"token-1").hexdigest()
+        fp_b = hashlib.sha256(b"token-2").hexdigest()
 
         ingestor = MagicMock()
         ingestor.fetch_accounts.return_value = ([], {fp_a: "NO_ACCOUNTS", fp_b: "INVALID_REQUEST"})
@@ -476,8 +476,8 @@ class RunPipelineTests(unittest.TestCase):
         database = self._database()
         database.upsert_transactions.return_value = (1, 0)
 
-        fp_a = hashlib.sha256("token-1".encode()).hexdigest()
-        fp_b = hashlib.sha256("token-2".encode()).hexdigest()
+        fp_a = hashlib.sha256(b"token-1").hexdigest()
+        fp_b = hashlib.sha256(b"token-2").hexdigest()
 
         accounts = [
             {"account_key": f"plaid:acc-{fp_a[:8]}", "_token_fingerprint": fp_a},
