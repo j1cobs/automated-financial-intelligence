@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
-import { MasonryColumns } from './MasonryColumns';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { MasonryColumns, ScrollBody, Stack } from './MasonryColumns';
 
 function stubMatchMedia(matches: boolean) {
   vi.stubGlobal(
@@ -181,5 +181,215 @@ describe('MasonryColumns', () => {
     expect(() => render(<MasonryColumns>{cards(['A', 'B', 'C', 'D'])}</MasonryColumns>)).not.toThrow();
     expect(FakeResizeObserver.calls).toBeLessThan(50);
     expect(screen.getByText('A')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 36: cards that register a ScrollBody are sized by the planner.
+// ---------------------------------------------------------------------------
+
+/** Row height per card id, read by the layout mock; tests mutate it to "resize" rows. */
+let rowHeights: Record<string, number> = {};
+
+interface ScrollCardProps {
+  id: string;
+  overhead: number;
+  rows?: number;
+  elastic?: number;
+}
+
+/** A pool card: a fixed header (`overhead` px) above a ScrollBody. */
+function ScrollCard({ id, overhead, rows = 0, elastic }: ScrollCardProps) {
+  return (
+    <div data-card={id} data-overhead={overhead}>
+      <ScrollBody elasticHeight={elastic}>
+        {elastic !== undefined ? (
+          <div>{id} chart</div>
+        ) : (
+          <Stack>
+            {Array.from({ length: rows }, (_, k) => (
+              <div key={k} data-row={id}>
+                {id}
+                {k}
+              </div>
+            ))}
+          </Stack>
+        )}
+      </ScrollBody>
+    </div>
+  );
+}
+
+/** The card element directly inside a pool wrapper, if `el` is a wrapper. */
+function cardIn(el: Element | null): HTMLElement | null {
+  const first = el?.firstElementChild as HTMLElement | null | undefined;
+  return first?.dataset.card ? first : null;
+}
+
+/** jsdom does no layout, so model it: a row is `rowHeights[id]` tall; a wrapper is
+ *  its inline height if the planner set one, else header + natural content; the
+ *  scroll body's clientHeight is the wrapper minus the header. */
+function mockLayout() {
+  const natural = (cardEl: HTMLElement) => {
+    const id = cardEl.dataset.card!;
+    const rows = cardEl.querySelectorAll('[data-row]').length;
+    const chart = cardEl.querySelector('[style*="min-height"]') as HTMLElement | null;
+    const content = chart ? parseFloat(chart.style.minHeight) : rows * (rowHeights[id] ?? 0);
+    return Number(cardEl.dataset.overhead) + content;
+  };
+  const wrapperHeight = (wrapper: HTMLElement) =>
+    wrapper.style.height ? parseFloat(wrapper.style.height) : natural(cardIn(wrapper)!);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.row) return { height: rowHeights[this.dataset.row] ?? 0 } as DOMRect;
+    if (cardIn(this)) return { height: wrapperHeight(this) } as DOMRect;
+    return { height: 0 } as DOMRect;
+  });
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    if (!this.className.includes('overflow-y-auto')) return 0;
+    const cardEl = this.closest('[data-card]') as HTMLElement;
+    return wrapperHeight(cardEl.parentElement!) - Number(cardEl.dataset.overhead);
+  });
+}
+
+function wrapperOf(id: string): HTMLElement {
+  return (document.querySelector(`[data-card="${id}"]`) as HTMLElement).parentElement!;
+}
+
+function heightOf(id: string): number {
+  return parseFloat(wrapperOf(id).style.height);
+}
+
+/** jsdom's innerHeight is 768, so the ceiling is max(538, 560) = 560.
+ *  A: 60 + 12 x 50 = 660 natural -> clipped to 560. B, C: 160. D: 110.
+ *  Split: A left; B, C, D right (430). Right is 130 short with nothing to
+ *  grow or shrink, so it's spread: B +44, C +43, D +43. */
+function pool(bRows = 2) {
+  return (
+    <MasonryColumns>
+      <ScrollCard key="A" id="A" overhead={60} rows={12} />
+      <ScrollCard key="B" id="B" overhead={60} rows={bRows} />
+      <ScrollCard key="C" id="C" overhead={60} rows={2} />
+      <ScrollCard key="D" id="D" overhead={60} rows={1} />
+    </MasonryColumns>
+  );
+}
+
+describe('MasonryColumns sizing (ScrollBody cards)', () => {
+  function setup(twoColumn = true) {
+    stubMatchMedia(twoColumn);
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    rowHeights = { A: 50, B: 50, C: 50, D: 50 };
+    mockLayout();
+  }
+
+  afterEach(() => {
+    rowHeights = {};
+  });
+
+  it('gives each wrapper its planned height, and the columns end flush', () => {
+    setup();
+    render(pool());
+    expect(heightOf('A')).toBe(560);
+    expect([heightOf('B'), heightOf('C'), heightOf('D')]).toEqual([204, 203, 153]);
+    expect(heightOf('B') + heightOf('C') + heightOf('D')).toBe(heightOf('A'));
+  });
+
+  it('stacked: wanted heights in order, no stretching', () => {
+    setup(false);
+    render(pool());
+    expect(['A', 'B', 'C', 'D'].map(heightOf)).toEqual([560, 160, 160, 110]);
+  });
+
+  it('measures content from the Stack rows, so re-measuring a sized layout changes nothing', () => {
+    setup();
+    render(pool());
+    const before = ['A', 'B', 'C', 'D'].map(heightOf);
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(['A', 'B', 'C', 'D'].map(heightOf)).toEqual(before);
+  });
+
+  it('observes the Stack rows, never the sized wrappers, and re-plans when a row grows', () => {
+    setup();
+    render(pool());
+    const observed = new Set(FakeResizeObserver.observed);
+    expect(['A', 'B', 'C', 'D'].some((id) => observed.has(wrapperOf(id)))).toBe(false);
+    const row = document.querySelector('[data-row="D"]')!;
+    expect(observed.has(row)).toBe(true);
+
+    // D's single row grows by 100: the right column is now 530 natural
+    // against A's 560, so only 30 is spread (B +10, C +10, D +10).
+    rowHeights = { ...rowHeights, D: 150 };
+    act(() => FakeResizeObserver.resize(row));
+    expect(heightOf('B') + heightOf('C') + heightOf('D')).toBe(560);
+    expect(heightOf('D')).toBe(220);
+  });
+
+  it('re-plans when a refetch adds rows (MutationObserver)', async () => {
+    setup();
+    const { rerender } = render(pool());
+    expect(heightOf('B')).toBe(204);
+    rerender(pool(4));
+    // B is now 260 natural: right = 260 + 160 + 110 = 530, 30 short of A.
+    await waitFor(() => expect(heightOf('B')).toBe(270));
+    expect(heightOf('B') + heightOf('C') + heightOf('D')).toBe(560);
+  });
+
+  it('an elastic body fills its card but never compresses below the chart height', () => {
+    setup();
+    render(
+      <MasonryColumns>
+        <ScrollCard key="A" id="A" overhead={60} rows={2} />
+        <ScrollCard key="E" id="E" overhead={60} elastic={300} />
+      </MasonryColumns>,
+    );
+    const inner = document.querySelector('[data-card="E"] .overflow-y-auto')!
+      .firstElementChild as HTMLElement;
+    expect(inner.style.height).toBe('100%');
+    expect(inner.style.minHeight).toBe('300px');
+  });
+
+  it('re-clips when the viewport height changes', () => {
+    setup();
+    render(pool());
+    expect(heightOf('A')).toBe(560);
+    const original = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { value: 1000, configurable: true });
+    try {
+      // Ceiling 700: A shows all 660.
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+      expect(heightOf('A')).toBe(660);
+    } finally {
+      Object.defineProperty(window, 'innerHeight', { value: original, configurable: true });
+    }
+  });
+
+  it('does not loop when observe() fires its callback immediately', () => {
+    setup();
+    FakeResizeObserver.fireOnObserve = true;
+    expect(() => render(pool())).not.toThrow();
+    expect(FakeResizeObserver.calls).toBeLessThan(100);
+    expect(heightOf('A')).toBe(560);
+  });
+});
+
+describe('ScrollBody and Stack outside MasonryColumns', () => {
+  it('render the rows as a plain column, with no scroll wrapper or even spacing', () => {
+    const { container } = render(
+      <ScrollBody>
+        <Stack as="ul">
+          <li>one</li>
+          <li>two</li>
+        </Stack>
+      </ScrollBody>,
+    );
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.tagName).toBe('UL');
+    expect(root).toHaveClass('flex', 'flex-col', 'gap-1.5');
+    expect(root).not.toHaveClass('justify-evenly');
+    expect(container.querySelector('.overflow-y-auto')).toBeNull();
   });
 });

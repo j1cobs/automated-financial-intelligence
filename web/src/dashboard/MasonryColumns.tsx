@@ -1,54 +1,55 @@
 /**
- * Balances an ordered pool of cards into two columns that end at (or very
- * near) the same total height, instead of locking each card into a rigid
- * left/right `grid-cols-2` row pair. The old row-pair layout mismatched badly
- * whenever one card's content ran much longer than its row partner's (e.g.
- * Owner Balances' 11+ rows next to Income Sources' 3), leaving a large block
- * of dead whitespace under the shorter card.
+ * Lays an ordered pool of cards out in two columns that start and end on the
+ * same line, instead of locking each card into a rigid left/right
+ * `grid-cols-2` row pair. The old row-pair layout mismatched badly whenever one
+ * card's content ran much longer than its row partner's (e.g. Owner Balances'
+ * 11+ rows next to Income Sources' 3), leaving a large block of dead whitespace
+ * under the shorter card.
  *
  * Below the `lg` breakpoint (matches the rest of the Overview tab's
  * `lg:grid-cols-2` convention) everything stacks into one column in original
- * order -- no balancing needed on a narrow viewport.
+ * order.
  *
- * Balancing works in two passes:
- *  1. Children first render in original order (a guessed single-column
- *     layout) so each one lays out normally in the DOM and gets a real
- *     measured height. The cards in this pool size themselves from row/entry
- *     count or a fixed pixel height, not from their container's width, so
- *     measuring before the final column split is a safe stand-in for their
- *     eventual half-width height.
- *  2. A `useLayoutEffect` measures every child (before paint, so there's no
- *     visible flash) and greedily assigns each card, in order, to whichever
- *     column currently has the smaller running height. A `ResizeObserver` on
- *     the child wrappers re-measures and re-balances if a card's content
- *     changes size later (e.g. data finishing loading, a font swap, a refetch
- *     changing row counts).
+ * Measuring and deciding are split. This component only measures each card and
+ * applies heights; `masonryLayout.ts::planLayout` decides, as a pure function,
+ * which column each card goes in and how tall it is. A greedy split of whole
+ * cards can only get within one card's height of even, so the planner splits
+ * first and then stretches the shorter column until both bottoms meet, with
+ * cards scrolling inside their body once they pass a viewport-based ceiling.
+ * Its docstring has the rules.
  *
- * The observer must be re-attached after every assignment. React reconciles
- * children by key *within a parent*, so a card that stays in the same column
- * keeps its wrapper `<div>`, but a card that moves to the other column gets a
- * brand-new one. An observer attached once, before the first `setColumns`,
- * keeps watching the cards that never moved and is blind to every card that
- * did -- in practice the whole right-hand column. A right-hand card growing
- * (data finishing loading, a refetch) then never re-balances, and the two
- * columns' bottoms drift apart. So the observer lives in its own effect keyed
- * on the current assignment.
+ * A card takes part by rendering a `ScrollBody` (and, unless it's a chart, a
+ * `Stack` of rows inside it). That registers, through `masonrySlot.ts`, the two
+ * elements the planner needs: the scroll container (whose `clientHeight`
+ * separates the card's fixed header from its body) and the Stack (whose rows
+ * give the content's natural height). Rows are measured rather than the Stack
+ * itself because a stretched Stack is taller than its content, while its rows
+ * never are -- so the measure doesn't move when the plan does. A chart declares
+ * its natural height instead of being measured, since it fills whatever height
+ * it gets. A child with no `ScrollBody` is a fixed block: measured whole, never
+ * sized.
+ *
+ * Observers must be re-attached after every plan. React reconciles children by
+ * key *within a parent*, so a card that moves to the other column gets a
+ * brand-new wrapper `<div>`; an observer attached once keeps watching nodes
+ * that no longer exist and is blind to the cards that moved. So observers live
+ * in their own effect keyed on the current plan. They watch Stack rows (and
+ * fixed wrappers), never a wrapper this component sizes -- that would feed its
+ * own output back in. A `MutationObserver` on each Stack catches rows added or
+ * removed by a refetch, which a stretched Stack doesn't report as a resize.
  *
  * That re-attach makes idempotence mandatory. `ResizeObserver` invokes its
- * callback immediately on `observe()`, so if `rebalance` called `setColumns`
- * with a fresh array every time, each re-render would re-observe, which would
- * fire the callback, which would set state again -- forever. `rebalance` only
- * commits an assignment that differs from the current one, so the loop settles
- * as soon as the layout is stable.
- *
- * Greedy-by-running-total isn't an exact optimal bin-packing solve, but for a
- * pool of ~10 small/medium cards it lands within a card's height of balanced,
- * which is what "end at the same place" needs in practice.
+ * callback immediately on `observe()`, so if `rebalance` committed a fresh plan
+ * every time, each re-render would re-observe, which would fire the callback,
+ * which would set state again -- forever. `rebalance` only commits a plan that
+ * differs from the current one (`samePlan`), so the loop settles as soon as the
+ * layout is stable.
  */
 
 import {
   Children,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -56,6 +57,16 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import {
+  CEILING_FLOOR,
+  MIN_BODY_LIST,
+  ceilingFor,
+  planLayout,
+  samePlan,
+  type CardMeasure,
+  type LayoutPlan,
+} from './masonryLayout';
+import { MasonrySlotContext, StackRefContext, type BodyRegistration, type SlotApi } from './masonrySlot';
 
 const LG_BREAKPOINT_QUERY = '(min-width: 1024px)';
 
@@ -69,12 +80,16 @@ function prefersTwoColumn(): boolean {
   }
 }
 
-/** True when two column assignments place the same indices in the same order. */
-function sameAssignment(a: number[][], b: number[][]): boolean {
-  return (
-    a.length === b.length &&
-    a.every((column, i) => column.length === b[i].length && column.every((v, j) => v === b[i][j]))
-  );
+function initialPlan(count: number): LayoutPlan {
+  return { columns: [Array.from({ length: count }, (_, i) => i), []], heights: Array(count).fill(null) };
+}
+
+/** Natural content height of a Stack: its rows plus the gaps between them. */
+function stackContentHeight(stack: HTMLElement): number {
+  const rows = Array.from(stack.children);
+  const gap = parseFloat(getComputedStyle(stack).rowGap) || 0;
+  const sum = rows.reduce((total, row) => total + row.getBoundingClientRect().height, 0);
+  return Math.ceil(sum + gap * Math.max(0, rows.length - 1));
 }
 
 interface MasonryColumnsProps {
@@ -87,55 +102,106 @@ interface MasonryColumnsProps {
 export function MasonryColumns({ children, gapClassName = 'gap-4 sm:gap-6' }: MasonryColumnsProps) {
   const items = useMemo(() => Children.toArray(children), [children]);
   const itemCount = items.length;
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const bodyRefs = useRef<(BodyRegistration | null)[]>([]);
+  const [bodyVersion, setBodyVersion] = useState(0);
   const [twoColumn, setTwoColumn] = useState(prefersTwoColumn);
-  const [columns, setColumns] = useState<number[][]>(() => [items.map((_, i) => i), []]);
-  const columnsRef = useRef(columns);
+  const [plan, setPlan] = useState<LayoutPlan>(() => initialPlan(items.length));
+  const planRef = useRef(plan);
 
-  // Declared before the measuring effect so it sees this commit's assignment.
+  // Declared before the measuring effect so it sees this commit's plan.
   useLayoutEffect(() => {
-    columnsRef.current = columns;
+    planRef.current = plan;
   });
 
   // A shrinking pool must not leave a stale node contributing its height.
   useLayoutEffect(() => {
     itemRefs.current.length = itemCount;
+    bodyRefs.current.length = itemCount;
   }, [itemCount]);
+
+  const slotApis = useMemo<SlotApi[]>(
+    () =>
+      Array.from({ length: itemCount }, (_, i) => ({
+        register: (registration) => {
+          bodyRefs.current[i] = registration;
+          setBodyVersion((v) => v + 1);
+        },
+      })),
+    [itemCount],
+  );
 
   const rebalance = useCallback(() => {
     const isTwo = prefersTwoColumn();
     setTwoColumn(isTwo);
-    let next: number[][];
-    if (!isTwo) {
-      next = [Array.from({ length: itemCount }, (_, i) => i), []];
-    } else {
-      const heights = itemRefs.current.map((el) => el?.getBoundingClientRect().height ?? 0);
-      const totals = [0, 0];
-      next = [[], []];
-      for (let index = 0; index < itemCount; index++) {
-        const target = totals[0] <= totals[1] ? 0 : 1;
-        next[target].push(index);
-        totals[target] += heights[index] ?? 0;
+    const measures: CardMeasure[] = [];
+    for (let i = 0; i < itemCount; i++) {
+      const wrapperHeight = itemRefs.current[i]?.getBoundingClientRect().height ?? 0;
+      const reg = bodyRefs.current[i];
+      if (!reg) {
+        measures.push({
+          overhead: Math.ceil(wrapperHeight),
+          content: 0,
+          minBody: 0,
+          elastic: false,
+          fixed: true,
+        });
+        continue;
       }
+      const elastic = reg.elasticHeight !== undefined;
+      measures.push({
+        overhead: Math.max(0, Math.ceil(wrapperHeight - reg.outer.clientHeight)),
+        content: elastic ? Math.ceil(reg.elasticHeight!) : reg.stack ? stackContentHeight(reg.stack) : 0,
+        minBody: reg.minBody,
+        elastic,
+        fixed: false,
+      });
     }
-    // Idempotent: observe() fires immediately, so an unconditional setColumns
+    const gap = rootRef.current ? parseFloat(getComputedStyle(rootRef.current).rowGap) || 0 : 0;
+    const next = planLayout(measures, {
+      twoColumn: isTwo,
+      ceiling: ceilingFor(window.innerHeight),
+      floor: CEILING_FLOOR,
+      gap,
+    });
+    // Idempotent: observe() fires immediately, so an unconditional setPlan
     // here would loop through the re-observe effect below.
-    if (!sameAssignment(columnsRef.current, next)) setColumns(next);
+    if (!samePlan(planRef.current, next)) setPlan(next);
   }, [itemCount]);
 
   useLayoutEffect(() => {
     // Measuring the DOM before paint is exactly what a layout effect is for.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     rebalance();
-  }, [rebalance]);
+  }, [rebalance, bodyVersion]);
 
-  // Re-attach after every assignment: the wrappers are new nodes each time.
+  // Re-attach after every plan: moved cards get new wrapper nodes.
   useEffect(() => {
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => rebalance());
-    itemRefs.current.forEach((el) => el && observer.observe(el));
-    return () => observer.disconnect();
-  }, [columns, twoColumn, rebalance]);
+    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => rebalance());
+    const mutation = typeof MutationObserver === 'undefined' ? null : new MutationObserver(() => rebalance());
+    for (let i = 0; i < itemCount; i++) {
+      const reg = bodyRefs.current[i];
+      if (!reg) {
+        const wrapper = itemRefs.current[i];
+        if (wrapper) resize?.observe(wrapper);
+      } else if (reg.stack) {
+        Array.from(reg.stack.children).forEach((row) => resize?.observe(row));
+        mutation?.observe(reg.stack, { childList: true });
+      }
+      // Elastic bodies declare their height; nothing to observe.
+    }
+    return () => {
+      resize?.disconnect();
+      mutation?.disconnect();
+    };
+  }, [plan, twoColumn, rebalance, bodyVersion, itemCount]);
+
+  useEffect(() => {
+    // The ceiling follows the viewport height.
+    window.addEventListener('resize', rebalance);
+    return () => window.removeEventListener('resize', rebalance);
+  }, [rebalance]);
 
   useEffect(() => {
     try {
@@ -147,39 +213,101 @@ export function MasonryColumns({ children, gapClassName = 'gap-4 sm:gap-6' }: Ma
     }
   }, [rebalance]);
 
+  const renderItem = (index: number) => {
+    const height = plan.heights[index];
+    return (
+      <MasonrySlotContext.Provider key={index} value={slotApis[index] ?? null}>
+        <div
+          ref={(el) => {
+            itemRefs.current[index] = el;
+          }}
+          style={height != null ? { height } : undefined}
+        >
+          {items[index]}
+        </div>
+      </MasonrySlotContext.Provider>
+    );
+  };
+
   if (!twoColumn) {
     return (
-      <div className={`flex flex-col ${gapClassName}`}>
-        {items.map((item, index) => (
-          <div
-            key={index}
-            ref={(el) => {
-              itemRefs.current[index] = el;
-            }}
-          >
-            {item}
-          </div>
-        ))}
+      <div ref={rootRef} className={`flex flex-col ${gapClassName}`}>
+        {items.map((_, index) => renderItem(index))}
       </div>
     );
   }
 
   return (
-    <div className={`flex flex-col lg:flex-row ${gapClassName}`}>
-      {columns.map((column, colIndex) => (
+    <div ref={rootRef} className={`flex flex-col lg:flex-row ${gapClassName}`}>
+      {plan.columns.map((column, colIndex) => (
         <div key={colIndex} className={`flex min-w-0 flex-1 flex-col ${gapClassName}`}>
-          {column.map((itemIndex) => (
-            <div
-              key={itemIndex}
-              ref={(el) => {
-                itemRefs.current[itemIndex] = el;
-              }}
-            >
-              {items[itemIndex]}
-            </div>
-          ))}
+          {column.map((itemIndex) => renderItem(itemIndex))}
         </div>
       ))}
     </div>
+  );
+}
+
+interface ScrollBodyProps {
+  children: ReactNode;
+  /** Smallest body height before the card may scroll. */
+  minBody?: number;
+  /** A chart's natural height. Marks the body elastic: it fills any extra
+   *  height it's given, and scrolls rather than compress below this. */
+  elasticHeight?: number;
+}
+
+/** A card's body inside a masonry slot: scrolls when allotted less than its
+ *  content, so the card's title and caption stay put. Outside a slot it renders
+ *  its children unchanged. */
+export function ScrollBody({ children, minBody = MIN_BODY_LIST, elasticHeight }: ScrollBodyProps) {
+  const slot = useContext(MasonrySlotContext);
+  const outer = useRef<HTMLDivElement | null>(null);
+  const [stack, setStack] = useState<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!slot || !outer.current) return;
+    slot.register({
+      outer: outer.current,
+      stack: elasticHeight === undefined ? stack : null,
+      minBody,
+      elasticHeight,
+    });
+    return () => slot.register(null);
+  }, [slot, stack, minBody, elasticHeight]);
+
+  if (!slot) return <>{children}</>;
+  return (
+    <div ref={outer} className="min-h-0 flex-1 overflow-y-auto">
+      {elasticHeight !== undefined ? (
+        <div style={{ height: '100%', minHeight: elasticHeight }}>{children}</div>
+      ) : (
+        <div className="flex min-h-full flex-col">
+          <StackRefContext.Provider value={setStack}>{children}</StackRefContext.Provider>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface StackProps {
+  as?: 'div' | 'ul';
+  /** The gap between rows, e.g. `gap-1.5`. Extra height is added on top of it. */
+  className?: string;
+  /** The rows. Every element of a card's body must be one of them: anything
+   *  outside the Stack isn't measured. */
+  children: ReactNode;
+}
+
+/** The rows of a non-chart card body. In a stretched card, extra height becomes
+ *  equal slots above, between and below the rows (a single row is centered);
+ *  otherwise it's a plain column with the given gap. */
+export function Stack({ as: Tag = 'div', className = 'gap-1.5', children }: StackProps) {
+  const setStack = useContext(StackRefContext);
+  if (!setStack) return <Tag className={`flex flex-col ${className}`}>{children}</Tag>;
+  return (
+    <Tag ref={setStack} className={`flex flex-1 flex-col justify-evenly ${className}`}>
+      {children}
+    </Tag>
   );
 }
