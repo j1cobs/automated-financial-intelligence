@@ -5123,7 +5123,7 @@ tests -v` and `cd web && npm run test && npx tsc -b && npm run lint && npm run f
 
 ### Phase 36 — Overview masonry: columns that end flush
 
-> **Status:** planned, in progress.
+> **Status:** done (commits 95fc6e8, 3833f66, c6fd8f3, dedb36f).
 
 #### Context
 
