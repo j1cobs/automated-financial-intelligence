@@ -5120,3 +5120,289 @@ tests -v` and `cd web && npm run test && npx tsc -b && npm run lint && npm run f
 8. Dismiss an anomaly, re-run `python main.py` — it stays dismissed **for that period** and returns the next.
 9. The Streamlit dashboard still shows anomalies via the shim.
 10. Refresh balances — today's snapshot updates in place rather than adding a second row.
+
+### Phase 36 — Overview masonry: columns that end flush
+
+> **Status:** planned, in progress.
+
+#### Context
+
+The `MasonryColumns` re-observe fix (re-observe cards after every column assignment) works and is tested, but
+the Overview tab's two columns still don't end at the same height. That's built into the approach: a greedy
+split of whole cards can only get within one card's height of even, never to exactly even. The goal: both
+columns start **and end** on the same line, cards show their full content when it fits, scrolling happens only
+when a card has a lot of content, there's **as little white space as possible** inside cards, and any white
+space that is left is spread symmetrically. The layout must stay visually close to today's; only small height
+adjustments are allowed.
+
+##### Baseline (measured live in Claude in Chrome, 2026-10-19, current working tree incl. the uncommitted fix)
+
+Two-column widths (viewports 1680×824, 1284×714 and 1040×715 all measured identically; card heights in px, gap 24):
+
+| Left column | h | Right column | h |
+|---|---|---|---|
+| Biggest Expense This Month | 98 | Upcoming Recurring Charges | 144 |
+| Top Merchants (Trailing 12 Months) | 332 | Committed / Recurring Spend | 170 |
+| Asset Mix | 198 | Emergency Fund | 174 |
+| Month-over-Month by Category | 558 (15 categories × 32 = 480 chart → overhead 78) | Top Expense Categories | 418 |
+| Income Sources | 296 | Owner Balances | 522 (598 content in a 420 cap → overhead 102) |
+| **bottom** | **1578** | **bottom** | **1524** (**54 px short**) |
+
+Stacked: at 784×714 the heights are 98/144/332/170/174/198/418/558/522/296 (code order); at 500×714 they're
+86/132/320/158/162/186/406/546/510/284.
+
+**Expected result.** Month-over-Month becomes 15 × 48 + 32 = 752 px of chart (natural card ~840), so it's clipped
+at the ceiling and scrolls. The split is unchanged (verified by hand against the greedy rule below):
+- **1680×824** (ceiling 577): left = 98+332+198+**577**+296 + 4·24 = 1597; right = 144+170+174+418+**577** + 96 = 1579.
+  The right column is short by 18, so Owner (clipped) grows by 18 → **595**. Flush; Owner scrolls 105 px instead of 178.
+- **1284×714 / 1040×715** (ceiling 560): left = 1580, right = 1562 → Owner **578**. Flush; Owner scrolls 122 px.
+- **Stacked at 714 tall:** MoM 560 (scrolls), Owner 560; everything else unchanged.
+- Month-over-Month's card stays within 19 px of today's height at every size; its bars go from ~8 px to ~12 px.
+
+##### Decisions (settled in the grilling sessions)
+
+| Topic | Rule |
+|---|---|
+| Mechanism | Same greedy split as today, then **stretch** the shorter column until the bottoms meet. No S/M/L/XL buckets (the number of visible cards varies from 5 to 10, so buckets can't guarantee an even split) |
+| Which cards scroll | Any pool card whose content passes the ceiling. No per-card flag |
+| Ceiling | `max(round(CEILING_RATIO * window.innerHeight), CEILING_FLOOR)`, with `CEILING_RATIO = 0.7` and `CEILING_FLOOR = 560`; recomputed on window `resize`. The floor guarantees no card shows less than today (Owner Balances = 522) |
+| Minimum visible body | Lists/text `MIN_BODY_LIST = 120` px; charts `MIN_BODY_CHART = 250` px, so a scrolling chart is never compressed |
+| Filling the shorter column, in order | 1) its clipped cards grow back toward their full content; 2) its **elastic** charts grow, up to `ELASTIC_MAX_GROWTH = 0.25` (125% of their natural chart height); 3) the **taller** column's clipped cards **shrink** (scroll a bit more), never below `CEILING_FLOOR` (560), which lowers the target; 4) only then is what's left **spread evenly across every card** in the shorter column |
+| Elastic cards | Top Expense Categories and Month-over-Month by Category. Asset Mix is not elastic |
+| Chart spacing | Month-over-Month: **48 px per category** (3 bars of ~12 px each, 3 px between bars, 6 px between categories), up from 32. Top Expense Categories: **32 px unchanged** |
+| White space inside a stretched card | Distributed into **equal slots**: above the first element, between each pair (on top of the normal gap) and below the last. A single-element card ends up vertically centered |
+| MoM legend | Moves out of the chart into the card's `headerExtra` (an HTML swatch legend like Owner Balances'), so it stays visible while the chart scrolls; the $ axis stays at the chart's bottom |
+| Animation | None: heights snap before paint (no CSS transition) |
+| Commits | 3 blocks, the user commits each: **A** planner + tests; **B** `MasonryColumns` / `ScrollBody` / `Stack` + tests; **C** `OverviewTab` conversions + chart spacing + `PLAN.md` |
+| Below `lg` | Stacked; ceiling and minimum body still apply; no stretching |
+| What scrolls | The card **body** only; title, caption and `headerExtra` (the Owner Balances legend) stay fixed |
+| Owner Balances `max-h-[420px]` | Removed; the ceiling replaces it |
+| Split rule | Unchanged greedy, in order, `<=` tie goes left, but on **wanted** heights |
+
+#### Implementation
+
+##### Step 1: pure planner `web/src/dashboard/masonryLayout.ts` (new)
+
+```ts
+export const CEILING_RATIO = 0.7;
+export const CEILING_FLOOR = 560;
+export const MIN_BODY_LIST = 120;
+export const MIN_BODY_CHART = 250;
+export const ELASTIC_MAX_GROWTH = 0.25;
+
+export interface CardMeasure {
+  /** Card height minus its scroll body: title, caption, headerExtra, padding, border. Integer px (ceil). */
+  overhead: number;
+  /** Natural body content height. Integer px (ceil). For elastic cards, the declared chart height. */
+  content: number;
+  /** Smallest body height before the card may scroll. */
+  minBody: number;
+  /** Body can usefully fill extra height (charts). */
+  elastic: boolean;
+  /** No ScrollBody registered: measured as a whole, never clipped, grown, shrunk or given a height. */
+  fixed: boolean;
+}
+
+export interface LayoutPlan {
+  /** Indices per column; stacked mode = one column in original order, plus an empty second column. */
+  columns: number[][];
+  /** Allotted card height per index; null = leave unsized (fixed card). */
+  heights: (number | null)[];
+}
+
+export function ceilingFor(viewportHeight: number): number; // max(round(0.7 * vh), CEILING_FLOOR)
+
+export function planLayout(
+  cards: CardMeasure[],
+  opts: { twoColumn: boolean; ceiling: number; floor: number; gap: number },
+): LayoutPlan;
+
+export function samePlan(a: LayoutPlan, b: LayoutPlan): boolean; // replaces sameAssignment in MasonryColumns
+```
+
+Algorithm (all integer px). `distribute(amount, cards, cap)` is a shared water-fill helper: repeat { `S` = cards
+not at their cap; stop if `S` is empty or `amount == 0`; `share = floor(amount / |S|)`; if `share == 0`, give 1 px to
+each card of `S` in order until `amount == 0`; else give each `min(share, room)` }; it returns what it couldn't place.
+1. `natural_i = overhead_i + content_i`.
+   `wanted_i = fixed ? natural_i : min(natural_i, max(ceiling, overhead_i + minBody_i))`.
+2. Stacked (`!twoColumn`): `columns = [[0..n-1], []]`, `heights_i = fixed ? null : wanted_i`. Done.
+3. Two-column split: walk the cards in order, put each into column 0 if `total0 <= total1`, otherwise column 1,
+   and add `wanted_i` to that total.
+4. `T_c = sum(heights in c) + gap * max(0, len_c - 1)`, with `heights_i = wanted_i` to start (fixed cards keep `natural_i`
+   for the sums but return `null`). `s` = the shorter column, `t` = the taller one, `D = T_t - T_s`. If `D <= 0`, done.
+5. **Grow clipped (s):** non-fixed cards in `s` with `natural_i > height_i`, in order: `g = min(D, natural_i - height_i)`;
+   `height_i += g`; `D -= g`.
+6. **Grow elastic (s):** `distribute(D, elastic non-fixed cards in s, cap = overhead_i + ceil(content_i * (1 + ELASTIC_MAX_GROWTH)))`.
+7. **Shrink taller (t):** `distribute(D, non-fixed cards in t with natural_i > height_i, room = height_i - max(floor, overhead_i + minBody_i))`,
+   applied as a **reduction** of `height_i` (only cards with positive room take part). Every pixel removed from `t`
+   lowers `D` by one pixel.
+8. **Spread (s):** if `D > 0`, `distribute(D, non-fixed cards in s, cap = ∞)` (equal shares; the remainder goes 1 px
+   each to the first cards). If `s` has no non-fixed card, leave it (legacy fallback only).
+9. Return `{ columns, heights }`. The function is deterministic: same input, equal plan.
+
+##### Step 2: `web/src/dashboard/masonryLayout.test.ts` (new, written first, TDD)
+
+Cases, each asserting exact numbers:
+- `ceilingFor(824) == 577`, `ceilingFor(714) == 560`, `ceilingFor(1080) == 756`;
+- stacked: `heights == wanted`, original order, no stretching;
+- a card over the ceiling is clipped to `ceiling`; a card under it keeps its natural height;
+- a chart (`minBody 250`) whose `overhead + 250` is above the ceiling gets `overhead + 250`;
+- the split matches the old greedy rule when nothing is clipped (Baseline numbers → `[0,2,5,7,9]` / `[1,3,4,6,8]`);
+- order of filling: clipped grow, then elastic up to 125%, then the taller column shrinks (not below the floor),
+  then the spread; each stage is tested in isolation with measures where only that stage applies;
+- caps: a clipped card never grows past `natural`; an elastic card never past its 125% cap; a shrunk card never
+  below `max(floor, overhead + minBody)`;
+- **flush bottoms**: `sum(heights in col) + gaps` is exactly equal for 5, 7, 9 and 10 cards with random measures
+  (seeded PRNG, 200 iterations, all non-fixed);
+- all fixed: the old behavior, `heights` all null;
+- `samePlan`: true for equal plans, false when one height differs by 1 px;
+- Baseline replays: 1680×824 (ceiling 577) → Owner 595, MoM 577, flush; 1284×714 (ceiling 560) → Owner 578, flush.
+
+##### Step 3: `web/src/dashboard/MasonryColumns.tsx`
+
+Builds on the uncommitted re-observe fix; keep its docstring's reasoning and update it to describe the new
+rules.
+
+- **Slot context** (exported):
+  ```ts
+  interface BodyRegistration {
+    outer: HTMLDivElement;          // the scroll container
+    stack: HTMLElement | null;      // the Stack whose children are measured; null for elastic bodies
+    minBody: number;
+    elasticHeight?: number;
+  }
+  interface SlotApi { register(r: BodyRegistration | null): void }
+  export const MasonrySlotContext = createContext<SlotApi | null>(null);
+  export function useInMasonrySlot(): boolean { return useContext(MasonrySlotContext) !== null; }
+  ```
+  `bodyRefs = useRef<(BodyRegistration | null)[]>([])`; `const [bodyVersion, setBodyVersion] = useState(0)`.
+  `slotApis = useMemo(() => Array.from({length: itemCount}, (_, i) => ({ register: (r) => { bodyRefs.current[i] = r; setBodyVersion(v => v + 1); } })), [itemCount])`.
+  Trim `bodyRefs.current.length = itemCount` next to the existing `itemRefs` trim.
+- **`ScrollBody` and `Stack`** (both exported from this file, so the contract lives with its consumer):
+  ```tsx
+  /** The card body: scrolls when allotted less than its content. Elastic = a chart that fills extra height. */
+  export function ScrollBody({ children, minBody = MIN_BODY_LIST, elasticHeight }:
+    { children: ReactNode; minBody?: number; elasticHeight?: number }) {
+    const slot = useContext(MasonrySlotContext);
+    const outer = useRef<HTMLDivElement>(null);
+    const [stack, setStack] = useState<HTMLElement | null>(null);   // set by the Stack below via StackRefContext
+    useLayoutEffect(() => {
+      if (!slot || !outer.current) return;
+      slot.register({ outer: outer.current, stack: elasticHeight === undefined ? stack : null, minBody, elasticHeight });
+      return () => slot.register(null);
+    }, [slot, stack, minBody, elasticHeight]);
+    if (!slot) return <>{children}</>;                       // outside the pool: renders exactly as today
+    return (
+      <div ref={outer} className="min-h-0 flex-1 overflow-y-auto">
+        {elasticHeight !== undefined
+          ? <div style={{ height: '100%', minHeight: elasticHeight }}>{children}</div>
+          : <div className="flex min-h-full flex-col"><StackRefContext.Provider value={setStack}>{children}</StackRefContext.Provider></div>}
+      </div>
+    );
+  }
+
+  /** The measured, evenly-spaced content of a non-elastic body. Children are the rows. */
+  export function Stack({ as: Tag = 'div', className = 'gap-1.5', children }:
+    { as?: 'div' | 'ul'; className?: string; children: ReactNode }) {
+    const setStack = useContext(StackRefContext);           // null outside a ScrollBody in a slot
+    if (!setStack) return <Tag className={`flex flex-col ${className}`}>{children}</Tag>;
+    return <Tag ref={setStack} className={`flex flex-1 flex-col justify-evenly ${className}`}>{children}</Tag>;
+  }
+  ```
+  - **Elastic:** the inner div fills the body when the card is stretched (`height: 100%`) and keeps the chart's
+    natural height when the body is smaller (`minHeight`), so the body scrolls instead of compressing the chart.
+  - **Stack:** `flex-1 justify-evenly` turns any extra height into equal slots above, between (on top of the `gap`)
+    and below the rows, and centers a single child. Outside a slot it's a plain flex column with the same gap, so
+    it looks the same as today's `space-y-*`.
+- **Measure** in `rebalance` (replaces the current height loop), per index `i`:
+  - `reg = bodyRefs.current[i]`, `wrapper = itemRefs.current[i]`;
+  - no `reg` → `{ fixed: true, overhead: ceil(wrapper rect height), content: 0, minBody: 0, elastic: false }`;
+  - `reg` with `elasticHeight` → `content = elasticHeight`;
+  - `reg` with a `stack` → `content = ceil(sum(child rect heights of stack) + rowGap(stack) * (childCount - 1))`.
+    Row heights don't change when the Stack is stretched, so the measure is stable whatever height was allotted;
+  - for both: `overhead = ceil(wrapper rect height - reg.outer.clientHeight)`, `minBody = reg.minBody`,
+    `elastic = reg.elasticHeight !== undefined`, `fixed = false`;
+  - `gap = parseFloat(getComputedStyle(rootRef.current).rowGap) || 0` (add `rootRef` on the outer div in both
+    render branches); `ceiling = ceilingFor(window.innerHeight)`;
+  - `next = planLayout(measures, { twoColumn: isTwo, ceiling, floor: CEILING_FLOOR, gap })`; commit only if
+    `!samePlan(planRef.current, next)`.
+- **State:** replace `columns` / `columnsRef` with `plan` / `planRef` (`LayoutPlan`); the initial plan is
+  `{ columns: [[0..n-1], []], heights: all null }`.
+- **Effects:**
+  - the measuring layout effect re-runs on `[rebalance, bodyVersion]`;
+  - the observer effect (deps `[plan, twoColumn, rebalance, bodyVersion]`): one `ResizeObserver` watching every
+    **direct child of each `stack`**, plus the wrapper of each card with no `reg`; one `MutationObserver`
+    (`childList: true`) on each `stack`, so rows added or removed by a refetch re-plan even when a stretched Stack
+    doesn't change size. Elastic bodies and sized wrappers are never observed, since that would feed back;
+  - the existing `matchMedia` effect plus a `window` `resize` listener (same `rebalance`) for the ceiling.
+- **Render:** each wrapper is `<MasonrySlotContext.Provider value={slotApis[i]}><div ref=… style={plan.heights[i] != null ? { height: plan.heights[i]! } : undefined}>…</div></Provider>`
+  in both branches. Nothing else in the markup changes (same classes, same keys).
+
+##### Step 4: `web/src/dashboard/MasonryColumns.test.tsx`
+
+Keep all 8 existing tests unchanged. Their plain-div children are `fixed`, which exercises the old behavior.
+Add the following, using a helper `scrollCard(id, {overhead, rows, rowHeight, elastic?})` that renders
+`<ScrollBody><Stack>…rows…</Stack></ScrollBody>` and mocks `getBoundingClientRect` / `clientHeight` by `data-*` keys:
+- the wrappers get the planned `style.height` (two-column and stacked);
+- the shorter column's heights sum (plus gaps) to the taller column's;
+- content is measured from the Stack's rows (it doesn't change when the wrapper height changes);
+- the ResizeObserver watches the Stack rows, not the wrappers; resizing a row re-plans; appending a row re-plans
+  (MutationObserver);
+- an elastic body's inner div has `height:100%` and `minHeight == elasticHeight`;
+- `ScrollBody` and `Stack` outside `MasonryColumns` render with no extra wrappers / no `justify-evenly`;
+- no render loop when `observe()` fires immediately (the existing `fireOnObserve` pattern);
+- changing `window.innerHeight` and firing `resize` re-clips a tall card.
+
+##### Step 5: `web/src/dashboard/OverviewTab.tsx`
+
+- `Card` (`:300`): add props `headerExtra?: ReactNode`, `minBody?: number`, `elasticHeight?: number`. Read
+  `inSlot = useInMasonrySlot()`. Render:
+  - `headerExtra` → `<div className="mt-4">{headerExtra}</div>`, right after the caption;
+  - content wrapper class `${headerExtra ? 'mt-2' : 'mt-4'} ${inSlot ? 'flex min-h-0 flex-1 flex-col' : ''} ${contentClassName ?? ''}`,
+    containing `<ScrollBody minBody={minBody} elasticHeight={elasticHeight}>{children}</ScrollBody>`.
+  Outside the pool (Needs a Look, Credit Utilization) the rendering is unchanged, since `ScrollBody` and `Stack`
+  pass through.
+- Pool card content: every non-chart body becomes **one `Stack`** whose children are the rows. Empty states (the
+  `<p>` branches) go inside the same `Stack` as its single child:
+  - **Biggest Expense This Month:** `<Stack>` around the existing row `div` (or the empty `<p>`).
+  - **Upcoming Recurring / Top Merchants / Committed:** `<ul className="space-y-1.5">` → `<Stack as="ul" className="gap-1.5">`,
+    `li` rows unchanged.
+  - **Emergency Fund:** `<Stack className="gap-2.5">` with the 3 children (drop `mt-3` / `mt-2`; 10 px replaces 12/8).
+  - **Asset Mix:** `<Card title="Asset Mix">` + `<Stack>` around the `ResponsiveContainer` (height stays `ASSET_MIX_HEIGHT`); not elastic.
+  - **Owner Balances:** `<Card title="Owner Balances" headerExtra={legend}>`; drop the legend's `mb-2`; the list
+    becomes `<Stack className="gap-4">` of `OwnerBalanceMiniList` (drop `grid max-h-[420px] grid-cols-1 overflow-y-auto`).
+  - **Income Sources:** `<Card title="Income Sources" caption="Trailing 12 Months">` + `<Stack className="gap-1.5">` of `LabeledBarRow`.
+- Chart cards (elastic, no `Stack`):
+  - **Top Expense Categories:** `const topCategoriesChartHeight = Math.max(250, ov.top_categories.length * 32)`;
+    `<Card title="Top Expense Categories" caption={strings.crossFilter.categoryHint} minBody={MIN_BODY_CHART} elasticHeight={topCategoriesChartHeight}>`;
+    `ResponsiveContainer height="100%"`.
+  - **Month-over-Month by Category:** new constants `MOM_ROW_HEIGHT = 48` and `MOM_CHART_CHROME = 32` (x-axis only);
+    remove the Recharts `<Legend>` and pass `headerExtra` = an HTML legend (same markup as the Owner Balances swatch
+    legend: `categoricalColor(1)` Last month, `categoricalColor(0)` This month, `categoricalColor(2)` Usual); `const monthOverMonthChartHeight = Math.max(250, monthOverMonthRows.length * MOM_ROW_HEIGHT + MOM_CHART_CHROME)`;
+    `BarChart` gets `barCategoryGap={6}` and `barGap={3}`; `minBody={MIN_BODY_CHART}`,
+    `elasticHeight={monthOverMonthChartHeight}`, `ResponsiveContainer height="100%"`. `maxBarSize` stays `BAR_MAX_SIZE` (24).
+- Rewrite the comment above `<MasonryColumns>` (`:760`) and the Owner Balances comment (`:1035`) to describe the
+  ceiling and stretch rules instead of the 420 px cap.
+- `OverviewTab.test.tsx`: the `heading.closest('div')` lookups still reach the card div (the title stays a
+  direct child). Update only the assertions that break, if any. Add tests: the Owner Balances list has no
+  `max-h-[420px]`; its legend renders outside the scroll body; the MoM `BarChart` receives `barCategoryGap 6` /
+  `barGap 3`, and its legend renders outside the scroll body.
+
+##### Step 6: verification (see below), then hand over the commit message (the user commits)
+
+Commits: 3 blocks — A planner + tests; B MasonryColumns/ScrollBody/Stack + tests; C OverviewTab conversions, chart spacing, this phase entry.
+
+#### Verification
+
+1. `masonryLayout.test.ts`: red before the implementation, green after; includes the 200-iteration flush property.
+2. `MasonryColumns.test.tsx`: the 8 existing tests and the new ones all pass.
+3. All four web checks green.
+4. Live in Claude in Chrome (signed in), at each Baseline size:
+   - JS: `abs(leftColumn.lastElementChild.bottom - rightColumn.lastElementChild.bottom) <= 1` at every two-column size;
+   - same column assignment as the Baseline table; card heights equal the "Expected result" numbers (±1 px);
+   - Owner Balances never shorter than 522 px; it scrolls only when its content passes the ceiling;
+   - Month-over-Month: drift labels no longer overlap; the chart scrolls inside the card; body ≥ 250 px;
+   - stretched list cards show equal spacing above, between and below rows (zoom on one at 1680×824);
+   - stacked sizes: same order, no stretching, long cards capped at the ceiling;
+   - screenshots side by side with the "before" set: same arrangement, only the bottoms aligned and small height changes.
+5. Close the Claude tab-group tab when done.
