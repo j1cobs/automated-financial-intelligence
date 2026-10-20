@@ -140,7 +140,9 @@ stays.** It is the interface seam for future non-Plaid sources (`CLAUDE.md`, ing
 ### O6 — Phase 14 verification never run (from Phase 14)
 
 1. Run `python main.py` against a disposable/local database (never prod) and confirm a `pipeline_runs` row
-   lands with the right counts and `status='success'`.
+   lands with the right counts and `status='success'`. **Done 2026-10-20** with Phase 55's verification 5: the
+   row landed with `trigger_type='local'` and 672 inserted. Its status was `partial_success` because one Item
+   needed re-login, so the all-green `success` path is still unobserved.
 2. Force a failure path (a bad `DATABASE_URL` for the `OperationalError` branch, or a bad Plaid token for
    `requests.RequestException`). Confirm `pipeline_runs` gets a `status='failed'` row with a
    non-transaction error message, and that stdout shows no response body or mask.
@@ -205,8 +207,14 @@ transactions → Phase 48; A10 recurring tagging → Phases 30-31.
 ## Phase 55 — Decommission Streamlit
 
 > **Status (2026-10-20):** implemented in session S1 as three commits on `dev` (55a relocate, 55b delete,
-> 55c docs + ADR 0013). Verification 1-3 done; 4 is left to CI's `migrations` job; 5, 6 and 55d are owner
-> checks after deploy. Deviations from the text below:
+> 55c docs + ADR 0013). Verification 1-3 and 5 done; 4 is left to CI's `migrations` job; 6 and 55d are
+> owner checks after deploy. Deviations from the text below:
+> - Verification 5 (2026-10-20): `python main.py` against a throwaway loopback Docker Postgres
+>   (`postgres:16-alpine`, never prod), with live production Plaid. 672 transactions were inserted and 3
+>   category-drift anomalies found, and `is_outlier` was set on 7 rows. The API read path
+>   (`dataload.load_frames` → `apply_filters(outliers_only=True)`) returned exactly those 7. The run was
+>   `partial_success`: the BNC Item (token suffix `fa17bf`) returned `ITEM_LOGIN_REQUIRED`, which is unrelated
+>   to this phase. Fix it with `python scripts/plaid_link.py repair`.
 > - Suite: 617 tests before and after 55a; **598** after 55b. That is 617 − 10 (`test_app_auth`) − 7
 >   (`MobileStylesheetTests`, `StyleChartTests`) − 2 (legacy-budgets DB tests) + 1 (env-over-`.env` config
 >   test) − 1 (`test_api_data`'s "never reads the legacy table" test, which asserted nothing once the methods
