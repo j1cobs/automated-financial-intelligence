@@ -31,8 +31,7 @@ def _account(account_id="acc1", current=1234.56):
         "subtype": "checking",
         "mask": "1234",
         "persistent_account_id": "p1",
-        "balances": {"current": current, "available": current, "limit": None,
-                     "iso_currency_code": "CAD"},
+        "balances": {"current": current, "available": current, "limit": None, "iso_currency_code": "CAD"},
     }
 
 
@@ -41,9 +40,7 @@ class RefreshBalancesTests(unittest.TestCase):
         """`/accounts/get` may serve Plaid's cached balance; the whole point of
         this call is to force a fetch from the institution."""
         ingestor = _ingestor()
-        with patch.object(
-            ingestor, "_post", return_value={"accounts": [_account()]}
-        ) as post:
+        with patch.object(ingestor, "_post", return_value={"accounts": [_account()]}) as post:
             ingestor.refresh_balances()
 
         endpoint = post.call_args[0][0]

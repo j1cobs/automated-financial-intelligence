@@ -183,9 +183,7 @@ def project(
         monthly_income = 0.0
     else:
         income_by_month = income.groupby("month")["adjusted_amount"].sum().abs()
-        monthly_income = statistics.median(
-            [float(income_by_month.get(month, 0.0)) for month in months]
-        )
+        monthly_income = statistics.median([float(income_by_month.get(month, 0.0)) for month in months])
 
     per_category: dict[str, float] = {}
     if not expenses.empty:

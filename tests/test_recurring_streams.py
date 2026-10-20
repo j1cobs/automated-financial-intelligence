@@ -163,7 +163,6 @@ class DeriveStreamsTests(unittest.TestCase):
         )
 
 
-
 class RecurringStreamDbTests(unittest.TestCase):
     """Persistence is keyed on stream_id, so re-detection must update in place."""
 
@@ -173,9 +172,7 @@ class RecurringStreamDbTests(unittest.TestCase):
         from database.db import DatabaseClient
 
         client = DatabaseClient("postgresql://x/y")
-        stream = derive_streams(
-            _frame(_tx("NETFLIX.COM", ["2026-06-05", "2026-07-05", "2026-08-05"]))
-        )[0]
+        stream = derive_streams(_frame(_tx("NETFLIX.COM", ["2026-06-05", "2026-07-05", "2026-08-05"])))[0]
 
         with patch.object(client, "_execute_many") as execute_many:
             written = client.upsert_recurring_streams([stream])
@@ -210,10 +207,7 @@ class MigrationTests(unittest.TestCase):
         from pathlib import Path
 
         sql = (
-            Path(__file__).resolve().parent.parent
-            / "database"
-            / "migrations"
-            / "027_recurring_streams.sql"
+            Path(__file__).resolve().parent.parent / "database" / "migrations" / "027_recurring_streams.sql"
         ).read_text(encoding="utf-8")
 
         self.assertIn("CREATE TABLE IF NOT EXISTS recurring_streams", sql)
@@ -280,9 +274,7 @@ class UpcomingFromStreamsTests(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_streams_with_no_prediction_are_skipped_not_blank(self):
-        rows = upcoming_from_streams(
-            [self._stream(predicted_next_date=None)], today=date(2026, 9, 10)
-        )
+        rows = upcoming_from_streams([self._stream(predicted_next_date=None)], today=date(2026, 9, 10))
         self.assertEqual(rows, [])
 
     def test_a_stale_prediction_rolls_forward_by_whole_cadences(self):
@@ -310,9 +302,7 @@ class UpcomingFromStreamsTests(unittest.TestCase):
         self.assertEqual(rows[0]["next_expected_date"], "2026-09-20")
 
     def test_status_is_carried_through_for_confidence_labelling(self):
-        rows = upcoming_from_streams(
-            [self._stream(status="early_detection")], today=date(2026, 9, 10)
-        )
+        rows = upcoming_from_streams([self._stream(status="early_detection")], today=date(2026, 9, 10))
         self.assertEqual(rows[0]["status"], "early_detection")
 
 
@@ -341,9 +331,7 @@ class StreamRecurringToggleTests(unittest.TestCase):
         connection.__exit__.return_value = False
 
         with patch("database.db.psycopg.connect", MagicMock(return_value=connection)):
-            hashes = DatabaseClient("postgresql://x/y").transaction_hashes_for_stream(
-                "local:NETFLIX.COM"
-            )
+            hashes = DatabaseClient("postgresql://x/y").transaction_hashes_for_stream("local:NETFLIX.COM")
 
         # hash-b matches via merchant_name even though its raw description differs.
         self.assertEqual(sorted(hashes), ["hash-a", "hash-b"])

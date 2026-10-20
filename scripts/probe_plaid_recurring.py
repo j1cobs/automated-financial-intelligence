@@ -102,9 +102,7 @@ def probe(base_url: str, client_id: str, secret: str, access_token: str, label: 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--all", action="store_true", help="Probe every configured token, not just the first"
-    )
+    parser.add_argument("--all", action="store_true", help="Probe every configured token, not just the first")
     args = parser.parse_args()
 
     settings = load_settings()

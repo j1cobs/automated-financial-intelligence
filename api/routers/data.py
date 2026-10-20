@@ -441,10 +441,10 @@ class AnomalyItem(BaseModel):
     per-category-per-month (drift) or per-stream (price creep), and carries the
     sentence it was derived from rather than an unexplainable score."""
 
-    kind: str          # category_drift | price_creep
-    subject: str       # category name, or stream_id
-    period: str        # 'YYYY-MM'
-    severity: str      # medium | high
+    kind: str  # category_drift | price_creep
+    subject: str  # category name, or stream_id
+    period: str  # 'YYYY-MM'
+    severity: str  # medium | high
     explanation: str
     detected_at: str | None = None
 
@@ -555,9 +555,7 @@ def get_ledger(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> 
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
     # Duplicate-flagged rows stay: the ledger checkbox is the only way to un-flag one.
     return LedgerResponse(
-        transactions=[
-            LedgerItem(**item) for item in build_ledger(filtered, db.get_recurring_streams())
-        ]
+        transactions=[LedgerItem(**item) for item in build_ledger(filtered, db.get_recurring_streams())]
     )
 
 
@@ -573,9 +571,7 @@ def get_anomalies(
     period, so narrowing the ledger view does not change whether it holds."""
     if month is not None and not PERIOD_PATTERN.match(month):
         raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
-    return AnomaliesResponse(
-        anomalies=[AnomalyItem(**item) for item in db.get_anomalies(month)]
-    )
+    return AnomaliesResponse(anomalies=[AnomalyItem(**item) for item in db.get_anomalies(month)])
 
 
 @router.post("/anomalies/dismiss", status_code=status.HTTP_204_NO_CONTENT)
@@ -733,8 +729,7 @@ def update_transaction_category(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Unknown category {body.category!r}. "
-                f"Expected one of: {', '.join(CANONICAL_CATEGORIES)}"
+                f"Unknown category {body.category!r}. Expected one of: {', '.join(CANONICAL_CATEGORIES)}"
             ),
         )
     fields = db.get_transaction_merchant_fields(transaction_hash)
@@ -857,9 +852,7 @@ def refresh_balances(
         access_tokens=settings.plaid_access_tokens,
         base_url=settings.plaid_base_url,
     )
-    owner_by_token = dict(
-        zip(settings.plaid_access_tokens, settings.plaid_access_token_owners, strict=False)
-    )
+    owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners, strict=False))
     accounts, failed = ingestor.refresh_balances(owner_by_token)
 
     for account in accounts:
@@ -940,10 +933,7 @@ def _account_balances(acct_df) -> dict[str, float]:
         return {}
     balances = acct_df[["account_key", "balance_current"]].copy()
     balances["balance_current"] = balances["balance_current"].fillna(0.0)
-    return {
-        str(row["account_key"]): float(row["balance_current"])
-        for _, row in balances.iterrows()
-    }
+    return {str(row["account_key"]): float(row["balance_current"]) for _, row in balances.iterrows()}
 
 
 def _parse_target_date(value: str | None) -> date | None:
@@ -961,9 +951,7 @@ def get_goals(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> G
     goals = db.get_savings_goals()
 
     balances = _account_balances(acct_df)
-    history = {
-        goal["id"]: db.get_goal_balance_history(goal.get("account_keys", [])) for goal in goals
-    }
+    history = {goal["id"]: db.get_goal_balance_history(goal.get("account_keys", [])) for goal in goals}
 
     # Fallback pace, used until a goal has 12 weeks of balance snapshots.
     # Measured over all history rather than the filtered period: saving capacity
@@ -976,10 +964,7 @@ def get_goals(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> G
             cashflow_monthly = max(float(monthly_net.mean()), 0.0)
 
     return GoalsResponse(
-        goals=[
-            GoalItem(**item)
-            for item in build_goals(goals, balances, history, cashflow_monthly)
-        ]
+        goals=[GoalItem(**item) for item in build_goals(goals, balances, history, cashflow_monthly)]
     )
 
 
@@ -1030,8 +1015,7 @@ def update_goal(
     # what the baseline exists to prevent. Only the newly-added accounts are
     # re-baselined, so progress already earned on the existing ones is kept.
     if fields.get("account_keys") is not None:
-        existing = next((g for g in db.get_savings_goals(include_archived=True)
-                         if g["id"] == goal_id), None)
+        existing = next((g for g in db.get_savings_goals(include_archived=True) if g["id"] == goal_id), None)
         if existing is not None:
             _tx, acct_df = _load(db)
             balances = _account_balances(acct_df)

@@ -38,7 +38,10 @@ def _patch_dataload_reads(tx_df: pd.DataFrame | None = None, acct_df: pd.DataFra
     forced to mock them."""
     with patch(
         "api.dataload.load_financial_data",
-        return_value=(tx_df if tx_df is not None else _tx_df(), acct_df if acct_df is not None else _acct_df()),
+        return_value=(
+            tx_df if tx_df is not None else _tx_df(),
+            acct_df if acct_df is not None else _acct_df(),
+        ),
     ) as loader:
         with patch("api.dataload.DatabaseClient") as mock_db_class:
             mock_db_class.return_value.get_transaction_pfc_details.return_value = {}

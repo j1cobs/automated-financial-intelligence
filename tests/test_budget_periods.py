@@ -15,12 +15,7 @@ from unittest.mock import MagicMock, patch
 from analytics.budget_periods import previous_period, resolve_caps
 from database.db import DatabaseClient
 
-MIGRATION = (
-    Path(__file__).resolve().parent.parent
-    / "database"
-    / "migrations"
-    / "026_budget_periods.sql"
-)
+MIGRATION = Path(__file__).resolve().parent.parent / "database" / "migrations" / "026_budget_periods.sql"
 
 
 def _mock_connect(fetchall_return=None, rowcount=0):
@@ -173,8 +168,7 @@ class MigrationSeedGuardTests(unittest.TestCase):
         """
         normalized = re.sub(r"\s+", " ", self.sql)
         self.assertIn(
-            "WHERE NOT EXISTS (SELECT 1 FROM schema_seeds WHERE name = "
-            "'budget_periods_from_budgets')",
+            "WHERE NOT EXISTS (SELECT 1 FROM schema_seeds WHERE name = 'budget_periods_from_budgets')",
             normalized,
             "the one-time seed must not re-run, or a cleared cap is resurrected",
         )
@@ -206,9 +200,7 @@ class BudgetPeriodDbTests(unittest.TestCase):
         with patch("database.db.psycopg.connect", connect):
             rows = DatabaseClient("postgresql://x/y").get_budget_periods()
 
-        self.assertEqual(
-            rows, [{"category": "FOOD_AND_DRINK", "period": "2026-09", "monthly_limit": 400.0}]
-        )
+        self.assertEqual(rows, [{"category": "FOOD_AND_DRINK", "period": "2026-09", "monthly_limit": 400.0}])
         self.assertIn("FROM budget_periods", cursor.execute.call_args[0][0])
 
     def test_get_budget_periods_handles_blank_padded_char_column(self):
@@ -232,15 +224,11 @@ class BudgetPeriodDbTests(unittest.TestCase):
     def test_delete_reports_whether_a_row_went(self):
         connect, _ = _mock_connect(rowcount=1)
         with patch("database.db.psycopg.connect", connect):
-            self.assertTrue(
-                DatabaseClient("postgresql://x/y").delete_budget_period("TRAVEL", "2026-10")
-            )
+            self.assertTrue(DatabaseClient("postgresql://x/y").delete_budget_period("TRAVEL", "2026-10"))
 
         connect, _ = _mock_connect(rowcount=0)
         with patch("database.db.psycopg.connect", connect):
-            self.assertFalse(
-                DatabaseClient("postgresql://x/y").delete_budget_period("TRAVEL", "2026-10")
-            )
+            self.assertFalse(DatabaseClient("postgresql://x/y").delete_budget_period("TRAVEL", "2026-10"))
 
 
 if __name__ == "__main__":

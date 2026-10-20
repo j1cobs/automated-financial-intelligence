@@ -281,9 +281,7 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
             headers=self._headers(),
         )
         self.assertEqual(response.status_code, 204)
-        self.mock_db.dismiss_anomaly.assert_called_once_with(
-            "category_drift", "FOOD_AND_DRINK", "2026-09"
-        )
+        self.mock_db.dismiss_anomaly.assert_called_once_with("category_drift", "FOOD_AND_DRINK", "2026-09")
 
     def test_restoring_an_anomaly_undoes_the_dismissal(self) -> None:
         response = self.client.post(
@@ -292,9 +290,7 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
             headers=self._headers(),
         )
         self.assertEqual(response.status_code, 204)
-        self.mock_db.restore_anomaly.assert_called_once_with(
-            "category_drift", "FOOD_AND_DRINK", "2026-09"
-        )
+        self.mock_db.restore_anomaly.assert_called_once_with("category_drift", "FOOD_AND_DRINK", "2026-09")
 
     def test_budget_write_targets_the_given_month(self) -> None:
         response = self.client.put(
@@ -318,15 +314,11 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         )
 
     def test_budget_write_never_touches_the_legacy_table(self) -> None:
-        self.client.put(
-            "/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers()
-        )
+        self.client.put("/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers())
         self.mock_db.upsert_budget.assert_not_called()
 
     def test_budget_delete_clears_one_month(self) -> None:
-        response = self.client.request(
-            "DELETE", "/budgets/Shopping?month=2026-10", headers=self._headers()
-        )
+        response = self.client.request("DELETE", "/budgets/Shopping?month=2026-10", headers=self._headers())
         self.assertEqual(response.status_code, 204)
         self.mock_db.delete_budget_period.assert_called_once_with("Shopping", "2026-10")
 
@@ -398,9 +390,7 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.mock_db.update_transaction_category.assert_called_once_with(
-            "hash-2", "FOOD_AND_DRINK", None
-        )
+        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "FOOD_AND_DRINK", None)
 
     def test_recurring_calls_update_transaction_recurring(self) -> None:
         response = self.client.patch(
@@ -444,9 +434,7 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
             mock_invalidate.assert_not_called()
 
     def test_unlink_calls_unlink_transaction_and_invalidates_cache(self) -> None:
-        response = self.client.delete(
-            "/transactions/hash-2/link", headers=self._headers()
-        )
+        response = self.client.delete("/transactions/hash-2/link", headers=self._headers())
         self.assertEqual(response.status_code, 204)
         self.mock_db.unlink_transaction.assert_called_once_with("hash-2")
 
@@ -611,7 +599,6 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         self._authed_client()
         response = self.client.get("/anomalies?month=September")
         self.assertEqual(response.status_code, 422)
-
 
     def test_categories_is_thin_wrapper(self) -> None:
         self._authed_client()

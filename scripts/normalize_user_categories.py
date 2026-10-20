@@ -64,9 +64,7 @@ def rewrite(db: DatabaseClient, old: str, new: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--apply", action="store_true", help="Perform the rewrite (default: dry run)"
-    )
+    parser.add_argument("--apply", action="store_true", help="Perform the rewrite (default: dry run)")
     args = parser.parse_args()
 
     settings = load_settings()

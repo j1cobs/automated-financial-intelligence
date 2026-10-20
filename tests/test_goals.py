@@ -51,9 +51,7 @@ class ProgressTests(unittest.TestCase):
         self.assertAlmostEqual(saved, 22200.0)
 
     def test_only_linked_accounts_count(self):
-        saved = progress(
-            _goal(), {"plaid:savings": 20000.0, "plaid:tfsa": 14200.0, "plaid:chequing": 9999.0}
-        )
+        saved = progress(_goal(), {"plaid:savings": 20000.0, "plaid:tfsa": 14200.0, "plaid:chequing": 9999.0})
         self.assertAlmostEqual(saved, 22200.0)
 
     def test_a_missing_account_contributes_nothing_rather_than_erroring(self):
@@ -167,7 +165,10 @@ class WhatIfTests(unittest.TestCase):
     def test_cutting_spending_moves_the_date_earlier(self):
         base = projection(_goal(), saved=22200.0, monthly_pace=2000.0, today=date(2026, 9, 1))
         improved = what_if(
-            _goal(), saved=22200.0, monthly_pace=2000.0, monthly_reduction=500.0,
+            _goal(),
+            saved=22200.0,
+            monthly_pace=2000.0,
+            monthly_reduction=500.0,
             today=date(2026, 9, 1),
         )
 
@@ -177,7 +178,10 @@ class WhatIfTests(unittest.TestCase):
     def test_a_zero_reduction_changes_nothing(self):
         base = projection(_goal(), saved=22200.0, monthly_pace=2000.0, today=date(2026, 9, 1))
         same = what_if(
-            _goal(), saved=22200.0, monthly_pace=2000.0, monthly_reduction=0.0,
+            _goal(),
+            saved=22200.0,
+            monthly_pace=2000.0,
+            monthly_reduction=0.0,
             today=date(2026, 9, 1),
         )
         self.assertEqual(same["projected_date"], base["projected_date"])
@@ -187,7 +191,10 @@ class WhatIfTests(unittest.TestCase):
         self.assertFalse(behind["on_track"])
 
         rescued = what_if(
-            _goal(), saved=40000.0, monthly_pace=1000.0, monthly_reduction=4000.0,
+            _goal(),
+            saved=40000.0,
+            monthly_pace=1000.0,
+            monthly_reduction=4000.0,
             today=date(2026, 9, 1),
         )
         self.assertTrue(rescued["on_track"])

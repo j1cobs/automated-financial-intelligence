@@ -120,9 +120,7 @@ class UnlinkTransactionTests(unittest.TestCase):
     def test_unlink_transaction_clears_both_sides(self) -> None:
         """unlink_transaction clears both sides."""
         # First query: transaction_hash is linked to partner
-        connect, cursor = _mock_connect(
-            fetchone_return=("partner_hash",)
-        )
+        connect, cursor = _mock_connect(fetchone_return=("partner_hash",))
         with patch("database.db.psycopg.connect", connect):
             DatabaseClient("postgresql://x").unlink_transaction("hash_a")
 
@@ -156,9 +154,7 @@ class UnlinkTransactionTests(unittest.TestCase):
     def test_unlink_transaction_not_found(self) -> None:
         """Calling unlink_transaction on a non-existent transaction is a no-op."""
         # First query: no row found (fetchone() returns None)
-        connect, cursor = _mock_connect(
-            fetchone_return=None
-        )
+        connect, cursor = _mock_connect(fetchone_return=None)
 
         with patch("database.db.psycopg.connect", connect):
             # Should not raise

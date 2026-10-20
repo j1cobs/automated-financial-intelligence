@@ -181,9 +181,7 @@ def contested_amounts(
     contested: dict[Any, float] = {}
     for goal in goals:
         shared = sum(
-            float(balances.get(key, 0.0))
-            for key in goal.get("account_keys", [])
-            if claims.get(key, 0) > 1
+            float(balances.get(key, 0.0)) for key in goal.get("account_keys", []) if claims.get(key, 0) > 1
         )
         contested[goal["id"]] = shared
     return contested

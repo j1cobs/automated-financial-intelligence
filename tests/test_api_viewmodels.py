@@ -1483,7 +1483,9 @@ class NetLinkedTransactionsIntegrationTests(unittest.TestCase):
         """The /budget response also applies net_linked_transactions."""
         # Create a linked expense/reimbursement pair for May
         expense = _tx("2026-05-01", 3000.0, _EXPENSE, category="Shopping", transaction_hash="h-expense")
-        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, category="Shopping", transaction_hash="h-reimbursement")
+        reimbursement = _tx(
+            "2026-05-05", 2000.0, _INCOME, category="Shopping", transaction_hash="h-reimbursement"
+        )
 
         df = _frame([expense, reimbursement])
         df["linked_transaction_hash"] = None

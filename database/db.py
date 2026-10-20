@@ -611,9 +611,7 @@ class DatabaseClient:
                         (*updates.values(), goal_id),
                     )
                 if account_keys is not None:
-                    cur.execute(
-                        "DELETE FROM savings_goal_accounts WHERE goal_id = %s", (goal_id,)
-                    )
+                    cur.execute("DELETE FROM savings_goal_accounts WHERE goal_id = %s", (goal_id,))
                     for key in account_keys:
                         cur.execute(
                             "INSERT INTO savings_goal_accounts (goal_id, account_key) VALUES (%s, %s)",
@@ -715,10 +713,7 @@ class DatabaseClient:
             explanation = EXCLUDED.explanation,
             updated_at  = NOW()
         """
-        params = [
-            (a["kind"], a["subject"], a["period"], a["severity"], a["explanation"])
-            for a in anomalies
-        ]
+        params = [(a["kind"], a["subject"], a["period"], a["severity"], a["explanation"]) for a in anomalies]
         self._execute_many(sql, params)
         return len(params)
 
@@ -809,12 +804,8 @@ class DatabaseClient:
                     return []
                 target = row[0]
 
-                cur.execute(
-                    "SELECT transaction_hash, merchant_name, description FROM transactions"
-                )
-                return [
-                    r[0] for r in cur.fetchall() if _merchant_key(r[1], str(r[2] or "")) == target
-                ]
+                cur.execute("SELECT transaction_hash, merchant_name, description FROM transactions")
+                return [r[0] for r in cur.fetchall() if _merchant_key(r[1], str(r[2] or "")) == target]
 
     def get_recurring_streams(self, active_only: bool = True) -> list[dict]:
         """Return detected recurring streams (Phase 30)."""
@@ -915,9 +906,7 @@ class DatabaseClient:
                 rows = cur.fetchall()
         # `period` is CHAR(7), which Postgres blank-pads; strip so string
         # comparison in resolve_caps stays exact.
-        return [
-            {"category": r[0], "period": r[1].strip(), "monthly_limit": r[2]} for r in rows
-        ]
+        return [{"category": r[0], "period": r[1].strip(), "monthly_limit": r[2]} for r in rows]
 
     def upsert_budget_period(self, category: str, period: str, monthly_limit: float) -> None:
         """Set the cap for one category in one month, leaving other months alone."""
@@ -1144,9 +1133,7 @@ class DatabaseClient:
                     other = hash_b if h == hash_a else hash_a
                     existing = rows.get(h)
                     if existing is not None and existing != other:
-                        raise ValueError(
-                            f"Transaction {h} is already linked to {existing}; unlink it first."
-                        )
+                        raise ValueError(f"Transaction {h} is already linked to {existing}; unlink it first.")
                 cur.execute(
                     "UPDATE transactions SET linked_transaction_hash = %s, updated_at = NOW() "
                     "WHERE transaction_hash = %s",

@@ -207,8 +207,7 @@ def detect_price_creep(
     if "merchant_name" not in working.columns:
         working["merchant_name"] = None
     working["_key"] = [
-        merchant_key(row.merchant_name, str(row.description or ""))
-        for row in working.itertuples(index=False)
+        merchant_key(row.merchant_name, str(row.description or "")) for row in working.itertuples(index=False)
     ]
 
     found: list[dict[str, Any]] = []
@@ -266,8 +265,7 @@ def detect_price_creep(
                 "period": period,
                 "severity": severity,
                 "explanation": (
-                    f"{description} went from {_money(baseline)} to {_money(latest)} "
-                    f"({pct:.0%} more)."
+                    f"{description} went from {_money(baseline)} to {_money(latest)} ({pct:.0%} more)."
                 ),
                 "contributing_hashes": (
                     [str(ordered["transaction_hash"].iloc[-1])]

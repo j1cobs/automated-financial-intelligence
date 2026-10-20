@@ -145,9 +145,7 @@ class CategoryDriftTests(unittest.TestCase):
         history["2026-09"] = [(5, 400.0), (9, 400.0)]
         frame = _rows(history)
 
-        explanation = detect_category_drift(frame, "2026-09", today=date(2026, 9, 9))[0][
-            "explanation"
-        ]
+        explanation = detect_category_drift(frame, "2026-09", today=date(2026, 9, 9))[0]["explanation"]
 
         self.assertIn("FOOD_AND_DRINK", explanation)
         self.assertIn("800", explanation.replace(",", ""))

@@ -64,9 +64,20 @@ class CanonicalizeTests(unittest.TestCase):
         """Migration 024 listed the Phase-1 names. Each should map, so an
         existing correction against one of them is not left stranded."""
         legacy = [
-            "ATM", "Dining", "Entertainment", "Groceries", "Health", "Housing",
-            "Income", "Savings", "Shopping", "Subscriptions", "Transfer",
-            "Transport", "Travel", "Utilities",
+            "ATM",
+            "Dining",
+            "Entertainment",
+            "Groceries",
+            "Health",
+            "Housing",
+            "Income",
+            "Savings",
+            "Shopping",
+            "Subscriptions",
+            "Transfer",
+            "Transport",
+            "Travel",
+            "Utilities",
         ]
         for name in legacy:
             with self.subTest(name=name):

@@ -158,14 +158,10 @@ class ProjectTests(unittest.TestCase):
                 "is_active": True,
             }
         ]
-        with_streams = project(
-            self._four_months(), streams, {}, starting=0.0, today=date(2026, 9, 1)
-        )
+        with_streams = project(self._four_months(), streams, {}, starting=0.0, today=date(2026, 9, 1))
         without = project(self._four_months(), [], {}, starting=0.0, today=date(2026, 9, 1))
 
-        self.assertLess(
-            with_streams["rows"][0]["projected_balance"], without["rows"][0]["projected_balance"]
-        )
+        self.assertLess(with_streams["rows"][0]["projected_balance"], without["rows"][0]["projected_balance"])
 
     def test_degrades_without_streams_and_says_so(self):
         result = project(self._four_months(), [], {}, starting=0.0, today=date(2026, 9, 1))
@@ -218,9 +214,7 @@ class ProjectTests(unittest.TestCase):
     def test_the_current_partial_month_is_excluded_from_the_baseline(self):
         """September is in progress, so its lower spend must not drag the
         median down and flatter the forecast."""
-        frame = pd.concat(
-            [self._four_months(), _history(["2026-09"], per_month=10.0)], ignore_index=True
-        )
+        frame = pd.concat([self._four_months(), _history(["2026-09"], per_month=10.0)], ignore_index=True)
         result = project(frame, [], {}, starting=0.0, today=date(2026, 9, 15))
 
         # Median is still ~1000 from the complete months, not pulled toward 10.

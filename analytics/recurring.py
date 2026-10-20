@@ -102,8 +102,7 @@ def derive_streams(frame: pd.DataFrame) -> list[dict[str, Any]]:
         working["category"] = None
 
     working["_key"] = [
-        merchant_key(row.merchant_name, str(row.description or ""))
-        for row in working.itertuples(index=False)
+        merchant_key(row.merchant_name, str(row.description or "")) for row in working.itertuples(index=False)
     ]
 
     streams: list[dict[str, Any]] = []
@@ -118,10 +117,7 @@ def derive_streams(frame: pd.DataFrame) -> list[dict[str, Any]]:
             # stream that cannot predict anything.
             continue
 
-        gaps = [
-            (later - earlier).days
-            for earlier, later in pairwise(occurrence_dates)
-        ]
+        gaps = [(later - earlier).days for earlier, later in pairwise(occurrence_dates)]
         median_gap = statistics.median(gaps)
         cadence = cadence_from_days(median_gap)
         if cadence == CADENCE_UNKNOWN:
@@ -145,11 +141,7 @@ def derive_streams(frame: pd.DataFrame) -> list[dict[str, Any]]:
                 "last_amount": last_amount,
                 "last_date": last_date,
                 "predicted_next_date": predict_next_date(last_date, median_gap),
-                "status": (
-                    "mature"
-                    if len(occurrence_dates) >= _MATURE_OCCURRENCES
-                    else "early_detection"
-                ),
+                "status": ("mature" if len(occurrence_dates) >= _MATURE_OCCURRENCES else "early_detection"),
                 "source": "local",
                 "is_active": True,
             }

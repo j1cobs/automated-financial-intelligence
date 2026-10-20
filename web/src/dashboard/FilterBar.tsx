@@ -316,11 +316,7 @@ export function FilterBar() {
             >
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-base font-semibold text-ink">Filters</h2>
-                <Button
-                  variant="ghost"
-                  onClick={() => setMobileSheetOpen(false)}
-                  aria-label="Close filters"
-                >
+                <Button variant="ghost" onClick={() => setMobileSheetOpen(false)} aria-label="Close filters">
                   Close
                 </Button>
               </div>

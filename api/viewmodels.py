@@ -184,7 +184,9 @@ def net_linked_transactions(df: pd.DataFrame) -> pd.DataFrame:
             drop_indices.add(income_idx)
         else:
             net_amount = this_amount + partner_amount
-            anchor_idx, dropped_idx = (idx, partner_idx) if this_amount >= partner_amount else (partner_idx, idx)
+            anchor_idx, dropped_idx = (
+                (idx, partner_idx) if this_amount >= partner_amount else (partner_idx, idx)
+            )
             result.at[anchor_idx, "amount"] = net_amount
             result.at[anchor_idx, "adjusted_amount"] = -net_amount
             drop_indices.add(dropped_idx)
@@ -1204,18 +1206,14 @@ def build_budget(
     today = date.today()
     is_current_month = month_str == today.strftime("%Y-%m")
 
-    caps: dict[str, tuple[Decimal, str]] = (
-        resolve_caps_detailed(budget_rows, month_str) if month_str else {}
-    )
+    caps: dict[str, tuple[Decimal, str]] = resolve_caps_detailed(budget_rows, month_str) if month_str else {}
 
     details_by_category: dict[str, list[dict[str, Any]]] = {}
     if df.empty or month_str is None:
         period_expenses: dict[str, float] = {}
     else:
         month_expenses = df[(df["month"] == month_str) & (df["tx_type"] == "expense")]
-        period_expenses = (
-            month_expenses.groupby("category")["adjusted_amount"].sum().abs().to_dict()
-        )
+        period_expenses = month_expenses.groupby("category")["adjusted_amount"].sum().abs().to_dict()
 
         # Sub-category breakdown for the drill-down. There is no
         # pfc_primary -> pfc_detailed table anywhere; `pfc_detailed` is a column
@@ -1229,9 +1227,7 @@ def build_budget(
                 detail_frame["pfc_detailed"].notna(), None
             )
             grouped = (
-                detail_frame.groupby(["category", "pfc_detailed"], dropna=False)[
-                    "adjusted_amount"
-                ]
+                detail_frame.groupby(["category", "pfc_detailed"], dropna=False)["adjusted_amount"]
                 .sum()
                 .abs()
             )
@@ -1317,14 +1313,10 @@ def build_ledger(
 
     row_keys: list[str | None] = []
     if streams_by_key:
-        merchant_names = (
-            ordered["merchant_name"] if "merchant_name" in ordered.columns else None
-        )
+        merchant_names = ordered["merchant_name"] if "merchant_name" in ordered.columns else None
         for position, (_, row) in enumerate(ordered.iterrows()):
             name = merchant_names.iloc[position] if merchant_names is not None else None
-            row_keys.append(
-                merchant_key(None if pd.isna(name) else name, str(row["description"] or ""))
-            )
+            row_keys.append(merchant_key(None if pd.isna(name) else name, str(row["description"] or "")))
     else:
         row_keys = [None] * len(ordered)
 
@@ -1377,9 +1369,7 @@ def build_goals(
 
     for goal in goals:
         saved = goal_progress(goal, balances)
-        monthly_pace, basis, weeks = goal_pace(
-            goal, history_by_goal.get(goal["id"], []), cashflow_monthly
-        )
+        monthly_pace, basis, weeks = goal_pace(goal, history_by_goal.get(goal["id"], []), cashflow_monthly)
         outlook = goal_projection(goal, saved=saved, monthly_pace=monthly_pace, today=today)
 
         target = float(goal.get("target_amount") or 0.0)

@@ -56,7 +56,9 @@ class SyncResult:
     duplicate_accounts_skipped: int
     full_refresh: bool  # True iff EVERY configured token started this run from a null/absent cursor
     cursors: dict[str, str]  # token_fingerprint (sha256 hex of the access token) -> next_cursor
-    failed_tokens: dict[str, str]  # token_fingerprint -> error description; tokens whose sync failed this run and were skipped
+    failed_tokens: dict[
+        str, str
+    ]  # token_fingerprint -> error description; tokens whose sync failed this run and were skipped
 
 
 class PlaidIngestor(BaseIngestor):
@@ -189,7 +191,9 @@ class PlaidIngestor(BaseIngestor):
 
         return all_accounts, failed_tokens
 
-    def fetch_accounts(self, owner_by_token: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    def fetch_accounts(
+        self, owner_by_token: dict[str, str] | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         owner_by_token = owner_by_token or {}
         all_accounts: list[dict[str, Any]] = []
         failed_tokens: dict[str, str] = {}
@@ -426,7 +430,9 @@ class PlaidIngestor(BaseIngestor):
                         error_code = None
                         try:
                             error_code = (
-                                error.response.json().get("error_code") if error.response is not None else None
+                                error.response.json().get("error_code")
+                                if error.response is not None
+                                else None
                             )
                         except ValueError:
                             error_code = None

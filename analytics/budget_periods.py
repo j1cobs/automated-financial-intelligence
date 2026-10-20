@@ -78,9 +78,7 @@ def resolve_caps_detailed(rows: list[dict], period: str) -> dict[str, tuple[Deci
         if current is None or row_period > current[0]:
             best[category] = (row_period, Decimal(str(entry["monthly_limit"])))
 
-    return {
-        category: (limit, source_period) for category, (source_period, limit) in best.items()
-    }
+    return {category: (limit, source_period) for category, (source_period, limit) in best.items()}
 
 
 def resolve_caps(rows: list[dict], period: str) -> dict[str, Decimal]:
@@ -93,6 +91,4 @@ def resolve_caps(rows: list[dict], period: str) -> dict[str, Decimal]:
     `rows` is whatever `DatabaseClient.get_budget_periods()` returned; order is
     irrelevant. `monthly_limit` may be a float, Decimal, int or numeric string.
     """
-    return {
-        category: limit for category, (limit, _) in resolve_caps_detailed(rows, period).items()
-    }
+    return {category: limit for category, (limit, _) in resolve_caps_detailed(rows, period).items()}
