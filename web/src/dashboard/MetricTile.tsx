@@ -25,6 +25,7 @@ import { metricInfoFor, type MetricInfo } from '../lib/metricInfo';
 import { toneFor, polarityOf, directionOf, DIRECTION_GLYPH, toneLabel, TONE_TOKENS } from '../lib/polarity';
 import { positiveColor, negativeColor, neutralColor } from './chartTheme';
 import { strings } from '../lib/strings';
+import { Button } from '../components/Button';
 
 export type MetricFormat = 'currency' | 'percent' | 'number';
 
@@ -48,36 +49,46 @@ function formatValue(value: number, format: MetricFormat): string {
 export function MetricInfoBadge({ metricKey }: { metricKey: string }) {
   const info = metricInfoFor(metricKey);
   const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLSpanElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
 
   useEffect(() => {
     if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         setOpen(false);
         buttonRef.current?.focus();
       }
     }
+    document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, [open]);
 
   if (!info) return null;
 
   return (
-    <span className="relative inline-block">
-      <button
+    <span ref={containerRef} className="relative inline-block">
+      <Button
         ref={buttonRef}
-        type="button"
+        size="sm"
         aria-expanded={open}
         aria-controls={popoverId}
         aria-label={strings.metricTile.infoButtonLabel(info.label)}
         onClick={() => setOpen((prev) => !prev)}
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline text-[10px] font-semibold text-ink-muted hover:text-ink hover:border-strong"
+        className="h-5 min-h-0 w-5 shrink-0 rounded-full px-0 py-0 text-[10px] font-semibold text-ink-muted hover:border-strong hover:text-ink"
       >
         ?
-      </button>
+      </Button>
       {open && <MetricInfoPopover id={popoverId} info={info} />}
     </span>
   );
@@ -172,11 +183,11 @@ export interface MetricTileProps {
   sublabel?: string;
   /**
    * When provided, the whole tile becomes a clickable/focusable drill-down
-   * target (PLAN.md Phase 15, Fix 13) -- e.g. HomeTab wires this to switch
-   * the dashboard to the tab that has the fuller picture for this metric.
-   * Rendered as `role="button"` on the tile's own container rather than a
-   * real `<button>`, because the tile already nests the info-popover
-   * `<button>` and interactive controls cannot nest in valid HTML.
+   * target (PLAN.md Phase 15, Fix 13) -- e.g. Overview/CashFlow/Budget tabs
+   * wire this to switch the dashboard to the tab that has the fuller picture
+   * for this metric. Rendered as `role="button"` on the tile's own container
+   * rather than a real `<button>`, because the tile already nests the
+   * info-popover `<button>` and interactive controls cannot nest in valid HTML.
    */
   onDrillDown?: () => void;
 }
@@ -241,7 +252,9 @@ export function MetricTile({
             <DeltaBadge metricKey={metricKey} metric={metric} />
             {showComparison && (
               <p className="text-xs text-ink-muted">
-                {strings.metricTile.baselineComparison(metric.delta_pct as number, metric.baseline_months)}
+                {metric.comparison_kind === 'last_period'
+                  ? strings.metricTile.baselineComparisonLastPeriod(metric.delta_pct as number)
+                  : strings.metricTile.baselineComparison(metric.delta_pct as number, metric.baseline_months)}
               </p>
             )}
           </div>

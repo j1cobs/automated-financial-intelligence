@@ -146,6 +146,46 @@ describe('FilterBar', () => {
     expect(moreButton).toHaveAttribute('aria-expanded', 'false');
     expect(moreButton).toHaveFocus();
   });
+
+  it('More filters popover closes when clicking outside it', async () => {
+    const user = userEvent.setup();
+    renderFilterBar();
+
+    const moreButton = screen.getByRole('button', { name: 'More filters' });
+    await user.click(moreButton);
+    expect(screen.getByRole('dialog', { name: 'More filters' })).toBeInTheDocument();
+
+    // Anywhere outside the popover's own container.
+    await user.click(screen.getByLabelText('Period'));
+
+    expect(screen.queryByRole('dialog', { name: 'More filters' })).not.toBeInTheDocument();
+    expect(moreButton).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('More filters popover stays open when clicking inside it', async () => {
+    const user = userEvent.setup();
+    renderFilterBar();
+
+    await user.click(screen.getByRole('button', { name: 'More filters' }));
+    const dialog = screen.getByRole('dialog', { name: 'More filters' });
+
+    await user.click(within(dialog).getByLabelText('Description search'));
+
+    expect(screen.getByRole('dialog', { name: 'More filters' })).toBeInTheDocument();
+  });
+
+  // Regression: the controls row and the chip row each rendered a "Clear all"
+  // under the same condition, so both were on screen at once on desktop.
+  it('renders exactly one "Clear all" while filters are active', async () => {
+    const user = userEvent.setup();
+    renderFilterBar();
+
+    expect(screen.queryAllByRole('button', { name: /clear all/i })).toHaveLength(0);
+
+    await user.selectOptions(screen.getByLabelText('Period'), 'last_30_days');
+
+    expect(screen.getAllByRole('button', { name: /clear all/i })).toHaveLength(1);
+  });
 });
 
 afterEach(() => {

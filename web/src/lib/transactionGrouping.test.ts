@@ -11,8 +11,16 @@ function tx(overrides: Partial<LedgerItem>): LedgerItem {
     description: 'Unnamed',
     amount: 0,
     category: null,
+    tx_type: 'expense',
     is_recurring: false,
     is_duplicate: false,
+    pfc_detailed: null,
+    category_source: null,
+    linked_transaction_hash: null,
+
+    stream_id: null,
+
+    stream_description: null,
     ...overrides,
   };
 }

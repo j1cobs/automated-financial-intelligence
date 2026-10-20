@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
@@ -108,6 +109,27 @@ def _acct_df() -> pd.DataFrame:
     )
 
 
+@contextmanager
+def _patch_dataload_reads(tx_df=None, acct_df=None):
+    """Patch both reads `load_frames()` performs: `load_financial_data` (the frozen
+    Streamlit loader) and `DatabaseClient.get_transaction_pfc_details`/`get_transaction_links`
+    (added alongside it, without touching the frozen loader -- see api/dataload.py's module
+    docstring). Yields the `load_financial_data` mock. Defaults the two DatabaseClient reads
+    to empty mappings so tests that don't care about pfc_detailed/category_source/
+    linked_transaction_hash aren't forced to mock them."""
+    with patch(
+        "api.dataload.load_financial_data",
+        return_value=(
+            tx_df if tx_df is not None else _tx_df(),
+            acct_df if acct_df is not None else _acct_df(),
+        ),
+    ) as loader:
+        with patch("api.dataload.DatabaseClient") as mock_db_class:
+            mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+            mock_db_class.return_value.get_transaction_links.return_value = {}
+            yield loader
+
+
 class ApiDataTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # The frame cache is process-global; without this, one test's fixture leaks into
@@ -118,6 +140,12 @@ class ApiDataTestCase(unittest.TestCase):
         self.mock_db.database_url = self.settings.database_url
         self.mock_db.get_categories.return_value = ["Groceries", "Income", "Shopping"]
         self.mock_db.get_budgets.return_value = [{"category": "Shopping", "monthly_limit": 200.0}]
+        # Phase 28: the budget path reads per-month caps. The legacy flat
+        # `budgets` table is left to the frozen Streamlit dashboard, which owns
+        # both reading and writing it.
+        self.mock_db.get_budget_periods.return_value = [
+            {"category": "Shopping", "period": "2020-01", "monthly_limit": 200.0}
+        ]
         self.mock_db.get_net_worth_history.return_value = []
         self.mock_db.get_transaction_merchant_fields.return_value = ("Weird Purchase", "Weird Purchase")
         self.mock_db.update_transaction_category.return_value = 0
@@ -147,20 +175,16 @@ class ApiDataTestCase(unittest.TestCase):
         return self.client
 
     def _load_financial_data_patch(self, tx_df=None, acct_df=None):
-        return patch(
-            # Patched where it is USED, not where it was defined: the loader moved
-            # behind `api/dataload.py`'s TTL cache.
-            "api.dataload.load_financial_data",
-            return_value=(
-                tx_df if tx_df is not None else _tx_df(),
-                acct_df if acct_df is not None else _acct_df(),
-            ),
-        )
+        # Patched where it is USED, not where it was defined: the loader moved behind
+        # `api/dataload.py`'s TTL cache. Also patches `DatabaseClient` there, since
+        # `load_frames()` additionally calls `DatabaseClient.get_transaction_pfc_details()`
+        # (added alongside the frozen loader, not inside it) -- without this, these tests
+        # would attempt a real DB connection for that one extra read.
+        return _patch_dataload_reads(tx_df=tx_df, acct_df=acct_df)
 
 
 READ_ENDPOINTS = [
     "/overview",
-    "/home",
     "/cash-flow",
     "/budget",
     "/ledger",
@@ -175,6 +199,8 @@ WRITE_ENDPOINTS = [
     ("patch", "/transactions/hash-2/category", {"category": "Groceries"}),
     ("patch", "/transactions/hash-2/recurring", {"recurring": True}),
     ("patch", "/transactions/hash-2/duplicate", {"duplicate": True}),
+    ("post", "/transactions/hash-2/link", {"other_hash": "hash-1"}),
+    ("delete", "/transactions/hash-2/link", None),
 ]
 
 
@@ -189,7 +215,8 @@ class UnauthenticatedTests(ApiDataTestCase):
     def test_write_endpoints_require_auth(self) -> None:
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
-                response = getattr(self.client, method)(path, json=body)
+                kwargs = {"json": body} if body is not None else {}
+                response = getattr(self.client, method)(path, **kwargs)
                 self.assertEqual(response.status_code, 401)
 
 
@@ -198,15 +225,17 @@ class CsrfTests(ApiDataTestCase):
         self._authed_client()
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
-                response = getattr(self.client, method)(path, json=body)
+                kwargs = {"json": body} if body is not None else {}
+                response = getattr(self.client, method)(path, **kwargs)
                 self.assertEqual(response.status_code, 403)
 
     def test_wrong_csrf_header_returns_403(self) -> None:
         self._authed_client()
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
+                kwargs = {"json": body} if body is not None else {}
                 response = getattr(self.client, method)(
-                    path, json=body, headers={"X-CSRF-Token": "not-the-right-token"}
+                    path, headers={"X-CSRF-Token": "not-the-right-token"}, **kwargs
                 )
                 self.assertEqual(response.status_code, 403)
 
@@ -214,8 +243,9 @@ class CsrfTests(ApiDataTestCase):
         self._authed_client()
         for method, path, body in WRITE_ENDPOINTS:
             with self.subTest(path=path):
+                kwargs = {"json": body} if body is not None else {}
                 response = getattr(self.client, method)(
-                    path, json=body, headers={"X-CSRF-Token": "csrf-token-value"}
+                    path, headers={"X-CSRF-Token": "csrf-token-value"}, **kwargs
                 )
                 # The category endpoint returns 200 + {"backfilled_count": ...} (Phase 18);
                 # every other write endpoint is still a bare 204.
@@ -242,12 +272,64 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         self.assertEqual(response.status_code, 204)
         self.mock_db.set_manual_credit_limit.assert_called_once_with("plaid:acc1", None)
 
-    def test_budget_calls_upsert_budget(self) -> None:
+    def test_dismissing_an_anomaly_is_period_scoped(self) -> None:
+        """Dismissing September's drift must not silence October's, so the
+        period is part of what gets recorded."""
+        response = self.client.post(
+            "/anomalies/dismiss",
+            json={"kind": "category_drift", "subject": "FOOD_AND_DRINK", "period": "2026-09"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.dismiss_anomaly.assert_called_once_with("category_drift", "FOOD_AND_DRINK", "2026-09")
+
+    def test_restoring_an_anomaly_undoes_the_dismissal(self) -> None:
+        response = self.client.post(
+            "/anomalies/restore",
+            json={"kind": "category_drift", "subject": "FOOD_AND_DRINK", "period": "2026-09"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.restore_anomaly.assert_called_once_with("category_drift", "FOOD_AND_DRINK", "2026-09")
+
+    def test_budget_write_targets_the_given_month(self) -> None:
+        response = self.client.put(
+            "/budgets/Shopping",
+            json={"monthly_limit": 300.0, "month": "2026-10"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.upsert_budget_period.assert_called_once_with("Shopping", "2026-10", 300.0)
+
+    def test_budget_write_defaults_to_the_current_month(self) -> None:
+        """Never "all months" -- that is the flat-table behaviour Phase 28 replaced."""
+        from datetime import date
+
         response = self.client.put(
             "/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers()
         )
         self.assertEqual(response.status_code, 204)
-        self.mock_db.upsert_budget.assert_called_once_with("Shopping", 300.0)
+        self.mock_db.upsert_budget_period.assert_called_once_with(
+            "Shopping", date.today().strftime("%Y-%m"), 300.0
+        )
+
+    def test_budget_write_never_touches_the_legacy_table(self) -> None:
+        self.client.put("/budgets/Shopping", json={"monthly_limit": 300.0}, headers=self._headers())
+        self.mock_db.upsert_budget.assert_not_called()
+
+    def test_budget_delete_clears_one_month(self) -> None:
+        response = self.client.request("DELETE", "/budgets/Shopping?month=2026-10", headers=self._headers())
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.delete_budget_period.assert_called_once_with("Shopping", "2026-10")
+
+    def test_budget_write_rejects_a_malformed_period(self) -> None:
+        response = self.client.put(
+            "/budgets/Shopping",
+            json={"monthly_limit": 300.0, "month": "October"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 422)
+        self.mock_db.upsert_budget_period.assert_not_called()
 
     def test_category_calls_update_transaction_category(self) -> None:
         # get_transaction_merchant_fields default (set in setUp) is
@@ -256,13 +338,26 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
 
         expected_key = merchant_key("Weird Purchase", "Weird Purchase")
 
+        # Phase 28c: a legacy name is accepted and stored in canonical form
+        # rather than written through verbatim, so the category set stays closed.
         response = self.client.patch(
             "/transactions/hash-2/category", json={"category": "Groceries"}, headers=self._headers()
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"backfilled_count": 0})
         self.mock_db.get_transaction_merchant_fields.assert_called_once_with("hash-2")
-        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "Groceries", expected_key)
+        self.mock_db.update_transaction_category.assert_called_once_with(
+            "hash-2", "FOOD_AND_DRINK", expected_key
+        )
+
+    def test_category_rejects_unmappable_free_text(self) -> None:
+        response = self.client.patch(
+            "/transactions/hash-2/category",
+            json={"category": "Alexie phone"},
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 422)
+        self.mock_db.update_transaction_category.assert_not_called()
 
     def test_category_endpoint_computes_merchant_key_and_returns_backfilled_count(self) -> None:
         """End-to-end (mocked DB) check of the endpoint's own composition: it fetches
@@ -295,7 +390,7 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "Groceries", None)
+        self.mock_db.update_transaction_category.assert_called_once_with("hash-2", "FOOD_AND_DRINK", None)
 
     def test_recurring_calls_update_transaction_recurring(self) -> None:
         response = self.client.patch(
@@ -310,6 +405,38 @@ class WriteEndpointDbCallTests(ApiDataTestCase):
         )
         self.assertEqual(response.status_code, 204)
         self.mock_db.update_transaction_duplicate.assert_called_once_with("hash-2", True)
+
+    def test_link_calls_link_transactions_and_invalidates_cache(self) -> None:
+        response = self.client.post(
+            "/transactions/hash-2/link", json={"other_hash": "hash-1"}, headers=self._headers()
+        )
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.link_transactions.assert_called_once_with("hash-2", "hash-1")
+
+    def test_link_returns_400_on_value_error(self) -> None:
+        """POST /transactions/{hash}/link returns 400 with error message when
+        db.link_transactions raises ValueError."""
+        self.mock_db.link_transactions.side_effect = ValueError("Cannot link a transaction to itself.")
+        response = self.client.post(
+            "/transactions/hash-2/link", json={"other_hash": "hash-2"}, headers=self._headers()
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Cannot link a transaction to itself", response.json()["detail"])
+
+    def test_link_error_does_not_invalidate_cache(self) -> None:
+        """When db.link_transactions raises ValueError, cache should not be invalidated."""
+        with patch("api.routers.data.invalidate_cache") as mock_invalidate:
+            self.mock_db.link_transactions.side_effect = ValueError("already linked")
+            response = self.client.post(
+                "/transactions/hash-2/link", json={"other_hash": "hash-3"}, headers=self._headers()
+            )
+            self.assertEqual(response.status_code, 400)
+            mock_invalidate.assert_not_called()
+
+    def test_unlink_calls_unlink_transaction_and_invalidates_cache(self) -> None:
+        response = self.client.delete("/transactions/hash-2/link", headers=self._headers())
+        self.assertEqual(response.status_code, 204)
+        self.mock_db.unlink_transaction.assert_called_once_with("hash-2")
 
 
 class ReadEndpointShapeTests(ApiDataTestCase):
@@ -328,28 +455,53 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         self.assertEqual(body["overview"]["income"], 1000.0)
         self.assertEqual(body["overview"]["flagged_count"], 1)
 
-    def test_home_shape_and_net_worth_history_passthrough(self) -> None:
+    def test_overview_carries_former_home_shape_and_net_worth_history_passthrough(self) -> None:
+        """Phase 23 folded the former /home endpoint's insights into /overview."""
         self._authed_client()
         self.mock_db.get_net_worth_history.return_value = [
-            {"date": "2026-08-23", "net_worth": 900.0},
-            {"date": "2026-08-24", "net_worth": 1000.0},
+            {
+                "date": "2026-08-23",
+                "net_worth": 900.0,
+                "assets": 900.0,
+                "liabilities": 0.0,
+                "liquid_cash": 900.0,
+            },
+            {
+                "date": "2026-08-24",
+                "net_worth": 1000.0,
+                "assets": 1000.0,
+                "liabilities": 0.0,
+                "liquid_cash": 1000.0,
+            },
         ]
         with self._load_financial_data_patch():
-            response = self.client.get("/home")
+            response = self.client.get("/overview")
         self.assertEqual(response.status_code, 200)
-        body = response.json()
+        overview = response.json()["overview"]
         self.assertEqual(
-            body["net_worth_trend"],
+            overview["net_worth_trend_daily"],
             [
-                {"date": "2026-08-23", "net_worth": 900.0},
-                {"date": "2026-08-24", "net_worth": 1000.0},
+                {
+                    "date": "2026-08-23",
+                    "net_worth": 900.0,
+                    "assets": 900.0,
+                    "liabilities": 0.0,
+                    "liquid_cash": 900.0,
+                },
+                {
+                    "date": "2026-08-24",
+                    "net_worth": 1000.0,
+                    "assets": 1000.0,
+                    "liabilities": 0.0,
+                    "liquid_cash": 1000.0,
+                },
             ],
         )
         # hash-1 is flagged is_recurring=True in _tx_df but is an income row, so it
         # must not show up as a recurring EXPENSE.
-        self.assertEqual(body["recurring_items"], [])
-        for key in ("top_merchants", "category_drift", "subscriptions"):
-            self.assertIn(key, body)
+        self.assertEqual(overview["recurring_items"], [])
+        for key in ("top_merchants", "net_worth_trend_monthly", "net_worth_mom_delta", "upcoming_recurring"):
+            self.assertIn(key, overview)
 
     def test_cash_flow_shape(self) -> None:
         self._authed_client()
@@ -360,16 +512,31 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         self.assertEqual(body["income"], 1000.0)
         self.assertEqual(body["flagged_count"], 1)
 
-    def test_budget_shape_uses_get_budgets(self) -> None:
+    def test_budget_shape_uses_get_budget_periods(self) -> None:
         self._authed_client()
         with self._load_financial_data_patch():
             response = self.client.get("/budget")
         self.assertEqual(response.status_code, 200)
-        self.mock_db.get_budgets.assert_called()
+        self.mock_db.get_budget_periods.assert_called()
         body = response.json()
         cats = {item["category"]: item for item in body["items"]}
         self.assertIn("Shopping", cats)
         self.assertEqual(cats["Shopping"]["limit"], 200.0)
+        # Set in 2020-01 and read for a later month, so it is inherited.
+        self.assertTrue(cats["Shopping"]["is_inherited"])
+        self.assertEqual(cats["Shopping"]["inherited_from"], "2020-01")
+
+    def test_budget_never_reads_the_streamlit_owned_legacy_table(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            self.client.get("/budget")
+        self.mock_db.get_budgets.assert_not_called()
+
+    def test_budget_rejects_a_malformed_period(self) -> None:
+        self._authed_client()
+        with self._load_financial_data_patch():
+            response = self.client.get("/budget?month=2026-9")
+        self.assertEqual(response.status_code, 422)
 
     def test_ledger_includes_hash_and_all_rows(self) -> None:
         self._authed_client()
@@ -380,14 +547,58 @@ class ReadEndpointShapeTests(ApiDataTestCase):
         hashes = {tx["hash"] for tx in body["transactions"]}
         self.assertEqual(hashes, {"hash-1", "hash-2"})
 
-    def test_anomalies_only_includes_outliers(self) -> None:
+    def test_ledger_response_includes_linked_transaction_hash(self) -> None:
+        """Regression test: `linked_transaction_hash` was added to `build_ledger()`'s output
+        dict but not to the `LedgerItem` Pydantic model, so Pydantic silently dropped it from
+        every real HTTP response even though the DB/analytics-netting path was correct. This
+        does a real round-trip through the endpoint (not just `build_ledger()` directly) so a
+        field present in the dict but missing from the response model fails loudly here."""
         self._authed_client()
-        with self._load_financial_data_patch():
-            response = self.client.get("/anomalies")
+        with patch(
+            "api.dataload.load_financial_data",
+            return_value=(_tx_df(), _acct_df()),
+        ):
+            with patch("api.dataload.DatabaseClient") as mock_db_class:
+                mock_db_class.return_value.get_transaction_pfc_details.return_value = {}
+                mock_db_class.return_value.get_transaction_links.return_value = {
+                    "hash-1": "hash-2",
+                    "hash-2": "hash-1",
+                }
+                response = self.client.get("/ledger")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        by_hash = {tx["hash"]: tx for tx in body["transactions"]}
+        self.assertIn("linked_transaction_hash", by_hash["hash-1"])
+        self.assertEqual(by_hash["hash-1"]["linked_transaction_hash"], "hash-2")
+        self.assertEqual(by_hash["hash-2"]["linked_transaction_hash"], "hash-1")
+
+    def test_anomalies_reads_the_anomalies_table(self) -> None:
+        """Phase 34: an anomaly is per-category-per-month or per-stream and
+        carries its own explanation, not a per-transaction outlier score."""
+        self._authed_client()
+        self.mock_db.get_anomalies.return_value = [
+            {
+                "kind": "category_drift",
+                "subject": "FOOD_AND_DRINK",
+                "period": "2026-09",
+                "severity": "medium",
+                "explanation": "FOOD_AND_DRINK is $800.00 so far, 300% above your usual $200.00.",
+                "detected_at": "2026-09-09T00:00:00+00:00",
+            }
+        ]
+
+        response = self.client.get("/anomalies")
+
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(len(body["anomalies"]), 1)
-        self.assertEqual(body["anomalies"][0]["description"], "Weird Purchase")
+        self.assertEqual(body["anomalies"][0]["subject"], "FOOD_AND_DRINK")
+        self.assertIn("above your usual", body["anomalies"][0]["explanation"])
+
+    def test_anomalies_rejects_a_malformed_month(self) -> None:
+        self._authed_client()
+        response = self.client.get("/anomalies?month=September")
+        self.assertEqual(response.status_code, 422)
 
     def test_categories_is_thin_wrapper(self) -> None:
         self._authed_client()

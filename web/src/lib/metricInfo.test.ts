@@ -3,8 +3,8 @@ import { METRIC_INFO, metricInfoFor } from './metricInfo';
 
 /**
  * The full set of metric keys actually rendered by `OverviewTab`,
- * `CashFlowTab`, and `HomeTab` (PLAN.md Phase 15, Fix 13). Kept as an explicit
- * manifest, not derived by scanning the components, so this test
+ * `CashFlowTab`, and `BudgetTab` (PLAN.md Phase 15, Fix 13). Kept as an
+ * explicit manifest, not derived by scanning the components, so this test
  * independently pins the contract: every key here must resolve, and
  * `METRIC_INFO` must carry no orphan entries beyond it.
  */
@@ -24,6 +24,7 @@ const RENDERED_METRIC_KEYS = [
   'emergency_fund_months',
   'flagged_count',
   'transfer_count',
+  'reimbursed',
   'recurring_monthly_spend',
   'projected_month_end_expenses',
 ] as const;

@@ -20,13 +20,16 @@
 
 import { useMemo, useState } from 'react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
-import { useBudget, useCategories, useCashFlow } from '../lib/queries';
+import { useBudget, useCategories, useCashFlow, useAnomalies } from '../lib/queries';
 import { useUpsertBudget } from '../lib/mutations';
 import type { BudgetItem } from '../lib/types';
 import { LINE_PROPS, inkMutedColor, negativeColor, useChartTheme } from './chartTheme';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { DIRECTION_GLYPH, type Tone } from '../lib/polarity';
 import { formatCategory } from '../lib/categories';
+import { Button } from '../components/Button';
+import { GoalsSection } from './GoalsSection';
+import { ForecastChart } from './ForecastChart';
 
 /** How many trailing months the per-category sparkline shows. */
 const SPARKLINE_MONTHS = 6;
@@ -41,29 +44,65 @@ function money(value: number): string {
 }
 
 /** A category with no API row yet (no spend, no limit) — still offered for editing. */
-function emptyItem(category: string, isCurrentMonth: boolean): BudgetItem {
+function emptyItem(category: string, isCurrentMonth: boolean, period: string | null): BudgetItem {
   return {
     category,
     spent: 0,
+    // `null`, not 0: this category has no budget set, which is a different
+    // state from being budgeted to spend nothing.
     limit: null,
     pct: null,
     is_over_budget: false,
     projected_eom: null,
     is_current_month: isCurrentMonth,
+    period,
+    is_inherited: false,
+    inherited_from: null,
+
+    details: [],
   };
 }
 
+/** 'YYYY-MM' for the current calendar month, in local time. */
+function currentMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Step a 'YYYY-MM' key by whole months, wrapping across the year boundary. */
+function shiftMonth(key: string, delta: number): string {
+  const [year, month] = key.split('-').map(Number);
+  // Month is 0-indexed here, so `month - 1 + delta` lets Date normalise the
+  // year rollover for us rather than doing modular arithmetic by hand.
+  const shifted = new Date(year, month - 1 + delta, 1);
+  return `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function formatMonth(key: string): string {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
 export function BudgetTab() {
-  const { data, isPending, error, refetch } = useBudget();
+  const [month, setMonth] = useState<string>(currentMonthKey);
+  const { data, isPending, error, refetch } = useBudget(month);
+  // Phase 34: category drift is shown on the Budget row it concerns, next to
+  // the cap it is about, rather than only on a separate surface.
+  const { data: anomalyData } = useAnomalies(month);
   const { data: categoriesData } = useCategories();
   const { data: cashFlow } = useCashFlow();
   const upsertMutation = useUpsertBudget();
   const [editingCategory, setEditingCategory] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Record<string, number>>({});
+  const [expanded, setExpanded] = useState<string | null>(null);
   useChartTheme(); // re-render sparklines when the theme flips
 
   const budgetItems = useMemo(() => data?.items ?? [], [data]);
   const isCurrentMonth = budgetItems[0]?.is_current_month ?? false;
+  const period = data?.month ?? null;
 
   // Canonical categories (GET /categories) ∪ whatever the budget response already
   // covers — a defensive union in case a category with a stored budget limit was
@@ -74,8 +113,16 @@ export function BudgetTab() {
     const names = new Set<string>([...(categoriesData?.categories ?? []), ...byCategory.keys()]);
     return Array.from(names)
       .sort((a, b) => a.localeCompare(b))
-      .map((cat) => byCategory.get(cat) ?? emptyItem(cat, isCurrentMonth));
-  }, [budgetItems, categoriesData, isCurrentMonth]);
+      .map((cat) => byCategory.get(cat) ?? emptyItem(cat, isCurrentMonth, period));
+  }, [budgetItems, categoriesData, isCurrentMonth, period]);
+
+  const driftByCategory = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const anomaly of anomalyData?.anomalies ?? []) {
+      if (anomaly.kind === 'category_drift') map.set(anomaly.subject, anomaly.explanation);
+    }
+    return map;
+  }, [anomalyData]);
 
   const trendByCategory = useMemo(() => {
     const map = new Map<string, { month: string; amount: number }[]>();
@@ -110,7 +157,9 @@ export function BudgetTab() {
     const newLimit = editValues[category];
     if (newLimit !== undefined) {
       try {
-        await upsertMutation.mutateAsync({ category, monthlyLimit: newLimit });
+        // Always names the displayed month: editing an inherited cap writes an
+        // explicit row here and leaves every other month alone.
+        await upsertMutation.mutateAsync({ category, monthlyLimit: newLimit, month });
         setEditingCategory(null);
         setEditValues({});
       } catch (err) {
@@ -126,10 +175,39 @@ export function BudgetTab() {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div>
-        <h2 className="text-base sm:text-lg font-semibold text-ink">Budget</h2>
-        {data?.month && <p className="text-xs sm:text-sm text-ink-muted mt-1">{data.month}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base sm:text-lg font-semibold text-ink">Budget</h2>
+          <p className="mt-1 text-xs text-ink-muted sm:text-sm">{formatMonth(month)}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => setMonth((current) => shiftMonth(current, -1))}
+            aria-label="Previous month"
+          >
+            Previous
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setMonth(currentMonthKey())}
+            disabled={month === currentMonthKey()}
+          >
+            This month
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setMonth((current) => shiftMonth(current, 1))}
+            aria-label="Next month"
+          >
+            Next
+          </Button>
+        </div>
       </div>
+
+      <ForecastChart />
+
+      <GoalsSection />
 
       {allItems.length === 0 ? (
         <div className="rounded-md bg-surface-2 p-6 text-center text-ink-muted">
@@ -149,6 +227,11 @@ export function BudgetTab() {
               onSave={() => handleSave(item.category)}
               onCancel={handleCancel}
               onValueChange={(value) => setEditValues({ ...editValues, [item.category]: value })}
+              drift={driftByCategory.get(item.category) ?? null}
+              isExpanded={expanded === item.category}
+              onToggleExpand={() =>
+                setExpanded((current) => (current === item.category ? null : item.category))
+              }
             />
           ))}
         </div>
@@ -167,6 +250,10 @@ interface BudgetItemRowProps {
   onSave: () => void;
   onCancel: () => void;
   onValueChange: (value: number) => void;
+  /** The drift explanation for this category this month, if any. */
+  drift: string | null;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
 }
 
 /** Status badge — glyph + label, never colour alone (see `DIRECTION_GLYPH` / polarity.ts). */
@@ -190,6 +277,9 @@ function BudgetItemRow({
   onSave,
   onCancel,
   onValueChange,
+  drift,
+  isExpanded,
+  onToggleExpand,
 }: BudgetItemRowProps) {
   const progressPercent = item.pct != null ? Math.min(item.pct * 100, 100) : 0;
   const isOver = item.is_over_budget;
@@ -248,6 +338,43 @@ function BudgetItemRow({
             ) : (
               !item.is_current_month && <span className="text-ink-muted"> · Actual: {money(item.spent)}</span>
             )}
+            {/* An inherited cap was never set for this month -- say so, and say
+                where it came from, rather than presenting it as a decision made
+                here. Editing it writes an explicit row for this month only. */}
+            {item.is_inherited && item.inherited_from && (
+              <span className="text-ink-muted"> · inherited from {formatMonth(item.inherited_from)}</span>
+            )}
+          </div>
+        )}
+
+        {drift && !isEditing && <p className="mt-1 text-xs text-neg-text">{drift}</p>}
+
+        {item.details.length > 0 && !isEditing && (
+          <div className="mt-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onToggleExpand}
+              aria-expanded={isExpanded}
+              className="min-h-0 px-0 py-0"
+            >
+              {isExpanded ? 'Hide breakdown' : `Breakdown (${item.details.length})`}
+            </Button>
+            {isExpanded && (
+              <ul className="mt-1 space-y-0.5 border-l border-hairline pl-3">
+                {item.details.map((detail) => (
+                  <li
+                    key={detail.pfc_detailed ?? '__none__'}
+                    className="flex justify-between gap-4 text-xs text-ink-secondary tabular-nums"
+                  >
+                    <span className="truncate">
+                      {detail.pfc_detailed ? formatCategory(detail.pfc_detailed) : 'Unspecified'}
+                    </span>
+                    <span className="shrink-0">{money(detail.amount)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </div>
@@ -280,28 +407,17 @@ function BudgetItemRow({
       <div className="flex gap-2 sm:w-auto">
         {isEditing ? (
           <>
-            <button
-              onClick={onSave}
-              disabled={isLoading}
-              className="flex-1 sm:flex-auto px-3 py-2 bg-cat-1 text-white text-xs sm:text-sm rounded-md hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity min-h-9 font-medium"
-            >
+            <Button variant="primary" onClick={onSave} disabled={isLoading} className="flex-1 sm:flex-auto">
               {isLoading ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              onClick={onCancel}
-              disabled={isLoading}
-              className="flex-1 sm:flex-auto px-3 py-2 bg-surface-3 text-ink text-xs sm:text-sm rounded-md hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors min-h-9 font-medium"
-            >
+            </Button>
+            <Button onClick={onCancel} disabled={isLoading} className="flex-1 bg-surface-3 sm:flex-auto">
               Cancel
-            </button>
+            </Button>
           </>
         ) : (
-          <button
-            onClick={onEdit}
-            className="flex-1 sm:flex-auto px-3 py-2 bg-surface-3 text-ink text-xs sm:text-sm rounded-md hover:bg-surface-2 transition-colors min-h-9 font-medium"
-          >
+          <Button onClick={onEdit} className="flex-1 bg-surface-3 sm:flex-auto">
             Edit
-          </button>
+          </Button>
         )}
       </div>
     </div>

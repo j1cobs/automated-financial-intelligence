@@ -17,6 +17,7 @@ import { useFilters } from '../lib/FilterContext';
 import { useFilterOptions } from '../lib/queries';
 import { activeFilterChips, countActiveFilters, PERIOD_LABELS, type PeriodPreset } from '../lib/filters';
 import { MultiSelectPopover } from './MultiSelectPopover';
+import { Button } from '../components/Button';
 import type { FilterOptions } from '../lib/types';
 import { formatCategory } from '../lib/categories';
 
@@ -58,6 +59,7 @@ export function FilterBar() {
   const [morePopoverOpen, setMorePopoverOpen] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const moreContainerRef = useRef<HTMLDivElement>(null);
 
   // Debounce the free-text search so typing doesn't fire a request per keystroke.
   useEffect(() => {
@@ -71,6 +73,10 @@ export function FilterBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchDraft]);
 
+  // Escape *and* outside-click dismissal, the same `containerRef`-scoped
+  // `mousedown` pattern `MultiSelectPopover` uses (and that Phase 25 ported to
+  // `MetricInfoBadge`). Escape alone left the popover stuck open for anyone who
+  // dismisses a popover by clicking away from it, which is most people.
   useEffect(() => {
     if (!morePopoverOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -79,8 +85,17 @@ export function FilterBar() {
         moreButtonRef.current?.focus();
       }
     };
+    const onPointerDown = (event: MouseEvent) => {
+      if (moreContainerRef.current && !moreContainerRef.current.contains(event.target as Node)) {
+        setMorePopoverOpen(false);
+      }
+    };
     document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
   }, [morePopoverOpen]);
 
   useEffect(() => {
@@ -227,9 +242,19 @@ export function FilterBar() {
             type="checkbox"
             checked={filters.duplicates_only}
             onChange={(event) => patchFilters({ duplicates_only: event.target.checked })}
-            className="h-4 w-4"
+            className="h-4 w-4 cursor-pointer"
           />
           Possible duplicates only
+        </label>
+
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <input
+            type="checkbox"
+            checked={filters.recurring_only}
+            onChange={(event) => patchFilters({ recurring_only: event.target.checked })}
+            className="h-4 w-4 cursor-pointer"
+          />
+          Recurring only
         </label>
       </div>
     );
@@ -241,17 +266,15 @@ export function FilterBar() {
       <div className="hidden flex-wrap items-end gap-3 sm:flex">
         {renderCoreControls('desktop')}
 
-        <div className="relative">
-          <button
+        <div className="relative" ref={moreContainerRef}>
+          <Button
             ref={moreButtonRef}
-            type="button"
             aria-expanded={morePopoverOpen}
             aria-haspopup="dialog"
             onClick={() => setMorePopoverOpen((open) => !open)}
-            className="min-h-9 rounded-md border border-hairline bg-surface-1 px-3 py-1 text-sm font-medium text-ink hover:bg-surface-2"
           >
             More filters
-          </button>
+          </Button>
           {morePopoverOpen && (
             <div
               role="dialog"
@@ -263,28 +286,22 @@ export function FilterBar() {
           )}
         </div>
 
-        {activeCount > 0 && (
-          <button
-            type="button"
-            onClick={reset}
-            className="min-h-9 rounded-md px-3 py-1 text-sm font-medium text-neutral-text hover:bg-surface-2"
-          >
-            Clear all
-          </button>
-        )}
+        {/* No "Clear all" here: the chip row below renders one under exactly
+            the same condition (`activeFilterChips` and `countActiveFilters`
+            agree on what counts as active), so having both meant two identical
+            buttons on screen at once. The chip-row one is kept because it sits
+            with the filters it clears. */}
       </div>
 
       {/* Mobile layout */}
       <div className="sm:hidden">
-        <button
-          type="button"
+        <Button
           aria-expanded={mobileSheetOpen}
           aria-haspopup="dialog"
           onClick={() => setMobileSheetOpen(true)}
-          className="min-h-9 rounded-md border border-hairline bg-surface-1 px-3 py-2 text-sm font-medium text-ink"
         >
           Filters{activeCount > 0 ? ` (${activeCount})` : ''}
-        </button>
+        </Button>
 
         {mobileSheetOpen && (
           <div
@@ -299,27 +316,20 @@ export function FilterBar() {
             >
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-base font-semibold text-ink">Filters</h2>
-                <button
-                  type="button"
-                  onClick={() => setMobileSheetOpen(false)}
-                  aria-label="Close filters"
-                  className="min-h-9 rounded-md px-2 text-sm font-medium text-ink-secondary hover:text-ink"
-                >
+                <Button variant="ghost" onClick={() => setMobileSheetOpen(false)} aria-label="Close filters">
                   Close
-                </button>
+                </Button>
               </div>
               <div className="flex flex-col gap-4">
                 {renderCoreControls('mobile')}
                 {renderMoreFields('mobile')}
               </div>
+              {/* This one stays: the mobile sheet hides the chip row, so it is
+                  never on screen at the same time as the chip-row "Clear all". */}
               {activeCount > 0 && (
-                <button
-                  type="button"
-                  onClick={reset}
-                  className="mt-4 min-h-9 w-full rounded-md border border-hairline px-3 py-2 text-sm font-medium text-ink"
-                >
+                <Button onClick={reset} className="mt-4 w-full">
                   Clear all
-                </button>
+                </Button>
               )}
             </div>
           </div>
@@ -330,24 +340,20 @@ export function FilterBar() {
       {chips.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {chips.map((chip) => (
-            <button
+            <Button
               key={chip.id}
-              type="button"
+              size="sm"
               onClick={() => setFilters(chip.remove(filters))}
-              className="flex items-center gap-1 rounded-full border border-hairline bg-surface-2 px-2 py-1 text-xs font-medium text-ink hover:bg-surface-3"
+              className="rounded-full bg-surface-2 hover:bg-surface-3"
             >
               {chip.label}
               <span aria-hidden="true">×</span>
               <span className="sr-only">Remove filter: {chip.label}</span>
-            </button>
+            </Button>
           ))}
-          <button
-            type="button"
-            onClick={reset}
-            className="text-xs font-medium text-ink-secondary underline hover:text-ink"
-          >
+          <Button variant="ghost" size="sm" onClick={reset} className="underline">
             Clear all
-          </button>
+          </Button>
         </div>
       )}
     </div>

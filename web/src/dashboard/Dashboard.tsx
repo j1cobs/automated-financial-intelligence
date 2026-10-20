@@ -5,7 +5,6 @@ import { FilterProvider, useFilters } from '../lib/FilterContext';
 import { formatDateRangeLabel, type DashboardFilters } from '../lib/filters';
 import { monthsCoveringRange } from '../lib/dateRanges';
 import { FilterBar } from './FilterBar';
-import { HomeTab } from './HomeTab';
 import { OverviewTab } from './OverviewTab';
 import { CashFlowTab } from './CashFlowTab';
 import { BudgetTab } from './BudgetTab';
@@ -13,7 +12,6 @@ import { TransactionsTab } from './TransactionsTab';
 import type { TabId } from './tabs';
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: 'home', label: 'Home' },
   { id: 'overview', label: 'Overview' },
   { id: 'cashflow', label: 'Cash Flow' },
   { id: 'budget', label: 'Budget' },
@@ -61,14 +59,12 @@ function ThemeToggle() {
 }
 
 /**
- * Authenticated dashboard shell: header + 5-tab layout (Home, Overview, Cash
- * Flow, Budget, Transactions). Home is the default landing tab -- a
- * daily-check-in status surface (PLAN.md §4 Q1/Q2); the other four are
- * untouched and serve as its "go deeper" drill-down layer. Tab switching is
- * local `useState` — no router, same decision R3 made for the auth flow.
- * Each tab is a self-contained component in this directory; adding another
- * tab means adding it to `TABS` and the switch below, nothing else in this
- * file needs to change per-tab.
+ * Authenticated dashboard shell: header + 4-tab layout (Overview, Cash
+ * Flow, Budget, Transactions). Overview is the default landing tab.
+ * Tab switching is local `useState` — no router, same decision R3 made for
+ * the auth flow. Each tab is a self-contained component in this directory;
+ * adding another tab means adding it to `TABS` and the switch below, nothing
+ * else in this file needs to change per-tab.
  *
  * Thin wrapper around `DashboardShell`: `<FilterProvider>` wraps what this
  * function *returns*, not its own body, so `Dashboard()` itself cannot call
@@ -97,12 +93,12 @@ interface ReturnSnapshot {
 function DashboardShell() {
   const { user } = useAuth();
   const { filters, setFilters, patchFilters } = useFilters();
-  const [activeTab, setActiveTab] = useState<TabId>('home');
+  const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [returnTo, setReturnTo] = useState<ReturnSnapshot | null>(null);
 
-  // Any manual tab change (the nav buttons, or Home's own onNavigate) clears
-  // a pending return snapshot -- otherwise a stale "Back to Cash Flow" button
-  // could linger on a tab the user reached some other way.
+  // Any manual tab change (the nav buttons) clears a pending return snapshot
+  // -- otherwise a stale "Back to Cash Flow" button could linger on a tab the
+  // user reached some other way.
   function goToTab(tab: TabId) {
     setReturnTo(null);
     setActiveTab(tab);
@@ -160,7 +156,6 @@ function DashboardShell() {
       </nav>
       <FilterBar />
       <main className="p-6">
-        {activeTab === 'home' && <HomeTab onNavigate={goToTab} />}
         {activeTab === 'overview' && <OverviewTab />}
         {activeTab === 'cashflow' && (
           <CashFlowTab onDrillDownToTransactions={handleDrillDownToTransactions} />

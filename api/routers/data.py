@@ -13,24 +13,40 @@ additionally requires `RequireCsrfDep` (api/deps.py::require_csrf).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from datetime import date
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
+from analytics.budget_periods import PERIOD_PATTERN, resolve_caps
+from analytics.categories import CANONICAL_CATEGORIES, canonicalize
 from analytics.categorizer import merchant_key
+from analytics.forecast import (
+    DEFAULT_HORIZON_MONTHS,
+    MAX_HORIZON_MONTHS,
+)
+from analytics.forecast import (
+    project as forecast_project,
+)
+from analytics.forecast import (
+    starting_balance as forecast_starting_balance,
+)
+from ingestion.plaid_ingestor import PlaidIngestor
 
 from ..dataload import invalidate as invalidate_cache
 from ..dataload import load_frames
-from ..deps import CurrentUserDep, DbDep, RequireCsrfDep
+from ..deps import CurrentUserDep, DbDep, RequireCsrfDep, SettingsDep
 from ..filters import FiltersDep, apply_filters, build_filter_options
 from ..viewmodels import (
-    build_anomalies,
     build_budget,
     build_cash_flow,
-    build_home,
+    build_goals,
     build_ledger,
     build_net_worth,
     build_overview,
     exclude_duplicate_rows,
+    net_linked_transactions,
 )
 
 router = APIRouter(tags=["data"])
@@ -130,9 +146,27 @@ class TopCategoryItem(BaseModel):
 
 
 class MonthOverMonthItem(BaseModel):
+    """Wide row: one object per category carrying both months plus the "usual" baseline
+    and drift context (Phase 23 folded the former Home tab's Category Drift card into
+    this chart's data instead of shipping it separately). The long `{category, period,
+    amount}` shape this used to be forced the frontend to pivot itself — moved
+    server-side per this module's own "series are returned wide" rule."""
+
     category: str
-    period: str
-    amount: float
+    this_month: float
+    last_month: float
+    usual: float | None
+    """The category's average monthly expense across complete months. None when there's
+    no baseline history yet for this category."""
+    this_month_drift_pct: float | None
+    """Fraction: `(this_month - usual) / usual`, using a baseline that excludes the
+    current (in-progress) month. None when `usual` isn't computable."""
+    last_month_drift_pct: float | None
+    """Fraction: `(last_month - usual) / usual`, using a baseline that additionally
+    excludes last month itself from the average (so last month is never judged against
+    a baseline partly made of itself) -- a DIFFERENT, slightly more accurate baseline
+    than the `usual` value above, computed only for this percentage. None when not
+    computable."""
 
 
 class IncomeBreakdownItem(BaseModel):
@@ -170,6 +204,10 @@ class MetricSummary(BaseModel):
     zero. Divided by the ABSOLUTE baseline so the sign always means above/below."""
     baseline_months: int
     sparkline: list[float]
+    comparison_kind: Literal["trailing_average", "last_period"]
+    """Which comparison `baseline`/`delta_pct` represent: a trailing average across
+    complete months (flows), or the value one period ago (balances). See
+    `_build_metric`/`_build_last_period_metric` in `api/viewmodels.py`."""
     """Up to the last 12 complete months of the underlying monthly series."""
 
 
@@ -192,8 +230,23 @@ class Overview(BaseModel):
     top_categories: list[TopCategoryItem]
     month_over_month: list[MonthOverMonthItem]
     emergency_fund_months: float | None
+    """Current value (liquid savings ÷ average monthly expenses), for the Emergency Fund
+    card's meter. `net_worth_trend_monthly[*].emergency_fund_months` below is the
+    historical trend version of the same idea -- the two use different baselines (this
+    one an all-time average, the trend a rolling 6-month one) so they can legitimately
+    show slightly different numbers for the current month; that's expected, not a bug."""
     income_breakdown: list[IncomeBreakdownItem]
     savings_rate_trend: list[SavingsRateTrendItem]
+    # --- Former Home tab content (Phase 23) -----------------------------------------
+    net_worth_trend_daily: list[NetWorthTrendDailyItem]
+    net_worth_trend_monthly: list[NetWorthTrendMonthlyItem]
+    net_worth_mom_delta: float | None
+    """Latest net worth minus the closest snapshot at least one calendar month prior."""
+    recurring_items: list[RecurringItem]
+    top_merchants: list[MerchantItem]
+    cash_flow_projection: CashFlowProjection | None
+    biggest_expense_this_month: BiggestExpenseItem | None
+    upcoming_recurring: list[UpcomingRecurringItem]
 
 
 class OverviewResponse(BaseModel):
@@ -247,6 +300,8 @@ class CashFlowResponse(BaseModel):
     flagged_count: int
     savings_rate: float
     """Fraction (0.6 = 60%), not percentage points."""
+    reimbursed: float
+    """Total amount netted out of expenses this period via linked reimbursement pairs."""
     month_over_month: list[CashFlowSeriesItem]
     weekly_trend: list[WeeklyTrendItem]
     rolling_30d_spend: list[RollingSpendItem]
@@ -254,14 +309,32 @@ class CashFlowResponse(BaseModel):
     category_distribution: list[CategoryDistributionItem]
 
 
+class BudgetDetail(BaseModel):
+    """One `pfc_detailed` value's spend inside a category, for the drill-down.
+    `pfc_detailed` is None for rows Plaid never gave a detail for (seed data,
+    manual corrections); those are kept rather than dropped so the parts sum to
+    the category total."""
+
+    pfc_detailed: str | None
+    amount: float
+
+
 class BudgetItem(BaseModel):
     category: str
     spent: float
+    # None means "no budget set". 0.0 means "budgeted to spend nothing" -- a
+    # real cap that any spend breaches. The UI must not collapse the two.
     limit: float | None
     pct: float | None
     is_over_budget: bool
     projected_eom: float | None
     is_current_month: bool
+    # Phase 28: which month this row describes, and whether its cap was set
+    # here or carried forward from an earlier month.
+    period: str | None
+    is_inherited: bool
+    inherited_from: str | None
+    details: list[BudgetDetail] = []
 
 
 class BudgetResponse(BaseModel):
@@ -269,10 +342,31 @@ class BudgetResponse(BaseModel):
     items: list[BudgetItem]
 
 
-class NetWorthTrendItem(BaseModel):
+class NetWorthTrendDailyItem(BaseModel):
     date: str
-    """ISO date, one snapshot per calendar day (`account_balance_snapshots`)."""
+    """ISO date, one snapshot per calendar day the pipeline actually ran
+    (`account_balance_snapshots`) -- can be sparse if the pipeline hasn't run daily."""
     net_worth: float
+    assets: float
+    liabilities: float
+    liquid_cash: float
+    """Depository-only balance -- the subset of `assets` that excludes investments."""
+
+
+class NetWorthTrendMonthlyItem(BaseModel):
+    month: str
+    """`YYYY-MM`. One row per calendar month, resampled from the last daily snapshot
+    observed in that month."""
+    net_worth: float
+    savings_rate: float | None
+    """Fraction (0.2 = 20%). None when the month's income was below the rate floor —
+    see `SavingsRateTrendItem`."""
+    credit_utilization_pct: float | None
+    """Fraction: aggregate credit balance that month ÷ today's total credit limit.
+    None when no account has a set limit."""
+    emergency_fund_months: float | None
+    """Liquid cash that month ÷ a trailing 6-month average expense as of that month.
+    None until at least one month of expense history exists."""
 
 
 class RecurringItem(BaseModel):
@@ -295,22 +389,6 @@ class CashFlowProjection(BaseModel):
     days_in_month: int
 
 
-class CategoryDriftItem(BaseModel):
-    category: str
-    current: float
-    baseline: float
-    """The category's own historical average over complete months, not a budget."""
-    drift_pct: float
-    """Fraction: `(current - baseline) / baseline`. Positive = spending more than usual."""
-
-
-class SubscriptionItem(BaseModel):
-    description: str
-    average_amount: float
-    months_seen: int
-    """Out of the trailing 6 months."""
-
-
 class BiggestExpenseItem(BaseModel):
     description: str
     amount: float
@@ -321,22 +399,15 @@ class UpcomingRecurringItem(BaseModel):
     description: str
     amount: float
     next_expected_date: str
-    """A projection (last occurrence + median inter-occurrence interval), not a
-    confirmed billing date -- the frontend hedges its copy accordingly."""
-    typical_interval_days: int
-
-
-class HomeResponse(BaseModel):
-    net_worth_trend: list[NetWorthTrendItem]
-    net_worth_mom_delta: float | None
-    recurring_monthly_spend: float
-    recurring_items: list[RecurringItem]
-    top_merchants: list[MerchantItem]
-    biggest_expense_this_month: BiggestExpenseItem | None
-    cash_flow_projection: CashFlowProjection | None
-    category_drift: list[CategoryDriftItem]
-    subscriptions: list[SubscriptionItem]
-    upcoming_recurring: list[UpcomingRecurringItem]
+    """A projection (a detected stream's predicted next date, or -- with no
+    streams yet -- last occurrence plus the median inter-occurrence interval),
+    not a confirmed billing date; the frontend hedges its copy accordingly."""
+    typical_interval_days: int | None = None
+    # Phase 31. `early_detection` marks a stream with fewer than three
+    # occurrences, which the UI shows as lower confidence rather than asserting
+    # it. None on the legacy median-gap fallback, which has no such notion.
+    status: str | None = None
+    stream_id: str | None = None
 
 
 class LedgerItem(BaseModel):
@@ -347,8 +418,18 @@ class LedgerItem(BaseModel):
     description: str
     amount: float
     category: str | None
+    tx_type: str
     is_recurring: bool
     is_duplicate: bool
+    pfc_detailed: str | None
+    category_source: str | None
+    linked_transaction_hash: str | None
+    # Phase 31. When set, this row belongs to a detected recurring series and
+    # its recurring control toggles the WHOLE series; when null the control is
+    # per-row. Two different consequences, so the UI must show which before the
+    # click, not after.
+    stream_id: str | None = None
+    stream_description: str | None = None
 
 
 class LedgerResponse(BaseModel):
@@ -356,17 +437,26 @@ class LedgerResponse(BaseModel):
 
 
 class AnomalyItem(BaseModel):
-    date: str
-    owner_name: str | None
-    account_name: str
-    description: str
-    amount: float
-    category: str | None
-    outlier_score: float
+    """Phase 34. Replaces the per-transaction outlier row: an anomaly is now
+    per-category-per-month (drift) or per-stream (price creep), and carries the
+    sentence it was derived from rather than an unexplainable score."""
+
+    kind: str  # category_drift | price_creep
+    subject: str  # category name, or stream_id
+    period: str  # 'YYYY-MM'
+    severity: str  # medium | high
+    explanation: str
+    detected_at: str | None = None
 
 
 class AnomaliesResponse(BaseModel):
     anomalies: list[AnomalyItem]
+
+
+class AnomalyDismissal(BaseModel):
+    kind: str
+    subject: str
+    period: str
 
 
 class CategoriesResponse(BaseModel):
@@ -403,48 +493,112 @@ def get_overview(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -
         net_worth=NetWorth(**build_net_worth(acct_df, tx)),
         overview=Overview(
             **build_overview(
-                exclude_duplicate_rows(filtered),
+                net_linked_transactions(exclude_duplicate_rows(filtered)),
                 acct_df,
-                exclude_duplicate_rows(all_time),
+                net_linked_transactions(exclude_duplicate_rows(all_time)),
+                # `all_time` (not `filtered`): every former-Home insight compares against
+                # the user's own full history, same reasoning the rest of this frame's
+                # baselines use -- a status surface that changed shape under an active
+                # period filter would defeat its own purpose (Phase 23).
+                db.get_net_worth_history(),
+                # Phase 31: detected streams drive Upcoming Recurring Charges when any
+                # exist. Each stream is already one deduplicated charge, so the card
+                # stops listing the same bill under near-identical descriptions.
+                db.get_recurring_streams(),
             )
         ),
     )
 
 
-@router.get("/home", response_model=HomeResponse)
-def get_home(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> HomeResponse:
-    # `all_time` (not `filtered`): every Home insight compares against the user's own
-    # full history, same reasoning `build_overview`'s baselines use -- a status page
-    # that changes shape under an active period filter would defeat its own purpose.
-    _tx, _filtered, all_time, _acct_df = _load_filtered(db, filters)
-    return HomeResponse(**build_home(exclude_duplicate_rows(all_time), db.get_net_worth_history()))
-
-
 @router.get("/cash-flow", response_model=CashFlowResponse)
 def get_cash_flow(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> CashFlowResponse:
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
-    return CashFlowResponse(**build_cash_flow(exclude_duplicate_rows(filtered)))
+    return CashFlowResponse(**build_cash_flow(net_linked_transactions(exclude_duplicate_rows(filtered))))
 
 
 @router.get("/budget", response_model=BudgetResponse)
-def get_budget(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> BudgetResponse:
-    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
-    return BudgetResponse(**build_budget(exclude_duplicate_rows(filtered), db.get_budgets()))
+def get_budget(
+    current_user: CurrentUserDep,
+    db: DbDep,
+    filters: FiltersDep,
+    month: str | None = Query(
+        None,
+        description="Month to budget, 'YYYY-MM'. Defaults to the latest month in the filtered data.",
+    ),
+) -> BudgetResponse:
+    """The budget month is `month`, NOT `period`: the filter bar already owns
+    `period` as a query parameter and its values are presets ('all_time',
+    'last_3_months'). A second `period` meaning 'YYYY-MM' would shadow it and
+    make every filtered budget request a 422. The storage column and the domain
+    term stay `period`; only the HTTP name differs, and only because of that."""
+    if month is not None and not PERIOD_PATTERN.match(month):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
+    _tx, filtered, all_time, _acct_df = _load_filtered(db, filters)
+
+    # When the month picker names a month, that IS the period selection, so use
+    # the frame with every filter EXCEPT the period applied. Otherwise the
+    # filter bar's own period (default: last 3 months) silently wins: navigating
+    # back a fourth month lands outside it, every category reports $0 spent and
+    # nothing reads as over budget, while inherited caps still resolve normally.
+    frame = all_time if month is not None else filtered
+    return BudgetResponse(
+        **build_budget(
+            net_linked_transactions(exclude_duplicate_rows(frame)),
+            db.get_budget_periods(),
+            period=month,
+        )
+    )
 
 
 @router.get("/ledger", response_model=LedgerResponse)
 def get_ledger(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> LedgerResponse:
     _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
     # Duplicate-flagged rows stay: the ledger checkbox is the only way to un-flag one.
-    return LedgerResponse(transactions=[LedgerItem(**item) for item in build_ledger(filtered)])
+    return LedgerResponse(
+        transactions=[LedgerItem(**item) for item in build_ledger(filtered, db.get_recurring_streams())]
+    )
 
 
 @router.get("/anomalies", response_model=AnomaliesResponse)
-def get_anomalies(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> AnomaliesResponse:
-    _tx, filtered, _all_time, _acct_df = _load_filtered(db, filters)
-    return AnomaliesResponse(
-        anomalies=[AnomalyItem(**item) for item in build_anomalies(exclude_duplicate_rows(filtered))]
-    )
+def get_anomalies(
+    current_user: CurrentUserDep,
+    db: DbDep,
+    month: str | None = Query(None, description="Limit to one month, 'YYYY-MM'."),
+) -> AnomaliesResponse:
+    """Reads the `anomalies` table rather than deriving per-transaction outliers.
+    Dismissed anomalies are excluded by the query itself. Takes no transaction
+    filters: an anomaly is a statement about a category or a stream over a
+    period, so narrowing the ledger view does not change whether it holds."""
+    if month is not None and not PERIOD_PATTERN.match(month):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
+    return AnomaliesResponse(anomalies=[AnomalyItem(**item) for item in db.get_anomalies(month)])
+
+
+@router.post("/anomalies/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+def dismiss_anomaly(
+    body: AnomalyDismissal,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    """Dismiss one anomaly for one period. Deliberately period-scoped: dismissing
+    September's Dining drift must not silence October's."""
+    db.dismiss_anomaly(body.kind, body.subject, body.period)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/anomalies/restore", status_code=status.HTTP_204_NO_CONTENT)
+def restore_anomaly(
+    body: AnomalyDismissal,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    """Undo a dismissal, so a mis-click is recoverable."""
+    db.restore_anomaly(body.kind, body.subject, body.period)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/filter-options", response_model=FilterOptionsResponse)
@@ -471,6 +625,11 @@ class CreditLimitUpdate(BaseModel):
 
 class BudgetUpdate(BaseModel):
     monthly_limit: float
+    # Which month this cap applies from. Omitted means the current calendar
+    # month -- never "all months", since that is precisely the flat-table
+    # behaviour Phase 28 replaced. Named `month` to match the query parameter
+    # on GET /budget; see the note there on why it cannot be called `period`.
+    month: str | None = None
 
 
 class CategoryUpdate(BaseModel):
@@ -487,6 +646,10 @@ class RecurringUpdate(BaseModel):
 
 class DuplicateUpdate(BaseModel):
     duplicate: bool
+
+
+class LinkTransactionRequest(BaseModel):
+    other_hash: str
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +678,32 @@ def update_budget(
     _csrf: RequireCsrfDep,
     db: DbDep,
 ) -> Response:
-    db.upsert_budget(category, body.monthly_limit)
+    """Set one category's cap for one month. Other months are untouched; they
+    keep whatever they inherit. Writes only `budget_periods` — the legacy
+    `budgets` table belongs to the frozen Streamlit dashboard, which writes it
+    itself, so touching it here would discard budgets saved from there."""
+    month = body.month or date.today().strftime("%Y-%m")
+    if not PERIOD_PATTERN.match(month):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
+    db.upsert_budget_period(category, month, body.monthly_limit)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/budgets/{category}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_budget(
+    category: str,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+    month: str | None = Query(None, description="Month to clear, 'YYYY-MM'."),
+) -> Response:
+    """Clear one month's explicit cap. The month then falls back to *inheriting*
+    the most recent earlier cap — which is not the same as being capped at 0."""
+    resolved = month or date.today().strftime("%Y-%m")
+    if not PERIOD_PATTERN.match(resolved):
+        raise HTTPException(status_code=422, detail="month must be 'YYYY-MM'")
+    db.delete_budget_period(category, resolved)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -528,11 +716,54 @@ def update_transaction_category(
     _csrf: RequireCsrfDep,
     db: DbDep,
 ) -> CategoryUpdateResponse:
+    """The category set is closed (Phase 28c). This endpoint previously took
+    arbitrary free text, so budget caps -- which are keyed on category -- could
+    be orphaned by a typo and the category list grew without bound.
+
+    Input is normalised rather than merely rejected: 'Dining' and
+    'food and drink' both store FOOD_AND_DRINK. Only a value that cannot be
+    mapped *unambiguously* is refused, because guessing would silently rewrite
+    what the user meant."""
+    category = canonicalize(body.category)
+    if category is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown category {body.category!r}. Expected one of: {', '.join(CANONICAL_CATEGORIES)}"
+            ),
+        )
     fields = db.get_transaction_merchant_fields(transaction_hash)
     key = merchant_key(fields[0], fields[1]) if fields else None
-    backfilled_count = db.update_transaction_category(transaction_hash, body.category, key or None)
+    backfilled_count = db.update_transaction_category(transaction_hash, category, key or None)
     invalidate_cache(db.database_url)
     return CategoryUpdateResponse(backfilled_count=backfilled_count)
+
+
+class StreamRecurringUpdate(BaseModel):
+    recurring: bool
+
+
+class StreamRecurringResponse(BaseModel):
+    updated_count: int
+
+
+@router.patch("/streams/{stream_id}/recurring", response_model=StreamRecurringResponse)
+def update_stream_recurring(
+    stream_id: str,
+    body: StreamRecurringUpdate,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> StreamRecurringResponse:
+    """Toggle recurring for a whole detected stream (Phase 31).
+
+    The per-row endpoint below still exists for transactions that belong to no
+    stream. This one fixes "the same charge can be checked recurring over and
+    over": the flag is per-row, so every occurrence was independently checkable
+    and Upcoming then listed near-duplicates."""
+    updated = db.update_recurring_for_stream(stream_id, body.recurring)
+    invalidate_cache(db.database_url)
+    return StreamRecurringResponse(updated_count=updated)
 
 
 @router.patch("/transactions/{transaction_hash}/recurring", status_code=status.HTTP_204_NO_CONTENT)
@@ -559,3 +790,323 @@ def update_transaction_duplicate(
     db.update_transaction_duplicate(transaction_hash, body.duplicate)
     invalidate_cache(db.database_url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/transactions/{transaction_hash}/link", status_code=status.HTTP_204_NO_CONTENT)
+def link_transaction(
+    transaction_hash: str,
+    body: LinkTransactionRequest,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    try:
+        db.link_transactions(transaction_hash, body.other_hash)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/transactions/{transaction_hash}/link", status_code=status.HTTP_204_NO_CONTENT)
+def unlink_transaction(
+    transaction_hash: str,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    db.unlink_transaction(transaction_hash)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class BalanceRefreshResponse(BaseModel):
+    accounts_refreshed: int
+    accounts_failed: int
+
+
+@router.post("/accounts/refresh-balances", response_model=BalanceRefreshResponse)
+def refresh_balances(
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+    settings: SettingsDep,
+) -> BalanceRefreshResponse:
+    """Fetch live balances on demand (Phase 35).
+
+    Without this, balances are only as fresh as the last pipeline run -- up to
+    24 hours stale -- which makes goal progress and net worth read as wrong
+    right after money moves. `/accounts/balance/get` needs no re-link.
+
+    A partial failure is reported, not raised: one broken Plaid Item should not
+    stop the other two from refreshing.
+    """
+    if not settings.plaid_client_id or not settings.plaid_secret:
+        raise HTTPException(status_code=503, detail="Plaid credentials are not configured")
+    if not settings.plaid_access_tokens:
+        raise HTTPException(status_code=503, detail="No Plaid access tokens are configured")
+
+    ingestor = PlaidIngestor(
+        client_id=settings.plaid_client_id,
+        secret=settings.plaid_secret,
+        access_tokens=settings.plaid_access_tokens,
+        base_url=settings.plaid_base_url,
+    )
+    owner_by_token = dict(zip(settings.plaid_access_tokens, settings.plaid_access_token_owners, strict=False))
+    accounts, failed = ingestor.refresh_balances(owner_by_token)
+
+    for account in accounts:
+        account.pop("_token_fingerprint", None)
+    if accounts:
+        key_remap = db.canonicalize_account_keys(accounts)
+        for account in accounts:
+            account["account_key"] = key_remap.get(account["account_key"], account["account_key"])
+        db.upsert_plaid_accounts(accounts)
+        # Upserts today's row in place rather than adding a second one --
+        # account_balance_snapshots is UNIQUE (account_key, snapshot_date).
+        db.record_balance_snapshots(accounts)
+
+    invalidate_cache(db.database_url)
+    return BalanceRefreshResponse(accounts_refreshed=len(accounts), accounts_failed=len(failed))
+
+
+# ---------------------------------------------------------------------------
+# Savings goals (Phase 33)
+# ---------------------------------------------------------------------------
+
+
+class GoalItem(BaseModel):
+    id: int
+    name: str
+    target_amount: float
+    target_date: str | None
+    account_keys: list[str]
+    saved: float
+    pct: float | None
+    """Fraction (0.43 = 43%), not percentage points."""
+    remaining: float
+    monthly_pace: float
+    pace_basis: str
+    """'balance' once there are >= 12 weeks of snapshots, else 'cashflow'.
+    Always rendered alongside the number: a pace built on four weeks of history
+    that looks as confident as one built on a year is worse than none."""
+    pace_weeks_of_history: int
+    projected_date: str | None
+    on_track: bool | None
+    is_complete: bool
+    contested_amount: float
+    """How much of this goal's balance sits in an account another goal also
+    claims. Overlap is allowed -- people really do save for two things in one
+    account -- but hiding it would let the dashboard call two goals on track
+    when the same dollars can only buy one."""
+
+
+class GoalsResponse(BaseModel):
+    goals: list[GoalItem]
+
+
+class GoalCreate(BaseModel):
+    name: str
+    target_amount: float
+    target_date: str | None = None
+    account_keys: list[str] = []
+
+
+class GoalUpdate(BaseModel):
+    name: str | None = None
+    target_amount: float | None = None
+    target_date: str | None = None
+    account_keys: list[str] | None = None
+    is_archived: bool | None = None
+
+
+def _account_balances(acct_df) -> dict[str, float]:
+    """Account key -> current balance, with nulls as 0.
+
+    `float(x or 0.0)` is wrong here: `bool(nan)` is True, so a NaN balance
+    survives and FastAPI then serializes bare `NaN`, which `JSON.parse`
+    rejects -- taking the whole /goals response down. `fillna` first.
+    """
+    if acct_df is None or acct_df.empty:
+        return {}
+    if "account_key" not in acct_df.columns or "balance_current" not in acct_df.columns:
+        return {}
+    balances = acct_df[["account_key", "balance_current"]].copy()
+    balances["balance_current"] = balances["balance_current"].fillna(0.0)
+    return {str(row["account_key"]): float(row["balance_current"]) for _, row in balances.iterrows()}
+
+
+def _parse_target_date(value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="target_date must be 'YYYY-MM-DD'") from error
+
+
+@router.get("/goals", response_model=GoalsResponse)
+def get_goals(current_user: CurrentUserDep, db: DbDep, filters: FiltersDep) -> GoalsResponse:
+    tx, _filtered, all_time, acct_df = _load_filtered(db, filters)
+    goals = db.get_savings_goals()
+
+    balances = _account_balances(acct_df)
+    history = {goal["id"]: db.get_goal_balance_history(goal.get("account_keys", [])) for goal in goals}
+
+    # Fallback pace, used until a goal has 12 weeks of balance snapshots.
+    # Measured over all history rather than the filtered period: saving capacity
+    # is a property of the user's life, not of the window they are looking at.
+    real = net_linked_transactions(exclude_duplicate_rows(all_time))
+    cashflow_monthly = 0.0
+    if not real.empty and "month" in real.columns:
+        monthly_net = real.groupby("month")["adjusted_amount"].sum()
+        if len(monthly_net) > 0:
+            cashflow_monthly = max(float(monthly_net.mean()), 0.0)
+
+    return GoalsResponse(
+        goals=[GoalItem(**item) for item in build_goals(goals, balances, history, cashflow_monthly)]
+    )
+
+
+@router.post("/goals", response_model=GoalItem, status_code=status.HTTP_201_CREATED)
+def create_goal(
+    body: GoalCreate,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> GoalItem:
+    """Creating a goal captures the linked accounts' CURRENT combined balance as
+    the baseline, so progress measures growth from here rather than crediting
+    money that was already sitting there."""
+    _tx, acct_df = _load(db)
+    balances = _account_balances(acct_df)
+    baseline = sum(balances.get(key, 0.0) for key in body.account_keys)
+
+    goal_id = db.create_savings_goal(
+        name=body.name,
+        target_amount=body.target_amount,
+        target_date=_parse_target_date(body.target_date),
+        account_keys=body.account_keys,
+        baseline_amount=baseline,
+    )
+    invalidate_cache(db.database_url)
+
+    created = next((g for g in db.get_savings_goals() if g["id"] == goal_id), None)
+    if created is None:
+        raise HTTPException(status_code=500, detail="Goal was created but could not be read back")
+    return GoalItem(**build_goals([created], balances, {goal_id: []}, 0.0)[0])
+
+
+@router.patch("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+def update_goal(
+    goal_id: int,
+    body: GoalUpdate,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    fields = body.model_dump(exclude_unset=True)
+    if "target_date" in fields:
+        fields["target_date"] = _parse_target_date(fields["target_date"])
+
+    # Re-baseline when the linked accounts change. `baseline_amount` was
+    # captured against the ORIGINAL set, so linking an account that already
+    # holds $50k would otherwise report $50k of instant progress -- precisely
+    # what the baseline exists to prevent. Only the newly-added accounts are
+    # re-baselined, so progress already earned on the existing ones is kept.
+    if fields.get("account_keys") is not None:
+        existing = next((g for g in db.get_savings_goals(include_archived=True) if g["id"] == goal_id), None)
+        if existing is not None:
+            _tx, acct_df = _load(db)
+            balances = _account_balances(acct_df)
+            added = set(fields["account_keys"]) - set(existing.get("account_keys", []))
+            removed = set(existing.get("account_keys", [])) - set(fields["account_keys"])
+            baseline = float(existing.get("baseline_amount") or 0.0)
+            baseline += sum(balances.get(key, 0.0) for key in added)
+            baseline -= sum(balances.get(key, 0.0) for key in removed)
+            fields["baseline_amount"] = baseline
+
+    db.update_savings_goal(goal_id, **fields)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_goal(
+    goal_id: int,
+    current_user: CurrentUserDep,
+    _csrf: RequireCsrfDep,
+    db: DbDep,
+) -> Response:
+    db.delete_savings_goal(goal_id)
+    invalidate_cache(db.database_url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Forward cash-flow forecast (Phase 32)
+# ---------------------------------------------------------------------------
+
+
+class ForecastRow(BaseModel):
+    month: str
+    projected_balance: float
+    """What will probably happen: recurring streams plus a trailing median per
+    category."""
+    budget_balance: float
+    """The same, but every category held to its cap. The GAP between the two is
+    the value of sticking to budget -- which is the point of carrying both."""
+    income: float
+    expenses: float
+
+
+class ForecastResponse(BaseModel):
+    rows: list[ForecastRow]
+    has_enough_history: bool
+    """False when there are fewer than 3 complete months. The UI shows
+    "building history" rather than a projection nobody should trust."""
+    has_recurring_data: bool
+    months_of_history: int
+    starting_balance: float
+
+
+@router.get("/forecast", response_model=ForecastResponse)
+def get_forecast(
+    current_user: CurrentUserDep,
+    db: DbDep,
+    filters: FiltersDep,
+    horizon: int = Query(DEFAULT_HORIZON_MONTHS, ge=1, le=MAX_HORIZON_MONTHS),
+) -> ForecastResponse:
+    """Projects forward from today's spendable cash.
+
+    Reads `all_time` rather than the filtered frame: a forecast is about the
+    user's actual behaviour, not the slice they happen to be looking at."""
+    _tx, _filtered, all_time, acct_df = _load_filtered(db, filters)
+    real = net_linked_transactions(exclude_duplicate_rows(all_time))
+
+    caps = resolve_caps(db.get_budget_periods(), date.today().strftime("%Y-%m"))
+
+    # A goal further out than the horizon extends it, so the goal is visible on
+    # the chart it is planned with.
+    goal_dates = [g["target_date"] for g in db.get_savings_goals() if g.get("target_date")]
+    furthest = max(goal_dates) if goal_dates else None
+
+    result = forecast_project(
+        real,
+        db.get_recurring_streams(),
+        caps,
+        starting=forecast_starting_balance(acct_df),
+        horizon_months=horizon,
+        furthest_goal_date=furthest,
+        # The `le=36` bound above is the real limit. Without passing it through,
+        # a goal dated far out would silently override it and build hundreds of
+        # rows to serialize and plot.
+        max_horizon_months=MAX_HORIZON_MONTHS,
+    )
+    return ForecastResponse(
+        rows=[ForecastRow(**row) for row in result["rows"]],
+        has_enough_history=result["has_enough_history"],
+        has_recurring_data=result["has_recurring_data"],
+        months_of_history=result["months_of_history"],
+        starting_balance=result["starting_balance"],
+    )

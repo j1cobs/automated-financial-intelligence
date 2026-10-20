@@ -14,11 +14,11 @@
  * require mutating the user's actual dashboard filters just to preview one
  * period.
  *
- * `LedgerItem` (see `lib/types.ts`) carries no `tx_type` field -- unlike the
- * aggregate endpoints, the ledger only has `amount`, so the income/expense
- * split here follows the same sign convention `TransactionsTab.tsx`'s
- * `AmountCell` and its "Positive amounts are income or credits. Negative
- * amounts are expenses or debits." caption already document.
+ * `LedgerItem` (see `lib/types.ts`) carries `tx_type`, which is used to filter
+ * out transfers before splitting on amount sign. Likewise, `is_duplicate` rows
+ * are excluded, so the income/expense totals here match `/cash-flow`'s chart
+ * aggregation (which excludes the same categories). Sign convention: positive
+ * amounts are income or credits; negative amounts are expenses or debits.
  *
  * Within each column, transactions are grouped by `description` (not
  * `category` -- the ML classifier is still a Phase-1 stub per `CLAUDE.md`, so
@@ -61,6 +61,12 @@ interface PeriodTransactionsPreviewProps {
   label: string;
   dateFrom: string;
   dateTo: string;
+  /** Narrow the preview to one owner's transactions (e.g. a "Monthly net cash
+   *  flow by holder" bar click) -- overrides the ambient owner filter. */
+  owner?: string;
+  /** Narrow the preview to one category's transactions (e.g. a category
+   *  heatmap cell click) -- overrides the ambient category filter. */
+  category?: string;
   onClose: () => void;
 }
 
@@ -147,6 +153,8 @@ export function PeriodTransactionsPreview({
   label,
   dateFrom,
   dateTo,
+  owner,
+  category,
   onClose,
 }: PeriodTransactionsPreviewProps) {
   const { filters } = useFilters();
@@ -182,10 +190,12 @@ export function PeriodTransactionsPreview({
     months: monthsCoveringRange(dateFrom, dateTo),
     date_from: dateFrom,
     date_to: dateTo,
+    owners: owner ? [owner] : filters.owners,
+    categories: category ? [category] : filters.categories,
   };
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['ledger-preview', `${dateFrom}_${dateTo}`],
+    queryKey: ['ledger-preview', `${dateFrom}_${dateTo}`, owner ?? '', category ?? ''],
     queryFn: () => {
       const qs = toSearchParams(overrideFilters).toString();
       return apiFetch<LedgerResponse>(qs ? `/ledger?${qs}` : '/ledger');
@@ -193,8 +203,9 @@ export function PeriodTransactionsPreview({
   });
 
   const transactions = data?.transactions ?? [];
-  const income = transactions.filter((tx) => tx.amount >= 0);
-  const expenses = transactions.filter((tx) => tx.amount < 0);
+  const relevant = transactions.filter((tx) => !tx.is_duplicate && tx.tx_type !== 'transfer');
+  const income = relevant.filter((tx) => tx.amount >= 0);
+  const expenses = relevant.filter((tx) => tx.amount < 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
@@ -202,7 +213,7 @@ export function PeriodTransactionsPreview({
         ref={containerRef}
         role="dialog"
         aria-label={`Transactions for ${label}`}
-        className="max-h-[85vh] w-full max-w-4xl overflow-auto rounded-lg border border-hairline bg-surface-1 p-4 shadow-lg sm:p-6"
+        className="max-h-[95vh] w-full max-w-[95vw] overflow-auto rounded-lg border border-hairline bg-surface-1 p-4 shadow-lg sm:p-6"
       >
         <div className="mb-3 flex items-start justify-between gap-4">
           <h3 className="text-base font-semibold text-ink sm:text-lg">{label}</h3>

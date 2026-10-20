@@ -9,9 +9,15 @@ the full feature set described in the original design brief. What this means con
 
 - **Transaction categorization is live.** The pipeline runs a three-layer cascade (merchant memory → Plaid PFC → UNCATEGORIZED) via
   `CascadeCategorizer` (Phase 18), wired via `analytics/models.py::build_models()` and gated by `CATEGORIZER_MODE`.
-  Outlier detection remains stubbed — `analytics/outlier_detector.py` is unused; only the classifier half of Phase 1's ML
-  stub is now real.
-- The dashboard implements all core views. Budget categories, category charts, and category drill-down all work.
+- **Anomaly detection is live, and is deliberately not ML.** `analytics/anomalies.py` (Phase 34) runs two explainable
+  rules — category drift scored by MAD, and recurring price creep — plus a period-scoped feedback memory
+  (`anomaly_feedback`). `analytics/outlier_detector.py` (Isolation Forest) was **deleted**, not activated; see
+  `docs/adr/0007-anomaly-detection-without-ml.md`. Do not revive it. Phase 7 in PLAN.md is superseded in both halves.
+- **Recurring charges are detected as streams** (`recurring_streams`, Phase 30), not inferred from the per-row
+  `is_recurring` flag, which is now a user override that always wins. Streams currently come from local derivation;
+  `scripts/probe_plaid_recurring.py` decides whether Plaid's add-on can take over and **has not been run yet**.
+- The dashboard implements all core views. Budget is the primary surface: per-month caps with carry-forward (Phase 28),
+  a forward cash-flow forecast (Phase 32) and savings goals (Phase 33) all live there.
 - Scheduled automation is not active yet — the GitHub Actions workflow is defined but does not run automatically (see
   Automation).
 
@@ -78,12 +84,23 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 - `analytics/` — `categorizer.py` (Phase 18) implements a three-layer cascade: merchant memory (user corrections from
   `merchant_categories` table) → Plaid's `personal_finance_category` primary → `UNCATEGORIZED` fallback. `merchant_key()`
   normalizes merchant identity (strips noise patterns: leading `Purchase /`, trailing city/province, trailing store numbers).
-  `classifier.py` (TF-IDF + Linear SVM) and `outlier_detector.py` (Isolation Forest) exist but are unused — `outlier_detector.py`
-  remains stubbed (Phase 1). `models.py::build_models(mode)` gates between `"cascade"` (default, production) and `"placeholder"`
-  (for tests/backward-compat). When changing the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and
-  `pipeline/runner.py`'s classification block.
-- `database/` — `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
-  (currently 001–023) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
+  `categories.py` (Phase 28c) holds the closed canonical set and `canonicalize()`, which normalizes case, spacing and the
+  Phase-1 legacy names and returns None rather than guessing — its output can rewrite a hand-made correction.
+  `classifier.py` (TF-IDF + Linear SVM) exists but is unused. `models.py::build_models(mode)` gates between `"cascade"`
+  (default, production) and `"placeholder"` (for tests/backward-compat); its `.outlier_detector` is a placeholder in
+  **both** modes and permanently so, surviving only to zero the legacy `outlier_score`/`is_outlier` columns each run.
+  `anomalies.py` (Phase 34), `recurring.py` (Phase 30), `budget_periods.py` (Phase 28), `goals.py` (Phase 33) and
+  `forecast.py` (Phase 32) are all pure and DB-free, so their rules are unit-testable without a database. When changing
+  the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and `pipeline/runner.py`'s classification block.
+- `database/` — **The transactions date column is `transaction_date`.** `date` is only ever an *alias*,
+  introduced by `load_financial_data` (`app/dashboard.py:330`, `t.transaction_date AS date`) and carried by
+  every DataFrame built from it — so `date`, `month` and `adjusted_amount` are analytics vocabulary and must
+  never appear in SQL against the table. Migration 026 shipped with `MIN(t.date)` and took down every entry
+  point that calls `ensure_schema()`. Because the repo mocks psycopg everywhere else, SQL is only ever
+  verified by `tests/test_migrations_execute.py` and `tests/test_db_roundtrip.py`, which need a real Postgres
+  (`MIGRATION_TEST_DATABASE_URL`; CI's `migrations` job supplies one). Add new raw SQL to one of them.
+  `DatabaseClient` (psycopg v3). `ensure_schema()` runs *every* `.sql` file in `database/migrations/`
+  (currently 001–029) in filename order, on every call; each must stay safe to re-run. Postgres = Supabase/Neon
   (`DATABASE_URL`). `pipeline_runs` (migration 013) is where per-run detail lives — `pipeline/runner.py::main()`
   writes one row per run via `log_pipeline_run()` (counts on success; `error_class`/a truncated `error_message` on
   failure, never a raw exception that could embed transaction content) — instead of putting that detail in the
@@ -97,6 +114,16 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   (where `user_category IS NULL`, so existing corrections are never overwritten). Returns the backfill count, which surfaces in
   the UI as the number of rows affected. See `docs/adr/0004-transaction-categorization.md` for the full rationale and the
   exact-match-backfill limitation.
+  Phases 28–34 add four migrations (026–029): `budget_periods` (per-month caps, with a seed **guarded on a row in
+  `schema_seeds`** — `ensure_schema()` re-runs every `.sql` on every call, so an unguarded seed resurrects a cap
+  the user cleared; guarding on `budget_periods` being empty is not enough, since clearing the *last* cap empties
+  the table and re-fires the seed), `recurring_streams`, `savings_goals`/`savings_goal_accounts`, and
+  `anomalies`/`anomaly_feedback`. `schema_seeds` records one-time **data** seeds; it is not a migration-version
+  table, and the DDL still re-runs every call.
+  **`budgets` (migration 002) is now Streamlit-owned and must not be written by the new path.** `app/dashboard.py` both
+  reads it (`:1116`) and *writes* it (`:1186`), so mirroring resolved caps into it would silently discard budgets saved
+  from Streamlit. `transactions.is_outlier` is likewise kept written only as a compatibility shim for that frozen
+  dashboard — see `set_outlier_flags`.
   Transaction identity, and the duplicate handling built on it, is the subtlest part of this layer:
   - `build_transaction_hash` hashes Plaid's `transaction_id` when the row has one, and falls back to
     `account_key|date|description|amount` only for rows without one (seed data, future non-Plaid sources). Upserts are
@@ -170,7 +197,11 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   field-for-field and must be updated in the same change as `api/routers/data.py`, or `tsc -b` is the
   only thing standing between you and a runtime shape mismatch. There is deliberately **no sign-out
   button** (stateless JWTs, no server-side revocation — see the comment in `src/App.tsx`).
-- `scripts/` — `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
+- `scripts/` — `probe_plaid_recurring.py` (reports whether Plaid's Recurring Transactions add-on is entitled; read-only,
+  **not yet run**), `normalize_user_categories.py` (dry-run by default; maps stray free-text `user_category` values onto
+  the canonical set and **reports rather than rewrites** anything it cannot map unambiguously — deliberately a script,
+  not a migration, since a migration rewriting corrections would re-run on every pipeline start),
+  `plaid_link.py` (mint or repair a Plaid access token; see `ingestion/plaid_link.py` for the
   underlying `PlaidLinkClient`), `seed_sample_data.py` (writes deterministic demo data straight to Postgres —
   no ingestion, no credentials), and `purge_sample_data.py` (deletes it again). Seeding is intentionally
   `SEED_DATABASE_URL`-only — it never reads `DATABASE_URL` — so an accidental run cannot land demo data in a

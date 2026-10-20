@@ -348,8 +348,8 @@ class GetNetWorthHistoryTests(unittest.TestCase):
 
         connect, cursor = _mock_connect(
             [
-                (dt.date(2026, 8, 23), 5000.0, 1000.0),
-                (dt.date(2026, 8, 24), 5200.0, 900.0),
+                (dt.date(2026, 8, 23), 5000.0, 1000.0, 3000.0),
+                (dt.date(2026, 8, 24), 5200.0, 900.0, 3100.0),
             ]
         )
         with patch("database.db.psycopg.connect", connect):
@@ -358,8 +358,20 @@ class GetNetWorthHistoryTests(unittest.TestCase):
         self.assertEqual(
             result,
             [
-                {"date": "2026-08-23", "net_worth": 4000.0},
-                {"date": "2026-08-24", "net_worth": 4300.0},
+                {
+                    "date": "2026-08-23",
+                    "net_worth": 4000.0,
+                    "assets": 5000.0,
+                    "liabilities": 1000.0,
+                    "liquid_cash": 3000.0,
+                },
+                {
+                    "date": "2026-08-24",
+                    "net_worth": 4300.0,
+                    "assets": 5200.0,
+                    "liabilities": 900.0,
+                    "liquid_cash": 3100.0,
+                },
             ],
         )
         sql = cursor.execute.call_args[0][0]
@@ -369,11 +381,22 @@ class GetNetWorthHistoryTests(unittest.TestCase):
     def test_null_sums_do_not_raise(self) -> None:
         import datetime as dt
 
-        connect, cursor = _mock_connect([(dt.date(2026, 8, 24), None, None)])
+        connect, cursor = _mock_connect([(dt.date(2026, 8, 24), None, None, None)])
         with patch("database.db.psycopg.connect", connect):
             result = DatabaseClient("postgresql://x").get_net_worth_history()
 
-        self.assertEqual(result, [{"date": "2026-08-24", "net_worth": 0.0}])
+        self.assertEqual(
+            result,
+            [
+                {
+                    "date": "2026-08-24",
+                    "net_worth": 0.0,
+                    "assets": 0.0,
+                    "liabilities": 0.0,
+                    "liquid_cash": 0.0,
+                }
+            ],
+        )
 
     def test_empty_history(self) -> None:
         connect, cursor = _mock_connect([])
@@ -725,6 +748,49 @@ class DeleteTransactionsByExternalIdsTests(unittest.TestCase):
 
         self.assertEqual(deleted, 0)
         connect.assert_not_called()
+
+
+class GetTransactionPFCDetailsTests(unittest.TestCase):
+    def test_returns_mapping_of_hash_to_pfc_tuple(self) -> None:
+        connect, cursor = _mock_connect(
+            [
+                ("hash1", "FOOD_AND_DRINK_RESTAURANTS", "plaid"),
+                ("hash2", "FOOD_AND_DRINK_GROCERIES", "cascade"),
+                ("hash3", None, "user"),
+            ]
+        )
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_pfc_details()
+
+        self.assertEqual(
+            result,
+            {
+                "hash1": ("FOOD_AND_DRINK_RESTAURANTS", "plaid"),
+                "hash2": ("FOOD_AND_DRINK_GROCERIES", "cascade"),
+                "hash3": (None, "user"),
+            },
+        )
+        sql = cursor.execute.call_args[0][0]
+        self.assertIn("SELECT transaction_hash, pfc_detailed, category_source", sql)
+        self.assertIn("FROM transactions", sql)
+
+    def test_returns_empty_mapping_when_no_transactions(self) -> None:
+        connect, cursor = _mock_connect([])
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_pfc_details()
+
+        self.assertEqual(result, {})
+
+    def test_handles_null_pfc_detailed_and_source(self) -> None:
+        connect, cursor = _mock_connect(
+            [
+                ("hash1", None, None),
+            ]
+        )
+        with patch("database.db.psycopg.connect", connect):
+            result = DatabaseClient("postgresql://x").get_transaction_pfc_details()
+
+        self.assertEqual(result["hash1"], (None, None))
 
 
 class SyncCursorTests(unittest.TestCase):

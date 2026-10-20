@@ -23,23 +23,25 @@ import { useFilters } from './FilterContext';
 import { toSearchParams, type DashboardFilters } from './filters';
 import type {
   OverviewResponse,
-  HomeResponse,
   CashFlowResponse,
   BudgetResponse,
   LedgerResponse,
   AnomaliesResponse,
   CategoriesResponse,
   FilterOptions,
+  GoalsResponse,
+  ForecastResponse,
 } from './types';
 
 export const overviewQueryKey = ['overview'] as const;
-export const homeQueryKey = ['home'] as const;
 export const cashFlowQueryKey = ['cash-flow'] as const;
 export const budgetQueryKey = ['budget'] as const;
 export const ledgerQueryKey = ['ledger'] as const;
 export const anomaliesQueryKey = ['anomalies'] as const;
 export const categoriesQueryKey = ['categories'] as const;
 export const filterOptionsQueryKey = ['filter-options'] as const;
+export const goalsQueryKey = ['goals'] as const;
+export const forecastQueryKey = ['forecast'] as const;
 
 /** Append the filters' query string to a path; omits `?` entirely when every filter is default. */
 function withFilters(path: string, filters: DashboardFilters): string {
@@ -55,16 +57,6 @@ export function useOverview() {
   });
 }
 
-// Filter-aware: `/home` applies every filter except period (see api/filters.py's
-// `apply_filters`, `all_time`) -- Home is a status page, not a period-scoped view.
-export function useHome() {
-  const { filters } = useFilters();
-  return useQuery({
-    queryKey: [...homeQueryKey, filters],
-    queryFn: () => apiFetch<HomeResponse>(withFilters('/home', filters)),
-  });
-}
-
 export function useCashFlow() {
   const { filters } = useFilters();
   return useQuery({
@@ -73,11 +65,19 @@ export function useCashFlow() {
   });
 }
 
-export function useBudget() {
+/** `month` ('YYYY-MM') selects the budget month; omitted means the latest month
+ *  in the filtered data. The parameter is `month`, not `period`, because the
+ *  filter bar already owns `period` and its values are presets like 'all_time'. */
+export function useBudget(month?: string | null) {
   const { filters } = useFilters();
   return useQuery({
-    queryKey: [...budgetQueryKey, filters],
-    queryFn: () => apiFetch<BudgetResponse>(withFilters('/budget', filters)),
+    queryKey: [...budgetQueryKey, filters, month ?? null],
+    queryFn: () => {
+      const base = withFilters('/budget', filters);
+      if (!month) return apiFetch<BudgetResponse>(base);
+      const separator = base.includes('?') ? '&' : '?';
+      return apiFetch<BudgetResponse>(`${base}${separator}month=${encodeURIComponent(month)}`);
+    },
   });
 }
 
@@ -89,11 +89,14 @@ export function useLedger() {
   });
 }
 
-export function useAnomalies() {
-  const { filters } = useFilters();
+/** Deliberately ignores the filter bar: an anomaly is a statement about a
+ *  category or a stream over a period, so narrowing the ledger view does not
+ *  change whether it holds. */
+export function useAnomalies(month?: string | null) {
   return useQuery({
-    queryKey: [...anomaliesQueryKey, filters],
-    queryFn: () => apiFetch<AnomaliesResponse>(withFilters('/anomalies', filters)),
+    queryKey: [...anomaliesQueryKey, month ?? null],
+    queryFn: () =>
+      apiFetch<AnomaliesResponse>(month ? `/anomalies?month=${encodeURIComponent(month)}` : '/anomalies'),
   });
 }
 
@@ -112,5 +115,21 @@ export function useFilterOptions() {
   return useQuery({
     queryKey: filterOptionsQueryKey,
     queryFn: () => apiFetch<FilterOptions>('/filter-options'),
+  });
+}
+
+export function useGoals() {
+  const { filters } = useFilters();
+  return useQuery({
+    queryKey: [...goalsQueryKey, filters],
+    queryFn: () => apiFetch<GoalsResponse>(withFilters('/goals', filters)),
+  });
+}
+
+export function useForecast() {
+  const { filters } = useFilters();
+  return useQuery({
+    queryKey: [...forecastQueryKey, filters],
+    queryFn: () => apiFetch<ForecastResponse>(withFilters('/forecast', filters)),
   });
 }

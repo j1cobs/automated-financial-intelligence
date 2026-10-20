@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from 'react';
-import { useOverview } from '../lib/queries';
-import { useSetCreditLimit } from '../lib/mutations';
+import { useState, type CSSProperties, type ReactNode } from 'react';
+import { useOverview, useAnomalies } from '../lib/queries';
+import { useSetCreditLimit, useDismissAnomaly, useRefreshBalances } from '../lib/mutations';
 import { useFilters } from '../lib/FilterContext';
 import type {
   AssetMixItem,
@@ -10,12 +10,15 @@ import type {
   TopCategoryItem,
 } from '../lib/types';
 import { MetricTile, MetricInfoBadge } from './MetricTile';
+import { NetWorthTrendChart } from './NetWorthTrendChart';
+import { MasonryColumns, ScrollBody, Stack } from './MasonryColumns';
+import { useInMasonrySlot } from './masonrySlot';
+import { MIN_BODY_CHART } from './masonryLayout';
 import { TabSkeleton, ErrorState } from './LoadingState';
 import { strings } from '../lib/strings';
 import { formatCategory } from '../lib/categories';
+import { Button } from '../components/Button';
 import {
-  LineChart,
-  Line,
   BarChart,
   Bar,
   XAxis,
@@ -25,7 +28,9 @@ import {
   Legend,
   ResponsiveContainer,
   LabelList,
-  ReferenceLine,
+  DefaultTooltipContent,
+  type DefaultTooltipContentProps,
+  type TooltipContentProps,
 } from 'recharts';
 import {
   useChartTheme,
@@ -38,7 +43,6 @@ import {
   yAxisProps,
   tooltipProps,
   legendProps,
-  referenceLineProps,
   surfaceGapProps,
   onFillTextColor,
   AXIS_FONT_SIZE,
@@ -53,6 +57,12 @@ import {
  *  labels without eating most of the chart's plottable area. Paired with
  *  `truncateTickLabel`'s character budget in `chartTheme.ts`. */
 const CATEGORY_AXIS_WIDTH = 160;
+
+/** Month-over-Month chart spacing: each category holds three bars of about
+ *  12 px, with 3 px between bars and 6 px between categories, so 48 px per
+ *  category. `MOM_CHART_CHROME` is the x-axis strip below the rows. */
+const MOM_ROW_HEIGHT = 48;
+const MOM_CHART_CHROME = 32;
 
 function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -228,12 +238,85 @@ function OwnerBalanceMiniList({ owner, maxBalance }: { owner: OwnerBalanceItem; 
  * (credit utilisation, warnings, the emergency-fund meter) so the page reads
  * as one system.
  */
+/** Active anomalies, each with the explanation generated at detection time and
+ *  a dismiss control. Dismissal is period-scoped: it clears this month's alert
+ *  and says nothing about next month's. */
+function RefreshBalancesControl() {
+  const refresh = useRefreshBalances();
+  const result = refresh.data;
+
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-ink-muted">
+      {refresh.isError && <span className="text-neg-text">Could not refresh balances.</span>}
+      {result && !refresh.isError && (
+        <span>
+          Refreshed {result.accounts_refreshed} account
+          {result.accounts_refreshed === 1 ? '' : 's'}
+          {/* A partial failure is reported rather than swallowed: one broken
+              Plaid Item should not silently look like a clean refresh. */}
+          {result.accounts_failed > 0 && `, ${result.accounts_failed} failed`}
+        </span>
+      )}
+      <Button size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+        {refresh.isPending ? 'Refreshing…' : 'Refresh balances'}
+      </Button>
+    </div>
+  );
+}
+
+function AnomaliesCard() {
+  const { data, isPending, isError } = useAnomalies();
+  const dismiss = useDismissAnomaly();
+
+  if (isPending || isError) return null;
+
+  const anomalies = data?.anomalies ?? [];
+  if (anomalies.length === 0) return null;
+
+  return (
+    <Card title="Needs a Look" caption="Spending that has moved away from your own recent pattern.">
+      <ul className="divide-y divide-hairline">
+        {anomalies.map((anomaly) => (
+          <li
+            key={`${anomaly.kind}:${anomaly.subject}:${anomaly.period}`}
+            className="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0"
+          >
+            <div className="min-w-0">
+              <p className="text-sm text-ink">{anomaly.explanation}</p>
+              <p className="mt-0.5 text-xs text-ink-muted">
+                {anomaly.severity === 'high' ? 'Large change' : 'Worth a look'} · {anomaly.period}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={dismiss.isPending}
+              onClick={() =>
+                dismiss.mutate({
+                  kind: anomaly.kind,
+                  subject: anomaly.subject,
+                  period: anomaly.period,
+                })
+              }
+            >
+              Dismiss
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 function Card({
   title,
   caption,
   metricKey,
   className,
   contentClassName,
+  headerExtra,
+  minBody,
+  elasticHeight,
   children,
 }: {
   title: string;
@@ -245,8 +328,17 @@ function Card({
   /** Extra classes on the content wrapper below the title/caption, e.g. to
    *  vertically center short content within a taller card (Item 2). */
   contentClassName?: string;
+  /** Fixed header content below the caption (e.g. a legend). It stays put
+   *  while the body scrolls. */
+  headerExtra?: ReactNode;
+  /** Smallest body height before the card scrolls (see `ScrollBody`). */
+  minBody?: number;
+  /** A chart's natural height: the body fills extra height, and scrolls
+   *  rather than compressing the chart below this (see `ScrollBody`). */
+  elasticHeight?: number;
   children: ReactNode;
 }) {
+  const inSlot = useInMasonrySlot();
   return (
     <div
       className={`relative flex h-full flex-col rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4 ${className ?? ''}`}
@@ -261,7 +353,78 @@ function Card({
       )}
       <h3 className="pr-6 text-base sm:text-lg font-semibold text-ink">{title}</h3>
       {caption && <p className="mt-1 text-xs text-ink-muted">{caption}</p>}
-      <div className={`mt-4 ${contentClassName ?? ''}`}>{children}</div>
+      {headerExtra && <div className="mt-4">{headerExtra}</div>}
+      <div
+        className={`${headerExtra ? 'mt-2' : 'mt-4'} ${inSlot ? 'flex min-h-0 flex-1 flex-col' : ''} ${contentClassName ?? ''}`}
+      >
+        <ScrollBody minBody={minBody} elasticHeight={elasticHeight}>
+          {children}
+        </ScrollBody>
+      </div>
+    </div>
+  );
+}
+
+/** Gap between the hovered point and the floating tooltip's nearest corner. */
+const FLOATING_TOOLTIP_OFFSET = 12;
+
+/**
+ * Tooltip props for a chart inside a scrolling card body. Recharts renders its
+ * tooltip inside the chart and keeps it within the chart's own box, but a chart
+ * taller than its card scrolls inside `ScrollBody`'s `overflow-y-auto`, so a
+ * tooltip near the visible edge was clipped. Portaling into `document.body`
+ * escapes that clip; Recharts then drops its own positioning (it only knows
+ * chart coordinates), so `FloatingTooltipContent` places the tooltip in
+ * viewport coordinates instead. `anchor` is the element the chart fills, whose
+ * on-screen origin turns Recharts' chart-relative coordinate into a viewport one.
+ */
+function floatingTooltipProps(anchor: HTMLElement | null) {
+  return {
+    portal: document.body,
+    wrapperStyle: { position: 'fixed', top: 0, left: 0, pointerEvents: 'none', zIndex: 50 } as CSSProperties,
+    content: <FloatingTooltipContent anchor={anchor} />,
+  };
+}
+
+/** Recharts' default tooltip box, fixed at the hovered point and flipped
+ *  toward the viewport's centre, so it opens into whichever side has room. */
+export function FloatingTooltipContent({
+  anchor,
+  coordinate,
+  ...rest
+}: Partial<TooltipContentProps> & { anchor: HTMLElement | null }) {
+  if (!anchor || coordinate?.x == null || coordinate?.y == null) return null;
+  const origin = anchor.getBoundingClientRect();
+  const x = origin.left + coordinate.x;
+  const y = origin.top + coordinate.y;
+  const flipX = x > window.innerWidth / 2;
+  const flipY = y > window.innerHeight / 2;
+  return (
+    <div
+      data-testid="floating-tooltip"
+      style={{
+        position: 'fixed',
+        left: x + (flipX ? -FLOATING_TOOLTIP_OFFSET : FLOATING_TOOLTIP_OFFSET),
+        top: y + (flipY ? -FLOATING_TOOLTIP_OFFSET : FLOATING_TOOLTIP_OFFSET),
+        transform: `translate(${flipX ? '-100%' : '0'}, ${flipY ? '-100%' : '0'})`,
+      }}
+    >
+      <DefaultTooltipContent {...(rest as DefaultTooltipContentProps)} />
+    </div>
+  );
+}
+
+/** A row of color swatches with labels, for a card's `headerExtra` -- an HTML
+ *  legend stays visible while the card body scrolls, unlike a chart's own. */
+function SwatchLegend({ entries }: { entries: { label: string; color: string }[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+      {entries.map((entry) => (
+        <span key={entry.label} className="flex items-center gap-1.5 text-xs text-ink-secondary">
+          <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: entry.color }} />
+          {entry.label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -402,24 +565,83 @@ function CreditLimitEditor({ items }: { items: CreditUtilizationItem[] }) {
   );
 }
 
-/** Pivots the API's long `{category, period, amount}` rows into one wide row
- * per category so a single grouped `<BarChart>` can plot both series. */
-function buildMonthOverMonthRows(
-  items: MonthOverMonthItem[],
-): { category: string; this_month: number; last_month: number }[] {
-  const byCategory = new Map<string, { this_month: number; last_month: number }>();
-  for (const item of items) {
-    const entry = byCategory.get(item.category) ?? { this_month: 0, last_month: 0 };
-    if (item.period === 'this_month') {
-      entry.this_month = item.amount;
-    } else if (item.period === 'last_month') {
-      entry.last_month = item.amount;
-    }
-    byCategory.set(item.category, entry);
+/** Humanized, deliberately hedged phrasing for a projected (not confirmed) billing
+ *  date -- "next_expected_date" is a median-interval estimate, so the copy reads as
+ *  a guess ("~in 5 days" / "around Aug 29"), never as a scheduled certainty. */
+function formatRelativeDate(isoDate: string): string {
+  const target = new Date(`${isoDate}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysAway = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysAway >= 0 && daysAway <= 10) {
+    if (daysAway === 0) return '~today';
+    if (daysAway === 1) return '~tomorrow';
+    return `~in ${daysAway} days`;
   }
-  return Array.from(byCategory.entries())
-    .map(([category, amounts]) => ({ category, ...amounts }))
-    .sort((a, b) => b.this_month - a.this_month);
+  if (daysAway < 0 && daysAway >= -10) {
+    return daysAway === -1 ? '~yesterday' : `~${Math.abs(daysAway)} days ago`;
+  }
+  const label = target.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `around ${label}`;
+}
+
+interface DriftLabelProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  index?: number;
+}
+
+/** Horizontal gap (px) between a bar's end and its drift-percentage label. */
+const DRIFT_LABEL_GAP = 6;
+
+/** "vs usual" percentage label for the Month-over-Month chart's
+ *  `this_month`/`last_month` bars. Reads the matching drift field off `rows`
+ *  by `index` -- NOT off a `payload` field, despite that being the more
+ *  obvious-looking approach and what an earlier version of this function did.
+ *  Recharts v3's `LabelList` `content` callback only forwards `x`/`y`/`width`/
+ *  `height`/`value`/`index`/`viewBox` (see `LabelList.js`'s
+ *  `svgPropertiesAndEvents(entry)` -- `payload` isn't a valid SVG attribute,
+ *  so it never survives that filter) -- reading `props.payload` here is
+ *  always `undefined`, which silently no-ops this label instead of throwing,
+ *  so the bug is easy to ship without noticing. `index` DOES survive (it's
+ *  set explicitly, not filtered), and lines up with `rows` because Recharts
+ *  builds the LabelList context data from the same array this chart passed
+ *  as `data`. Rendered just past the bar's end (not centered inside it) so
+ *  it's legible regardless of the bar's length -- a category with a small
+ *  dollar amount still gets a short bar, and centering the label inside that
+ *  bar would either overflow it or have to be suppressed entirely. Colored to
+ *  match its series (`fill`) so it still reads as "belonging" to that bar.
+ *  Renders nothing only when there's no baseline (`null`) to compare against. */
+export function renderDriftLabel(
+  props: DriftLabelProps,
+  rows: MonthOverMonthItem[],
+  field: 'this_month_drift_pct' | 'last_month_drift_pct',
+  fill: string,
+) {
+  const { x, y, width, height, index } = props;
+  if (x == null || y == null || width == null || height == null || index == null) {
+    return null;
+  }
+  const driftPct = rows[index]?.[field];
+  if (driftPct == null) {
+    return null;
+  }
+  const sign = driftPct >= 0 ? '+' : '';
+  return (
+    <text
+      x={x + width + DRIFT_LABEL_GAP}
+      y={y + height / 2}
+      textAnchor="start"
+      dominantBaseline="central"
+      fontSize={AXIS_FONT_SIZE}
+      fontWeight={600}
+      fill={fill}
+    >
+      {`${sign}${Math.round(driftPct * 100)}%`}
+    </text>
+  );
 }
 
 export function OverviewTab() {
@@ -427,6 +649,10 @@ export function OverviewTab() {
   const { filters, patchFilters } = useFilters();
   // Re-render charts (their colours are resolved from CSS vars in JS) when the theme flips.
   useChartTheme();
+  // The elements the two scrolling bar charts fill (see `floatingTooltipProps`).
+  // State rather than refs: the tooltip reads them while rendering.
+  const [topCategoriesAnchor, setTopCategoriesAnchor] = useState<HTMLDivElement | null>(null);
+  const [monthOverMonthAnchor, setMonthOverMonthAnchor] = useState<HTMLDivElement | null>(null);
 
   // Cross-filtering (Fix 14): clicking a category bar adds it to the active
   // filters via the shared FilterContext -- no separate filter mechanism.
@@ -461,7 +687,6 @@ export function OverviewTab() {
 
   const nw = data.net_worth;
   const ov = data.overview;
-  const hiddenSavingsMonths = ov.savings_rate_trend.filter((point) => point.savings_rate === null).length;
   // These three tiles average only whole calendar months, so say which window they cover —
   // otherwise "Monthly Expenses" is a number with no stated basis.
   const monthlyWindow =
@@ -469,7 +694,11 @@ export function OverviewTab() {
       ? 'not enough complete months'
       : `avg of ${ov.complete_months} complete ${ov.complete_months === 1 ? 'month' : 'months'}`;
   const dormantCount = nw.dormant_accounts.length;
-  const monthOverMonthRows = buildMonthOverMonthRows(ov.month_over_month);
+  const monthOverMonthRows = ov.month_over_month;
+  const monthOverMonthChartHeight = Math.max(
+    250,
+    monthOverMonthRows.length * MOM_ROW_HEIGHT + MOM_CHART_CHROME,
+  );
   const sortedIncomeBreakdown = [...ov.income_breakdown].sort((a, b) => b.amount - a.amount);
   const assetMixTotal = nw.asset_mix.reduce((sum, item) => sum + item.balance, 0);
   // Fixed order (depository, investment, credit, other), filtered to types
@@ -493,17 +722,97 @@ export function OverviewTab() {
     <div className="space-y-6">
       {/* KPI Tiles -- MetricTile (Fix 12/13): value + baseline comparison +
           sparkline where the API provides it, plus a hover/tap tooltip for
-          every metric from `metricInfo.ts`. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <MetricTile metricKey="net_worth" value={nw.net_worth} />
-        <MetricTile metricKey="total_assets" value={nw.total_assets} />
-        <MetricTile metricKey="total_liabilities" value={nw.total_liabilities} />
-        <MetricTile
-          metricKey="savings_rate"
-          value={ov.savings_rate}
-          format="percent"
-          metric={ov.metrics.savings_rate}
-        />
+          every metric from `metricInfo.ts`. All 11 top-level metric tiles
+          (former top-row / Income-Expenses-Net-Flow / Additional-Metrics
+          rows) live in one flex-wrap row so they read as a single glanceable
+          block. Width is a percentage of the container computed against a
+          fixed 4-column target (`calc(25% - 0.75rem)` at `lg`, accounting
+          for 3 gaps across 4 tiles at gap-4/1rem) rather than a fixed pixel
+          width -- a fixed pixel width lets the number of tiles-per-row drift
+          with the container's raw pixel width, splitting unevenly (e.g. 5+3
+          instead of 4+4). `justify-center` on the container only visibly
+          centers the genuinely short last row, since a fully-packed row has
+          no leftover space to center. `[&>*]:h-full` stretches each
+          `MetricTile` (its wrapper's only child) to the row's tallest tile --
+          flexbox's default `align-items: stretch` already equalizes the
+          wrapper's own height per row, but `MetricTile` doesn't accept a
+          `className` to fill that height on its own. */}
+      <div className="flex flex-wrap justify-center gap-4">
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="net_worth" value={nw.net_worth} metric={ov.metrics.net_worth} />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="total_assets" value={nw.total_assets} metric={ov.metrics.total_assets} />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="total_liabilities"
+            value={nw.total_liabilities}
+            metric={ov.metrics.total_liabilities}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="savings_rate"
+            value={ov.savings_rate}
+            format="percent"
+            metric={ov.metrics.savings_rate}
+          />
+        </div>
+        {ov.cash_flow_projection && (
+          <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+            <MetricTile
+              metricKey="projected_month_end_expenses"
+              value={ov.cash_flow_projection.projected_expenses}
+              sublabel={`day ${ov.cash_flow_projection.days_elapsed} of ${ov.cash_flow_projection.days_in_month}`}
+            />
+          </div>
+        )}
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="avg_monthly_income"
+            value={ov.avg_monthly_income}
+            sublabel={monthlyWindow}
+            metric={ov.metrics.avg_monthly_income}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="avg_monthly_expense"
+            value={ov.avg_monthly_expense}
+            sublabel={monthlyWindow}
+            metric={ov.metrics.avg_monthly_expense}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile
+            metricKey="avg_monthly_net"
+            value={ov.avg_monthly_net}
+            sublabel={monthlyWindow}
+            metric={ov.metrics.avg_monthly_net}
+          />
+        </div>
+        <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+          <MetricTile metricKey="flagged_count" value={ov.flagged_count} format="number" />
+        </div>
+        {ov.avg_weekly_expense > 0 && (
+          <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+            <MetricTile
+              metricKey="avg_weekly_expense"
+              value={ov.avg_weekly_expense}
+              metric={ov.metrics.avg_weekly_expense}
+            />
+          </div>
+        )}
+        {ov.avg_weekly_income > 0 && (
+          <div className="w-full flex-none sm:w-[calc(50%-0.5rem)] lg:w-[calc(25%-0.75rem)] [&>*]:h-full">
+            <MetricTile
+              metricKey="avg_weekly_income"
+              value={ov.avg_weekly_income}
+              metric={ov.metrics.avg_weekly_income}
+            />
+          </div>
+        )}
       </div>
 
       {/* Duplicate-account warning — mirrors app/dashboard.py:537-543 */}
@@ -516,155 +825,29 @@ export function OverviewTab() {
         </div>
       )}
 
-      {/* Income and Expenses Row -- all three tiles pass an equivalent `metric`
-          prop today, so this row isn't actually stretch-broken; `items-start`
-          is added anyway as defense-in-depth against a future tile that doesn't. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-3">
-        <MetricTile
-          metricKey="avg_monthly_income"
-          value={ov.avg_monthly_income}
-          sublabel={monthlyWindow}
-          metric={ov.metrics.avg_monthly_income}
-        />
-        <MetricTile
-          metricKey="avg_monthly_expense"
-          value={ov.avg_monthly_expense}
-          sublabel={monthlyWindow}
-          metric={ov.metrics.avg_monthly_expense}
-        />
-        <MetricTile
-          metricKey="avg_monthly_net"
-          value={ov.avg_monthly_net}
-          sublabel={monthlyWindow}
-          metric={ov.metrics.avg_monthly_net}
-        />
-      </div>
+      {/* Net Worth Trend -- former Home tab content (Phase 23), replacing the
+          old standalone Savings Rate Trend chart; that series now lives inside
+          this component's Monthly tab. */}
+      <NetWorthTrendChart
+        daily={ov.net_worth_trend_daily}
+        monthly={ov.net_worth_trend_monthly}
+        netWorthMomDelta={ov.net_worth_mom_delta}
+      />
 
-      {/* Savings Rate Trend Chart */}
-      {ov?.savings_rate_trend && ov.savings_rate_trend.length > 0 && (
-        <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-          <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Savings Rate Trend</h3>
-          <ResponsiveContainer width="100%" height={250} minWidth="100%">
-            <LineChart data={ov.savings_rate_trend} margin={CHART_MARGIN.default}>
-              <CartesianGrid {...gridProps()} />
-              {/* `interval="preserveStartEnd"` thins month ticks on a short
-                  filter-bounded series so labels don't crowd into each other;
-                  a wider y-axis (64 vs. the 56px default) gives the
-                  percent-formatted ticks (e.g. "-100.0%") room too -- both
-                  scoped to this chart rather than the shared axis defaults. */}
-              <XAxis dataKey="month" {...xAxisProps()} interval="preserveStartEnd" />
-              <YAxis
-                {...yAxisProps(64)}
-                tickFormatter={(value) => formatPercent(value)}
-                domain={[-1, 1]}
-                allowDataOverflow={true}
-              />
-              <Tooltip {...tooltipProps()} formatter={(value) => formatPercent(value as number)} />
-              <ReferenceLine y={0.2} {...referenceLineProps()} strokeDasharray="4 4" label="Target 20%" />
-              <Line
-                type="monotone"
-                dataKey="savings_rate"
-                stroke={categoricalColor(0)}
-                strokeWidth={2}
-                dot={{ fill: categoricalColor(0) }}
-                name="Savings Rate"
-                connectNulls={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-          {hiddenSavingsMonths > 0 && (
-            <p className="mt-2 text-xs text-ink-muted">
-              {hiddenSavingsMonths} {hiddenSavingsMonths === 1 ? 'month' : 'months'} hidden — no recorded
-              income.
-            </p>
-          )}
-        </div>
-      )}
+      {/* Balances are otherwise only as fresh as the last pipeline run -- up to
+          24 hours stale, which reads as wrong right after money moves. */}
+      <RefreshBalancesControl />
 
-      {/* Emergency Fund and Asset Mix -- paired because both are short, fixed
-          -height cards (a few text lines + meter; a single 120px stacked bar).
-          Item 2: both card wrappers share an explicit `min-h-56` (224px) so
-          neither reads as top-aligned-with-blank-space -- Asset Mix's realistic
-          rendered height is ASSET_MIX_HEIGHT (120px chart) + ~28px title line +
-          ~24px vertical padding (p-3/p-4) + ~24px legend row underneath the
-          chart (`Legend` renders below via `verticalAlign="bottom"`, inside the
-          same ResponsiveContainer height, so no extra allowance needed there)
-          -- comfortably under 224px with margin for the mb-4 gap. Emergency
-          Fund's own content (number + meter + caption) is shorter, so it is
-          vertically centered within the same reserved height via `flex
-          flex-col justify-center` on its content wrapper, rather than reading
-          as merely top-aligned. Owner Balances and Income Sources (below,
-          after Credit Utilization and the Top Categories/Month-over-Month
-          row) are the tall/variable pair instead -- regrouped by actual
-          content height, not by adding more `items-start` CSS to a mismatched
-          pairing. */}
-      <div className="grid grid-cols-1 items-stretch gap-4 sm:gap-6 lg:grid-cols-2">
-        {ov.emergency_fund_months !== null && (
-          <Card
-            title="Emergency Fund"
-            caption="Liquid savings ÷ average monthly expenses."
-            metricKey="emergency_fund_months"
-            className="min-h-56"
-            contentClassName="flex flex-1 flex-col justify-center"
-          >
-            <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
-            <div className="mt-3">
-              <Meter pct={ov.emergency_fund_months / 6} tone={emergencyFundTone(ov.emergency_fund_months)} />
-            </div>
-            <p className="mt-2 text-xs text-ink-muted">Goal: 6 months of expenses covered.</p>
-          </Card>
-        )}
+      {/* Anomalies (Phase 34). Sits above the masonry pool and full-width,
+          because an alert you have to hunt for is not an alert -- this is the
+          tab the user opens first. Each row is the sentence the detector
+          generated, not a score to interpret. */}
+      <AnomaliesCard />
 
-        {/* Asset Mix -- a single 100%-width horizontal stacked bar, not a pie:
-            the `dataviz` skill's `choosing-a-form.md` prefers a stacked bar for
-            part-to-whole data. Same color assignment as before
-            (`categoricalScale(n)[index]`), just a different mark. */}
-        {nw?.asset_mix && nw.asset_mix.length > 0 && (
-          <div className="min-h-56 rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Asset Mix</h3>
-            <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
-              <BarChart
-                data={[buildAssetMixRow(nw.asset_mix)]}
-                layout="vertical"
-                margin={CHART_MARGIN.compact}
-              >
-                <XAxis type="number" hide domain={[0, assetMixTotal]} />
-                <YAxis dataKey="category" type="category" hide />
-                <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
-                <Legend {...legendProps()} verticalAlign="bottom" />
-                {nw.asset_mix.map((item, index) => {
-                  const fill = categoricalScale(nw.asset_mix.length)[index];
-                  const pct = assetMixTotal > 0 ? item.balance / assetMixTotal : 0;
-                  return (
-                    <Bar
-                      key={item.subtype_label}
-                      dataKey={item.subtype_label}
-                      stackId="assets"
-                      fill={fill}
-                      name={item.subtype_label}
-                      {...surfaceGapProps()}
-                    >
-                      <LabelList
-                        dataKey={item.subtype_label}
-                        content={(props: object) =>
-                          renderAssetMixSegmentLabel(
-                            props as AssetMixLabelProps,
-                            item.subtype_label,
-                            pct,
-                            fill,
-                          )
-                        }
-                      />
-                    </Bar>
-                  );
-                })}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-      </div>
-
-      {/* Credit Utilization + limit editor — mirrors app/dashboard.py:604-675 */}
+      {/* Credit Utilization + limit editor — mirrors app/dashboard.py:604-675.
+          Full-width, fixed above the masonry pool below (not part of it) --
+          its own row count varies with card count, not with the pool's other
+          cards, so it doesn't belong in their height-balancing pool. */}
       {nw.credit_utilization.length > 0 && (
         <Card title="Credit Utilization" caption="Current balance against each card's limit.">
           <div className="divide-y divide-hairline">
@@ -676,101 +859,317 @@ export function OverviewTab() {
         </Card>
       )}
 
-      {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) and
-          Month-over-month by category (app/dashboard.py:891-912) */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
+      {/* Balanced two-column masonry pool (see `MasonryColumns`) -- every
+          card below used to be locked into a `grid-cols-2` row with a fixed
+          partner (Biggest Expense/Upcoming Recurring, Top Merchants/
+          Committed Spend, Emergency Fund/Asset Mix, Top Categories/
+          Month-over-Month, Owner Balances/Income Sources). Those pairings
+          mismatched badly whenever one card's content ran much longer than
+          its row partner's (e.g. Owner Balances' small-multiples list next to
+          Income Sources' short one), leaving dead whitespace under the
+          shorter card. Treating all 10 as one pool lets the layout balance by
+          actual rendered height instead of by row position.
+
+          Both columns end on the same line. A card scrolls only when its
+          content passes the ceiling (70% of the viewport, floored at 560px),
+          and only its body scrolls: the title, caption and any header legend
+          stay put. Then the shorter column is filled in order: its clipped
+          cards and charts grow back, the taller column's clipped cards give
+          up height (scrolling a bit more), and only what is left is spread
+          evenly through the shorter column's cards. */}
+      <MasonryColumns>
+        <Card title="Biggest Expense This Month">
+          <Stack>
+            {ov.biggest_expense_this_month ? (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-ink-secondary">
+                  {ov.biggest_expense_this_month.description}{' '}
+                  <span className="text-ink-muted">· {ov.biggest_expense_this_month.date}</span>
+                </span>
+                <span className="tabular-nums font-medium text-ink">
+                  {formatCurrency(ov.biggest_expense_this_month.amount)}
+                </span>
+              </div>
+            ) : (
+              <p className="text-sm text-ink-muted">No expenses recorded this month.</p>
+            )}
+          </Stack>
+        </Card>
+
+        <Card
+          title="Upcoming Recurring Charges"
+          caption="Projected next charge date, based on your typical interval between charges."
+        >
+          {ov.upcoming_recurring.length > 0 ? (
+            <Stack as="ul" className="gap-1.5">
+              {ov.upcoming_recurring.map((row) => (
+                <li
+                  key={row.stream_id ?? row.description}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-ink-secondary">
+                    {row.description}{' '}
+                    <span className="text-ink-muted">· {formatRelativeDate(row.next_expected_date)}</span>
+                    {/* Fewer than three observed occurrences: say so rather than
+                        presenting the prediction with the same confidence as a
+                        settled one. */}
+                    {row.status === 'early_detection' && (
+                      <span className="text-ink-muted"> · low confidence</span>
+                    )}
+                  </span>
+                  <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+                </li>
+              ))}
+            </Stack>
+          ) : (
+            <Stack>
+              <p className="text-sm text-ink-muted">No recurring charges with a predictable cadence yet.</p>
+            </Stack>
+          )}
+        </Card>
+
+        <Card title="Top Merchants (Trailing 12 Months)">
+          {ov.top_merchants.length > 0 ? (
+            <Stack as="ul" className="gap-1.5">
+              {ov.top_merchants.map((row) => (
+                <li key={row.description} className="flex items-center justify-between text-sm">
+                  <span className="text-ink-secondary">{row.description}</span>
+                  <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+                </li>
+              ))}
+            </Stack>
+          ) : (
+            <Stack>
+              <p className="text-sm text-ink-muted">Not enough expense history yet.</p>
+            </Stack>
+          )}
+        </Card>
+
+        <Card title="Committed / Recurring Spend" caption="All-time total per recurring item.">
+          {ov.recurring_items.length > 0 ? (
+            <Stack as="ul" className="gap-1.5">
+              {ov.recurring_items.map((row) => (
+                <li key={row.description} className="flex items-center justify-between text-sm">
+                  <span className="text-ink-secondary">{row.description}</span>
+                  <span className="tabular-nums font-medium text-ink">{formatCurrency(row.amount)}</span>
+                </li>
+              ))}
+            </Stack>
+          ) : (
+            <Stack>
+              <p className="text-sm text-ink-muted">
+                Nothing flagged recurring yet — mark a transaction recurring in the Transactions tab.
+              </p>
+            </Stack>
+          )}
+        </Card>
+
+        {ov.emergency_fund_months !== null && (
+          <Card
+            title="Emergency Fund"
+            caption="Liquid savings ÷ average monthly expenses."
+            metricKey="emergency_fund_months"
+          >
+            <Stack className="gap-2.5">
+              <p className="text-2xl font-bold text-ink">{ov.emergency_fund_months.toFixed(1)} months</p>
+              <div>
+                <Meter
+                  pct={ov.emergency_fund_months / 6}
+                  tone={emergencyFundTone(ov.emergency_fund_months)}
+                />
+              </div>
+              <p className="text-xs text-ink-muted">Goal: 6 months of expenses covered.</p>
+            </Stack>
+          </Card>
+        )}
+
+        {/* Asset Mix -- a single 100%-width horizontal stacked bar, not a pie:
+            the `dataviz` skill's `choosing-a-form.md` prefers a stacked bar for
+            part-to-whole data. Same color assignment as before
+            (`categoricalScale(n)[index]`), just a different mark. */}
+        {nw?.asset_mix && nw.asset_mix.length > 0 && (
+          <Card title="Asset Mix">
+            <Stack>
+              <ResponsiveContainer width="100%" height={ASSET_MIX_HEIGHT} minWidth="100%">
+                <BarChart
+                  data={[buildAssetMixRow(nw.asset_mix)]}
+                  layout="vertical"
+                  margin={CHART_MARGIN.compact}
+                >
+                  <XAxis type="number" hide domain={[0, assetMixTotal]} />
+                  <YAxis dataKey="category" type="category" hide />
+                  <Tooltip {...tooltipProps()} formatter={(value) => formatCurrency(value as number)} />
+                  <Legend {...legendProps()} verticalAlign="bottom" />
+                  {nw.asset_mix.map((item, index) => {
+                    const fill = categoricalScale(nw.asset_mix.length)[index];
+                    const pct = assetMixTotal > 0 ? item.balance / assetMixTotal : 0;
+                    return (
+                      <Bar
+                        key={item.subtype_label}
+                        dataKey={item.subtype_label}
+                        stackId="assets"
+                        fill={fill}
+                        name={item.subtype_label}
+                        {...surfaceGapProps()}
+                      >
+                        <LabelList
+                          dataKey={item.subtype_label}
+                          content={(props: object) =>
+                            renderAssetMixSegmentLabel(
+                              props as AssetMixLabelProps,
+                              item.subtype_label,
+                              pct,
+                              fill,
+                            )
+                          }
+                        />
+                      </Bar>
+                    );
+                  })}
+                </BarChart>
+              </ResponsiveContainer>
+            </Stack>
+          </Card>
+        )}
+
+        {/* Top Categories (horizontal, sorted — app/dashboard.py:865-889) */}
         {ov?.top_categories && ov.top_categories.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-1 text-base sm:text-lg font-semibold text-ink">Top Expense Categories</h3>
-            <p className="mb-4 text-xs text-ink-muted">{strings.crossFilter.categoryHint}</p>
-            <ResponsiveContainer
-              width="100%"
-              height={Math.max(250, ov.top_categories.length * 32)}
-              minWidth="100%"
-            >
-              <BarChart data={ov.top_categories} layout="vertical" margin={CHART_MARGIN.default}>
-                <CartesianGrid {...gridProps()} />
-                <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis
-                  dataKey="category"
-                  type="category"
-                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
-                />
-                <Tooltip
-                  {...tooltipProps()}
-                  formatter={(value) => formatCurrency(value as number)}
-                  labelFormatter={(label) => formatCategory(label as string)}
-                />
-                <Bar
-                  dataKey="amount"
-                  fill={expenseColor()}
-                  name="Amount"
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                  cursor="pointer"
-                  onClick={(entry) => addCategoryFilter((entry.payload as TopCategoryItem).category)}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <Card
+            title="Top Expense Categories"
+            caption={strings.crossFilter.categoryHint}
+            minBody={MIN_BODY_CHART}
+            elasticHeight={Math.max(250, ov.top_categories.length * 32)}
+          >
+            <div ref={setTopCategoriesAnchor} className="h-full">
+              <ResponsiveContainer width="100%" height="100%" minWidth="100%">
+                <BarChart data={ov.top_categories} layout="vertical" margin={CHART_MARGIN.default}>
+                  <CartesianGrid {...gridProps()} />
+                  <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
+                  <YAxis
+                    dataKey="category"
+                    type="category"
+                    {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                    tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
+                  />
+                  <Tooltip
+                    {...tooltipProps()}
+                    {...floatingTooltipProps(topCategoriesAnchor)}
+                    formatter={(value) => formatCurrency(value as number)}
+                    labelFormatter={(label) => formatCategory(label as string)}
+                  />
+                  <Bar
+                    dataKey="amount"
+                    fill={expenseColor()}
+                    name="Amount"
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                    cursor="pointer"
+                    onClick={(entry) => addCategoryFilter((entry.payload as TopCategoryItem).category)}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
         )}
 
+        {/* Month-over-month by category (app/dashboard.py:891-912) */}
         {monthOverMonthRows.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Month-over-Month by Category</h3>
-            <ResponsiveContainer
-              width="100%"
-              height={Math.max(250, monthOverMonthRows.length * 32)}
-              minWidth="100%"
-            >
-              <BarChart data={monthOverMonthRows} layout="vertical" margin={CHART_MARGIN.default}>
-                <CartesianGrid {...gridProps()} />
-                <XAxis type="number" {...xAxisProps()} tickFormatter={(value) => formatCurrency(value)} />
-                <YAxis
-                  dataKey="category"
-                  type="category"
-                  {...yAxisProps(CATEGORY_AXIS_WIDTH)}
-                  tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
-                />
-                <Tooltip
-                  {...tooltipProps()}
-                  formatter={(value) => formatCurrency(value as number)}
-                  labelFormatter={(label) => formatCategory(label as string)}
-                />
-                <Legend {...legendProps()} />
-                <Bar
-                  dataKey="last_month"
-                  name="Last month"
-                  fill={categoricalColor(1)}
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                />
-                <Bar
-                  dataKey="this_month"
-                  name="This month"
-                  fill={categoricalColor(0)}
-                  maxBarSize={BAR_MAX_SIZE}
-                  radius={BAR_RADIUS_HORIZONTAL}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <Card
+            title="Month-over-Month by Category"
+            headerExtra={
+              <SwatchLegend
+                entries={[
+                  { label: 'Last month', color: categoricalColor(1) },
+                  { label: 'This month', color: categoricalColor(0) },
+                  { label: 'Usual', color: categoricalColor(2) },
+                ]}
+              />
+            }
+            minBody={MIN_BODY_CHART}
+            elasticHeight={monthOverMonthChartHeight}
+          >
+            <div ref={setMonthOverMonthAnchor} className="h-full">
+              <ResponsiveContainer width="100%" height="100%" minWidth="100%">
+                <BarChart
+                  data={monthOverMonthRows}
+                  layout="vertical"
+                  margin={{ ...CHART_MARGIN.default, right: 56 }}
+                  barCategoryGap={6}
+                  barGap={3}
+                >
+                  <CartesianGrid {...gridProps()} />
+                  <XAxis
+                    type="number"
+                    {...xAxisProps()}
+                    // Headroom past the data max so a drift-% label past the longest
+                    // bar's end (rendered outside the bar -- see renderDriftLabel)
+                    // never gets clipped by the plot's right edge.
+                    domain={[0, (dataMax: number) => dataMax * 1.2]}
+                    tickFormatter={(value) => formatCurrency(value)}
+                  />
+                  <YAxis
+                    dataKey="category"
+                    type="category"
+                    {...yAxisProps(CATEGORY_AXIS_WIDTH)}
+                    tickFormatter={(value: string) => truncateTickLabel(formatCategory(value))}
+                  />
+                  <Tooltip
+                    {...tooltipProps()}
+                    {...floatingTooltipProps(monthOverMonthAnchor)}
+                    formatter={(value) => formatCurrency(value as number)}
+                    labelFormatter={(label) => formatCategory(label as string)}
+                  />
+                  <Bar
+                    dataKey="last_month"
+                    name="Last month"
+                    fill={categoricalColor(1)}
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                  >
+                    <LabelList
+                      dataKey="last_month"
+                      content={(props: object) =>
+                        renderDriftLabel(
+                          props as DriftLabelProps,
+                          monthOverMonthRows,
+                          'last_month_drift_pct',
+                          categoricalColor(1),
+                        )
+                      }
+                    />
+                  </Bar>
+                  <Bar
+                    dataKey="this_month"
+                    name="This month"
+                    fill={categoricalColor(0)}
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                  >
+                    <LabelList
+                      dataKey="this_month"
+                      content={(props: object) =>
+                        renderDriftLabel(
+                          props as DriftLabelProps,
+                          monthOverMonthRows,
+                          'this_month_drift_pct',
+                          categoricalColor(0),
+                        )
+                      }
+                    />
+                  </Bar>
+                  <Bar
+                    dataKey="usual"
+                    name="Usual"
+                    fill={categoricalColor(2)}
+                    maxBarSize={BAR_MAX_SIZE}
+                    radius={BAR_RADIUS_HORIZONTAL}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
         )}
-      </div>
 
-      {/* Owner Balances and Income Sources -- paired because both are
-          genuinely data-driven with no fixed ceiling (small multiples that
-          grow with owner/account count; a list that grows with income-source
-          count), so no pairing strategy makes them match at every data
-          volume. Item 3: both cards instead share a fixed `max-h-[420px]
-          overflow-y-auto` on their CONTENT area only -- the outer card box
-          stays a constant height regardless of data volume, and whichever
-          side has more content than fits gets its own internal scrollbar.
-          420px comfortably shows several owners/accounts or income rows
-          before scrolling is needed. See the Emergency Fund/Asset Mix grid
-          above for the short/fixed-height pair this was split from. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:gap-6 lg:grid-cols-2">
         {/* Owner Balances -- small multiples: one plain-HTML mini list per
             owner (Item 4 -- see `OwnerBalanceMiniList`), account short name on
             the left, one row per account with a direct value label so every
@@ -778,38 +1177,40 @@ export function OverviewTab() {
             dimension (account type via `categoricalScale`) per the `dataviz`
             skill's categorical-hue rule -- owner is disambiguated by spatial
             separation, not a second hue. One shared legend covers account
-            type for the whole group instead of repeating per list. */}
+            type for the whole group instead of repeating per list; it sits in
+            the card header, so it stays put while the body scrolls. The body
+            scrolls only when its content passes the masonry ceiling (70% of
+            the viewport, floored at 560px); below that, the card is sized by
+            the balance-then-stretch rule (see `MasonryColumns`). */}
         {nw?.owner_balances && nw.owner_balances.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Owner Balances</h3>
-            <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-              {ownerBalanceAccountTypes.map((type) => (
-                <span key={type} className="flex items-center gap-1.5 text-xs text-ink-secondary">
-                  <span
-                    className="inline-block h-2.5 w-2.5 rounded-full"
-                    style={{ backgroundColor: accountTypeColor(type) }}
-                  />
-                  {ACCOUNT_TYPE_LABELS[type] ?? type}
-                </span>
-              ))}
-            </div>
-            <div className="grid max-h-[420px] grid-cols-1 gap-4 overflow-y-auto">
+          <Card
+            title="Owner Balances"
+            headerExtra={
+              <SwatchLegend
+                entries={ownerBalanceAccountTypes.map((type) => ({
+                  label: ACCOUNT_TYPE_LABELS[type] ?? type,
+                  color: accountTypeColor(type),
+                }))}
+              />
+            }
+          >
+            <Stack className="gap-4">
               {nw.owner_balances.map((owner) => (
                 <OwnerBalanceMiniList key={owner.owner} owner={owner} maxBalance={maxOwnerAccountBalance} />
               ))}
-            </div>
-          </div>
+            </Stack>
+          </Card>
         )}
 
         {/* Income Sources -- built from the same `LabeledBarRow` as Owner
             Balances (aligned label column, same row height, same `title`
-            hover-for-full-name behavior, same `max-h-[420px]` scroll cap) so
-            the two paired cards read as the same size instead of a plain-HTML
-            list next to a Recharts chart with its own independent sizing. */}
+            hover-for-full-name behavior). Trailing 12 months, same window as
+            Top Merchants/Top Categories/Month-over-Month -- it used to follow
+            the active period filter instead, which was inconsistent with
+            every other "top N" card on this tab. */}
         {sortedIncomeBreakdown.length > 0 && (
-          <div className="rounded-lg border border-hairline bg-surface-1 p-3 sm:p-4">
-            <h3 className="mb-4 text-base sm:text-lg font-semibold text-ink">Income Sources</h3>
-            <div className="max-h-[420px] space-y-1.5 overflow-y-auto">
+          <Card title="Income Sources" caption="Trailing 12 Months">
+            <Stack className="gap-1.5">
               {sortedIncomeBreakdown.map((source, index) => (
                 <LabeledBarRow
                   key={`${source.description}-${index}`}
@@ -820,23 +1221,10 @@ export function OverviewTab() {
                   color={incomeColor()}
                 />
               ))}
-            </div>
-          </div>
+            </Stack>
+          </Card>
         )}
-      </div>
-
-      {/* Additional Metrics -- all three tiles are the same MetricTile shape
-          (no `metric` prop), so not stretch-broken today; `items-start` added
-          for the same defense-in-depth reason as the Income/Expenses row above. */}
-      <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <MetricTile metricKey="flagged_count" value={ov.flagged_count} format="number" />
-        {ov.avg_weekly_expense > 0 && (
-          <MetricTile metricKey="avg_weekly_expense" value={ov.avg_weekly_expense} />
-        )}
-        {ov.avg_weekly_income > 0 && (
-          <MetricTile metricKey="avg_weekly_income" value={ov.avg_weekly_income} />
-        )}
-      </div>
+      </MasonryColumns>
 
       {/* Sync Health Warning */}
       {nw?.stale_accounts && nw.stale_accounts.length > 0 && (

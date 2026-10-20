@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import unittest
 from datetime import date, timedelta
+from typing import Any
 
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/db")
 
@@ -23,12 +24,17 @@ from api.viewmodels import (  # noqa: E402
     MIN_MONTHLY_INCOME_FOR_RATE,
     SPARKLINE_MONTHS,
     SYNC_STALE_DAYS,
+    _build_last_period_metric,
     _build_metric,
+    _weekly_series,
+    build_budget,
     build_cash_flow,
-    build_home,
+    build_ledger,
     build_net_worth,
     build_overview,
     complete_month_keys,
+    exclude_duplicate_rows,
+    net_linked_transactions,
     prepare_transactions,
 )
 
@@ -60,6 +66,15 @@ def _tx(day: str, magnitude: float, direction: int, **overrides):
 
 def _frame(rows) -> pd.DataFrame:
     return prepare_transactions(pd.DataFrame(rows))
+
+
+def _frame_with_category_source(rows, source: str | None) -> pd.DataFrame:
+    """Like `_frame`, but sets `category_source` on the raw frame BEFORE
+    `prepare_transactions` runs `_apply_category_driven_tx_type` -- setting it on
+    `_frame`'s already-computed output would be too late to affect `tx_type`."""
+    raw = pd.DataFrame(rows)
+    raw["category_source"] = source
+    return prepare_transactions(raw)
 
 
 def _account(key: str, owner: str, acct_type: str, balance: float, **overrides):
@@ -412,7 +427,14 @@ class MetricBaselineTests(unittest.TestCase):
         metrics = build_overview(self._two_years(), pd.DataFrame([]))["metrics"]
         self.assertEqual(
             set(metrics),
-            {"avg_monthly_income", "avg_monthly_expense", "avg_monthly_net", "savings_rate"},
+            {
+                "avg_monthly_income",
+                "avg_monthly_expense",
+                "avg_monthly_net",
+                "savings_rate",
+                "avg_weekly_income",
+                "avg_weekly_expense",
+            },
         )
         for key, metric in metrics.items():
             with self.subTest(key=key):
@@ -485,25 +507,89 @@ def _month_start(months_ago: int):
     return period.start_time.date()
 
 
-class HomeInsightsTests(unittest.TestCase):
-    """Fix/feature: the Home tab's insights (PLAN.md §4 Q4) -- recurring spend,
-    merchant breakdown, cash-flow projection, category drift, subscription detection.
+def _history_point(day_offset_iso: str, net_worth: float) -> dict[str, Any]:
+    """A `get_net_worth_history()`-shaped row. `net_worth_trend_monthly`'s resampling
+    loop reads `liabilities`/`liquid_cash` off every snapshot even when a given test
+    only cares about `net_worth`/`date`, so every fixture needs the full shape or it
+    raises a KeyError deep inside `build_overview`."""
+    return {
+        "date": day_offset_iso,
+        "net_worth": net_worth,
+        "assets": net_worth,
+        "liabilities": 0.0,
+        "liquid_cash": net_worth,
+    }
+
+
+class OverviewHomeInsightsTests(unittest.TestCase):
+    """Phase 23 -- the retired Home tab's insights (recurring spend, merchant
+    breakdown, cash-flow projection, net-worth trend/mom-delta, category drift) were
+    folded into `build_overview`. Category drift is no longer its own list -- it now
+    lives on `month_over_month`'s `usual`/`this_month_drift_pct`/`last_month_drift_pct`
+    fields (one row per category, wide). The standalone `recurring_monthly_spend` tile
+    and subscription detection were dropped as product features entirely, not
+    renamed/reshaped -- there is no replacement coverage for either below.
     """
 
-    def test_empty_frame_still_passes_through_net_worth_history(self) -> None:
+    def test_empty_df_returns_the_static_empty_result_even_with_net_worth_history(self) -> None:
+        # Discrepancy vs. the old build_home: build_overview's `df.empty` guard
+        # short-circuits to a hardcoded empty dict BEFORE `net_worth_history` is
+        # consulted at all, so a caller whose *period-filtered* frame happens to be
+        # empty loses the net-worth trend even when real snapshot history exists.
+        # build_home never had this coupling (its two params were independent). Pinning
+        # the actual behaviour here since this is what the shipped code now does.
         empty = pd.DataFrame(
             [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
         )
-        history = [{"date": "2026-08-20", "net_worth": 1000.0}]
-        result = build_home(empty, history)
-        self.assertEqual(result["net_worth_trend"], [{"date": "2026-08-20", "net_worth": 1000.0}])
+        history = [_history_point("2026-08-20", 1000.0)]
+        result = build_overview(empty, pd.DataFrame([]), empty, history)
+        self.assertEqual(result["net_worth_trend_daily"], [])
         self.assertEqual(result["recurring_items"], [])
         self.assertEqual(result["top_merchants"], [])
         self.assertIsNone(result["cash_flow_projection"])
-        self.assertEqual(result["category_drift"], [])
-        self.assertEqual(result["subscriptions"], [])
 
-    def test_recurring_monthly_spend_averages_only_complete_months_and_flag_matters(self) -> None:
+    def test_net_worth_trend_monthly_excludes_credit_utilization_for_the_current_month(self) -> None:
+        # Phase 24 fix: credit_utilization_pct previously leaked a value for the
+        # in-progress current month even though savings_rate/emergency_fund_months
+        # (computed from series that already exclude the current month upstream) never
+        # did -- all three "monthly extra" metrics must follow the same "no value until
+        # the month is complete" rule.
+        last_month = _month_start(1)
+        current_month = date.today().replace(day=1)
+        acct_df = pd.DataFrame([_account("plaid:cc1", "Jacob", "credit", 300.0, balance_limit=1000.0)])
+        # Not `_history_point()`: that helper hardcodes `liabilities: 0.0`, but this
+        # test needs a nonzero credit balance to exercise `credit_utilization_pct`.
+        history = [
+            {
+                "date": last_month.isoformat(),
+                "net_worth": 700.0,
+                "assets": 1000.0,
+                "liabilities": 300.0,
+                "liquid_cash": 1000.0,
+            },
+            {
+                "date": current_month.isoformat(),
+                "net_worth": 700.0,
+                "assets": 1000.0,
+                "liabilities": 300.0,
+                "liquid_cash": 1000.0,
+            },
+        ]
+        # Some transaction history is needed so `all_time_months`/`complete_month_keys`
+        # treats `last_month` as complete -- spread across the month like other tests
+        # in this file do.
+        df = _frame(
+            [
+                _tx(last_month.isoformat(), 50.0, _EXPENSE),
+                _tx(last_month.replace(day=28).isoformat(), 50.0, _EXPENSE),
+            ]
+        )
+        result = build_overview(df, acct_df, df, history)
+        by_month = {row["month"]: row for row in result["net_worth_trend_monthly"]}
+        self.assertAlmostEqual(by_month[last_month.strftime("%Y-%m")]["credit_utilization_pct"], 0.3)
+        self.assertIsNone(by_month[current_month.strftime("%Y-%m")]["credit_utilization_pct"])
+
+    def test_recurring_items_lists_only_flagged_expenses(self) -> None:
         baseline = _month_start(2)
         # Spread across the month (day 1 and day 28) so its observed span covers the
         # whole month and `complete_month_keys` counts it -- a single-day span
@@ -527,9 +613,10 @@ class HomeInsightsTests(unittest.TestCase):
                 ),
             ]
         )
-        result = build_home(df, [])
-        self.assertAlmostEqual(result["recurring_monthly_spend"], 50.0)
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertEqual(result["recurring_items"], [{"description": "Gym Membership", "amount": 50.0}])
+        # `recurring_monthly_spend` (a single float) backed a Home-tab tile removed
+        # from the product in Phase 23 -- no replacement key, nothing to assert here.
 
     def test_top_merchants_aggregates_by_description_within_trailing_12_months(self) -> None:
         baseline = _month_start(2)
@@ -540,11 +627,31 @@ class HomeInsightsTests(unittest.TestCase):
                 _tx(baseline.isoformat(), 10.0, _EXPENSE, description="Coffee Shop"),
             ]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertEqual(
             result["top_merchants"][0],
             {"description": "Amazon", "amount": 100.0},
         )
+
+    def test_income_breakdown_uses_trailing_12_months_not_the_period_filter(self) -> None:
+        # Income Sources used to read the period-filtered `df` while its sibling cards
+        # (Top Merchants/Top Categories/Month-over-Month) all use the trailing-12-month
+        # `all_time_df` window -- it now matches them. `df` here has no income at all
+        # (simulating a narrow active period filter); `all_time_df` has income within
+        # the last 12 months, which must still show up.
+        within_window = _month_start(2)
+        outside_window = _month_start(20)
+        period_df = _frame([_tx(within_window.isoformat(), 10.0, _EXPENSE, description="Groceries")])
+        all_time_df = _frame(
+            [
+                _tx(within_window.isoformat(), 10.0, _EXPENSE, description="Groceries"),
+                _tx(within_window.isoformat(), 2500.0, _INCOME, description="Employer Inc"),
+                # Older than the trailing-12-month window -- must be excluded.
+                _tx(outside_window.isoformat(), 900.0, _INCOME, description="Old Freelance Gig"),
+            ]
+        )
+        result = build_overview(period_df, pd.DataFrame([]), all_time_df, [])
+        self.assertEqual(result["income_breakdown"], [{"description": "Employer Inc", "amount": 2500.0}])
 
     def test_cash_flow_projection_present_only_for_the_current_month(self) -> None:
         today = date.today()
@@ -554,7 +661,7 @@ class HomeInsightsTests(unittest.TestCase):
                 _tx(today.isoformat(), 100.0, _EXPENSE),
             ]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         projection = result["cash_flow_projection"]
         self.assertIsNotNone(projection)
         self.assertEqual(projection["month"], today.strftime("%Y-%m"))
@@ -567,104 +674,349 @@ class HomeInsightsTests(unittest.TestCase):
     def test_cash_flow_projection_is_none_without_current_month_data(self) -> None:
         baseline = _month_start(3)
         df = _frame([_tx(baseline.isoformat(), 100.0, _EXPENSE)])
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertIsNone(result["cash_flow_projection"])
 
-    def test_category_drift_compares_current_month_to_the_users_own_baseline(self) -> None:
-        baseline = _month_start(2)
+    def test_month_over_month_drift_uses_the_users_own_baseline(self) -> None:
+        # Groceries has two complete baseline months (100/mo) then spikes to 140 this
+        # month -- this is the old "category drift" test, rewritten against
+        # `month_over_month`'s wide `usual`/`this_month_drift_pct` fields (Phase 23
+        # folded category drift into that list instead of keeping it separate).
+        m3 = _month_start(3)
+        m2 = _month_start(2)
         today = date.today()
         df = _frame(
             [
-                _tx(baseline.isoformat(), 100.0, _EXPENSE, category="Groceries"),
-                _tx(today.isoformat(), 140.0, _EXPENSE, category="Groceries"),
+                _tx(m3.isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g1a"),
+                _tx(
+                    m3.replace(day=28).isoformat(),
+                    50.0,
+                    _EXPENSE,
+                    category="Groceries",
+                    transaction_hash="g1b",
+                ),
+                _tx(m2.isoformat(), 50.0, _EXPENSE, category="Groceries", transaction_hash="g2a"),
+                _tx(
+                    m2.replace(day=28).isoformat(),
+                    50.0,
+                    _EXPENSE,
+                    category="Groceries",
+                    transaction_hash="g2b",
+                ),
+                _tx(today.isoformat(), 140.0, _EXPENSE, category="Groceries", transaction_hash="g3"),
+                # First seen this month -- no historical baseline to drift against.
+                _tx(today.isoformat(), 50.0, _EXPENSE, category="Brand New Category", transaction_hash="b1"),
             ]
         )
-        result = build_home(df, [])
-        drift = {row["category"]: row for row in result["category_drift"]}
-        self.assertAlmostEqual(drift["Groceries"]["baseline"], 100.0)
-        self.assertAlmostEqual(drift["Groceries"]["current"], 140.0)
-        self.assertAlmostEqual(drift["Groceries"]["drift_pct"], 0.4)
+        result = build_overview(df, pd.DataFrame([]), df, [])
+        mom = {row["category"]: row for row in result["month_over_month"]}
+        self.assertAlmostEqual(mom["Groceries"]["usual"], 100.0)
+        self.assertAlmostEqual(mom["Groceries"]["this_month"], 140.0)
+        self.assertAlmostEqual(mom["Groceries"]["this_month_drift_pct"], 0.4)
+        self.assertIsNone(mom["Brand New Category"]["usual"])
+        self.assertIsNone(mom["Brand New Category"]["this_month_drift_pct"])
 
-    def test_category_with_no_baseline_is_skipped(self) -> None:
+
+class BuildLedgerTests(unittest.TestCase):
+    """Test `build_ledger()` output includes pfc_detailed and category_source fields."""
+
+    def test_ledger_includes_pfc_and_category_source_from_dataframe(self) -> None:
+        # Build a frame using _frame() then manually add pfc columns after enrichment
+        df = _frame(
+            [
+                _tx("2026-05-01", 10.0, _EXPENSE, transaction_hash="h1"),
+                _tx("2026-05-02", 20.0, _EXPENSE, transaction_hash="h2"),
+            ]
+        )
+        # After prepare_transactions/enrichment, add the pfc columns using a dict for proper alignment
+        pfc_map = {"h1": "FOOD_AND_DRINK_RESTAURANTS", "h2": None}
+        source_map = {"h1": "plaid", "h2": None}
+        df["pfc_detailed"] = df["transaction_hash"].map(pfc_map)
+        df["category_source"] = df["transaction_hash"].map(source_map)
+        df["linked_transaction_hash"] = None
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 2)
+        # build_ledger sorts by date descending, so result[0] is h2 (2026-05-02)
+        h1_result = next(r for r in result if r["hash"] == "h1")
+        h2_result = next(r for r in result if r["hash"] == "h2")
+        # h1 row has both fields populated
+        self.assertEqual(h1_result["pfc_detailed"], "FOOD_AND_DRINK_RESTAURANTS")
+        self.assertEqual(h1_result["category_source"], "plaid")
+        # h2 row has None
+        self.assertIsNone(h2_result["pfc_detailed"])
+        self.assertIsNone(h2_result["category_source"])
+
+    def test_ledger_handles_nan_pfc_and_source_fields(self) -> None:
+        # NaN values from missing columns get converted to None by _clean()
+        df = _frame([_tx("2026-05-01", 10.0, _EXPENSE, transaction_hash="h1")])
+        # Explicitly add NaN columns (as would occur if merged but no value found)
+        df["pfc_detailed"] = pd.NA
+        df["category_source"] = pd.NA
+        df["linked_transaction_hash"] = pd.NA
+        result = build_ledger(df)
+        self.assertIsNone(result[0]["pfc_detailed"])
+        self.assertIsNone(result[0]["category_source"])
+
+    def test_ledger_empty_dataframe_returns_empty_list(self) -> None:
+        empty = pd.DataFrame(
+            [],
+            columns=[
+                "date",
+                "month",
+                "week",
+                "tx_type",
+                "adjusted_amount",
+                "is_outlier",
+                "pfc_detailed",
+                "category_source",
+            ],
+        )
+        result = build_ledger(empty)
+        self.assertEqual(result, [])
+
+
+class ApplyCategoryDrivenTxTypeTests(unittest.TestCase):
+    """Tests for `_apply_category_driven_tx_type` and its integration in
+    `prepare_transactions`. The override map forces tx_type for INCOME/TRANSFER_IN/
+    TRANSFER_OUT categories, while non-override categories keep the heuristic value
+    from `_enrich_transactions`/`_classify_tx_type`."""
+
+    def test_income_category_overrides_expense_amount_sign(self) -> None:
+        # A positive amount (outflow) would normally be "expense" per the sign heuristic,
+        # but INCOME category overrides it to "income" anyway — proving category wins.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="INCOME", transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "income")
+
+    def test_transfer_in_category_overrides_to_transfer_when_merchant_sourced(self) -> None:
+        # TRANSFER_IN becomes "transfer" when category_source == "merchant" -- the
+        # category traces back to a user's own correction (CascadeCategorizer's
+        # merchant-memory layer), so it's a genuine, deliberate exclusion.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="TRANSFER_IN", transaction_hash="h1")
+        df = _frame_with_category_source([row], "merchant")
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "transfer")
+
+    def test_transfer_out_category_overrides_to_transfer_when_merchant_sourced(self) -> None:
+        # Same as above, for TRANSFER_OUT.
+        row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_OUT", transaction_hash="h1")
+        df = _frame_with_category_source([row], "merchant")
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "transfer")
+
+    def test_transfer_in_category_does_not_override_when_plaid_sourced(self) -> None:
+        # Regression test for the root cause of the -1935.5% savings-rate bug: Plaid's
+        # own unverified TRANSFER_IN guess (e.g. an unlabeled e-Transfer) must NOT
+        # silently delete real income. A negative amount on a depository account stays
+        # "income" per the heuristic, since nothing here confirms it's actually a
+        # transfer between the user's own accounts.
+        row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_IN", transaction_hash="h1")
+        df = _frame_with_category_source([row], "plaid")
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "income")
+
+    def test_transfer_out_category_does_not_override_when_plaid_sourced(self) -> None:
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="TRANSFER_OUT", transaction_hash="h1")
+        df = _frame_with_category_source([row], "plaid")
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_transfer_in_category_does_not_override_when_category_source_missing(self) -> None:
+        # `category_source` may be absent entirely (older fixtures, or a caller that
+        # hasn't merged it in) -- treated the same as "not merchant-sourced", i.e. no
+        # transfer override, not a KeyError.
+        row = _tx("2026-05-01", 100.0, _INCOME, category="TRANSFER_IN", transaction_hash="h1")
+        df = _frame([row])
+        self.assertNotIn("category_source", df.columns)
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "income")
+
+    def test_transfer_in_category_still_caught_by_internal_transfer_detection(self) -> None:
+        # Even with a Plaid-sourced (unverified) TRANSFER_IN guess that this override
+        # now leaves alone, a GENUINE self-transfer is still independently caught by
+        # _detect_internal_transfers (matching amount/date across the user's own
+        # accounts) -- this override being narrower doesn't weaken that detection.
+        outflow = _tx(
+            "2026-05-01",
+            500.0,
+            _EXPENSE,
+            category="TRANSFER_OUT",
+            transaction_hash="h-out",
+            account_name="Chequing",
+        )
+        inflow = _tx(
+            "2026-05-02",
+            500.0,
+            _INCOME,
+            category="TRANSFER_IN",
+            transaction_hash="h-in",
+            account_name="Savings",
+        )
+        df = _frame_with_category_source([outflow, inflow], "plaid")
+        result = df.set_index("transaction_hash")
+        self.assertEqual(result.loc["h-out", "tx_type"], "transfer")
+        self.assertEqual(result.loc["h-in", "tx_type"], "transfer")
+
+    def test_medical_category_does_not_override_heuristic(self) -> None:
+        # MEDICAL is a spend category, NOT in the override map. A positive amount
+        # (outflow on depository) should remain "expense" per the heuristic.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category="MEDICAL", transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        # Positive amount on depository → expense, and MEDICAL doesn't override it
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_loan_payments_category_does_not_override_heuristic(self) -> None:
+        # LOAN_PAYMENTS is NOT in the override map, so the heuristic value survives.
+        # A positive amount (outflow) stays as "expense" per sign-based classification.
+        row = _tx(
+            "2026-05-01",
+            100.0,
+            _EXPENSE,
+            category="LOAN_PAYMENTS",
+            transaction_hash="h1",
+        )
+        df = _frame([row])
+        result = df.iloc[0]
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_missing_category_does_not_override(self) -> None:
+        # category is None/NaN — .map() returns NaN, .fillna() keeps the original tx_type.
+        row = _tx("2026-05-01", 100.0, _EXPENSE, category=None, transaction_hash="h1")
+        df = _frame([row])
+        result = df.iloc[0]
+        # No override, so heuristic applies: positive amount → expense
+        self.assertEqual(result["tx_type"], "expense")
+
+    def test_empty_dataframe_returns_empty(self) -> None:
+        # prepare_transactions has an early-return guard for empty input.
+        empty = pd.DataFrame([])
+        result = prepare_transactions(empty)
+        self.assertTrue(result.empty)
+
+
+class BuildLastPeriodMetricTests(unittest.TestCase):
+    """New helper backing the balance tiles (net worth / assets / liabilities): compare
+    against the value one period ago, not a trailing average."""
+
+    def test_prior_value_present(self) -> None:
+        metric = _build_last_period_metric("net_worth", 1200.0, 1000.0, [1000.0, 1200.0])
+        self.assertEqual(metric["value"], 1200.0)
+        self.assertEqual(metric["baseline"], 1000.0)
+        self.assertAlmostEqual(metric["delta_pct"], 0.2)
+        self.assertEqual(metric["baseline_months"], 1)
+        self.assertEqual(metric["sparkline"], [1000.0, 1200.0])
+        self.assertEqual(metric["comparison_kind"], "last_period")
+
+    def test_prior_value_absent(self) -> None:
+        metric = _build_last_period_metric("net_worth", 1200.0, None, [1200.0])
+        self.assertIsNone(metric["baseline"])
+        self.assertIsNone(metric["delta_pct"])
+
+    def test_prior_value_zero(self) -> None:
+        # Dividing by zero would either raise or produce +/-inf; a zero baseline must
+        # report "no comparison available" instead, same convention as `_build_metric`.
+        metric = _build_last_period_metric("net_worth", 500.0, 0.0, [0.0, 500.0])
+        self.assertEqual(metric["baseline"], 0.0)
+        self.assertIsNone(metric["delta_pct"])
+
+
+class WeeklySeriesTests(unittest.TestCase):
+    """New helper backing the avg_weekly_* metric baselines -- must match the existing
+    avg_weekly_income/avg_weekly_expense headline convention: no completeness filter,
+    unlike `_monthly_series`/`complete_month_keys`."""
+
+    def test_no_completeness_filter_partial_current_week_is_included(self) -> None:
         today = date.today()
-        df = _frame([_tx(today.isoformat(), 50.0, _EXPENSE, category="Brand New Category")])
-        result = build_home(df, [])
-        categories = [row["category"] for row in result["category_drift"]]
-        self.assertNotIn("Brand New Category", categories)
+        df = _frame([_tx(today.isoformat(), 100.0, _INCOME)])
+        real = df[df["tx_type"] != "transfer"]
+        series = _weekly_series(real, "income")
+        # The current (possibly partial) week must still appear -- no exclusion rule
+        # like complete_month_keys applies here.
+        self.assertEqual(float(series.sum()), 100.0)
 
-    def test_subscription_detected_when_amount_is_stable_across_3_plus_months(self) -> None:
-        rows = [
-            _tx(_month_start(m).isoformat(), 9.99, _EXPENSE, description="Streaming Service")
-            for m in (1, 2, 3)
-        ]
-        df = _frame(rows)
-        result = build_home(df, [])
-        subs = {row["description"]: row for row in result["subscriptions"]}
-        self.assertIn("Streaming Service", subs)
-        self.assertAlmostEqual(subs["Streaming Service"]["average_amount"], 9.99)
-        self.assertEqual(subs["Streaming Service"]["months_seen"], 3)
-
-    def test_no_subscription_when_amount_varies_too_much(self) -> None:
+    def test_matches_avg_weekly_income_headline_convention(self) -> None:
         df = _frame(
             [
-                _tx(_month_start(1).isoformat(), 20.0, _EXPENSE, description="Variable Bill"),
-                _tx(_month_start(2).isoformat(), 60.0, _EXPENSE, description="Variable Bill"),
-                _tx(_month_start(3).isoformat(), 100.0, _EXPENSE, description="Variable Bill"),
+                _tx("2026-05-01", 1000.0, _INCOME),
+                _tx("2026-05-08", 500.0, _INCOME),
             ]
         )
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertNotIn("Variable Bill", descriptions)
+        result = build_overview(df, pd.DataFrame([]))
+        real = df[df["tx_type"] != "transfer"]
+        series = _weekly_series(real, "income")
+        self.assertAlmostEqual(float(series.mean()), result["avg_weekly_income"])
 
-    def test_no_subscription_when_seen_fewer_than_3_months(self) -> None:
+    def test_empty_subset_returns_empty_series(self) -> None:
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE)])
+        real = df[df["tx_type"] != "transfer"]
+        series = _weekly_series(real, "income")
+        self.assertTrue(series.empty)
+
+
+class OverviewBalanceMetricsTests(unittest.TestCase):
+    """`build_overview`'s new metrics["net_worth"|"total_assets"|"total_liabilities"]
+    (last-period comparison) and metrics["avg_weekly_income"|"avg_weekly_expense"]
+    (trailing-average, same family as the existing monthly metrics)."""
+
+    def test_balance_metrics_populate_with_two_months_of_history(self) -> None:
+        last_month = _month_start(1)
+        current_month = date.today().replace(day=1)
+        history = [
+            {
+                "date": last_month.isoformat(),
+                "net_worth": 1000.0,
+                "assets": 1500.0,
+                "liabilities": 500.0,
+                "liquid_cash": 800.0,
+            },
+            {
+                "date": current_month.isoformat(),
+                "net_worth": 1200.0,
+                "assets": 1800.0,
+                "liabilities": 600.0,
+                "liquid_cash": 900.0,
+            },
+        ]
+        df = _frame([_tx(last_month.isoformat(), 50.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, history)
+        metrics = result["metrics"]
+
+        self.assertAlmostEqual(metrics["net_worth"]["value"], 1200.0)
+        self.assertAlmostEqual(metrics["net_worth"]["baseline"], 1000.0)
+        self.assertAlmostEqual(metrics["net_worth"]["delta_pct"], 0.2)
+        self.assertEqual(metrics["net_worth"]["comparison_kind"], "last_period")
+
+        self.assertAlmostEqual(metrics["total_assets"]["value"], 1800.0)
+        self.assertAlmostEqual(metrics["total_assets"]["baseline"], 1500.0)
+
+        self.assertAlmostEqual(metrics["total_liabilities"]["value"], 600.0)
+        self.assertAlmostEqual(metrics["total_liabilities"]["baseline"], 500.0)
+
+    def test_balance_metrics_absent_without_net_worth_history(self) -> None:
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, [])
+        metrics = result["metrics"]
+        self.assertNotIn("net_worth", metrics)
+        self.assertNotIn("total_assets", metrics)
+        self.assertNotIn("total_liabilities", metrics)
+
+    def test_avg_weekly_metrics_populate(self) -> None:
         df = _frame(
             [
-                _tx(_month_start(1).isoformat(), 9.99, _EXPENSE, description="Too New"),
-                _tx(_month_start(2).isoformat(), 9.99, _EXPENSE, description="Too New"),
+                _tx("2026-05-01", 1000.0, _INCOME),
+                _tx("2026-05-02", 200.0, _EXPENSE),
             ]
         )
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertNotIn("Too New", descriptions)
-
-    def test_subscription_detected_when_billing_day_is_regular(self) -> None:
-        # Netflix-shaped: same description, consistent amount (well within 15%), and
-        # billed on the same day-of-month (+/- 1-2 days) across 4 consecutive months.
-        days = [3, 4, 2, 3]
-        rows = [
-            _tx(
-                _month_start(m).replace(day=d).isoformat(),
-                15.49,
-                _EXPENSE,
-                description="Netflix",
-            )
-            for m, d in zip((4, 3, 2, 1), days, strict=True)
-        ]
-        df = _frame(rows)
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertIn("Netflix", descriptions)
-
-    def test_no_subscription_when_billing_day_is_irregular(self) -> None:
-        # The bug this pins: a description seen in 3+ of the trailing 6 months at a
-        # near-constant amount used to be flagged a "subscription" with no check on
-        # how regularly-spaced the occurrences were -- e.g. a restaurant visited
-        # often with fairly consistent per-visit pricing ("Cafe Du Parquet" in
-        # production). Scattered days-of-month must NOT be flagged.
-        days = [3, 17, 22, 9, 28]
-        rows = [
-            _tx(
-                _month_start(m).replace(day=d).isoformat(),
-                42.00,
-                _EXPENSE,
-                description="Cafe Du Parquet",
-            )
-            for m, d in zip((5, 4, 3, 2, 1), days, strict=True)
-        ]
-        df = _frame(rows)
-        result = build_home(df, [])
-        descriptions = [row["description"] for row in result["subscriptions"]]
-        self.assertNotIn("Cafe Du Parquet", descriptions)
+        result = build_overview(df, pd.DataFrame([]))
+        metrics = result["metrics"]
+        self.assertIn("avg_weekly_income", metrics)
+        self.assertIn("avg_weekly_expense", metrics)
+        self.assertEqual(metrics["avg_weekly_income"]["comparison_kind"], "trailing_average")
+        self.assertAlmostEqual(metrics["avg_weekly_income"]["value"], result["avg_weekly_income"])
+        self.assertAlmostEqual(metrics["avg_weekly_expense"]["value"], result["avg_weekly_expense"])
 
     def test_biggest_expense_this_month_picks_largest_by_absolute_amount(self) -> None:
         today = date.today()
@@ -675,7 +1027,7 @@ class HomeInsightsTests(unittest.TestCase):
                 _tx(today.isoformat(), 60.0, _EXPENSE, description="Groceries"),
             ]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         biggest = result["biggest_expense_this_month"]
         self.assertIsNotNone(biggest)
         self.assertEqual(biggest["description"], "Rent Top-Up")
@@ -685,31 +1037,29 @@ class HomeInsightsTests(unittest.TestCase):
     def test_biggest_expense_this_month_is_none_without_current_month_expenses(self) -> None:
         baseline = _month_start(3)
         df = _frame([_tx(baseline.isoformat(), 50.0, _EXPENSE)])
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         self.assertIsNone(result["biggest_expense_this_month"])
 
     def test_net_worth_mom_delta_uses_closest_point_at_least_one_month_prior(self) -> None:
         today = date.today()
         history = [
-            {"date": (today - timedelta(days=95)).isoformat(), "net_worth": 1000.0},
+            _history_point((today - timedelta(days=95)).isoformat(), 1000.0),
             # Closest point that is still >= 1 month before `today` -- must be picked
             # over the (wrong) naive "second-to-last sample" approach.
-            {"date": (today - timedelta(days=40)).isoformat(), "net_worth": 1200.0},
-            {"date": (today - timedelta(days=10)).isoformat(), "net_worth": 1500.0},
-            {"date": today.isoformat(), "net_worth": 1600.0},
+            _history_point((today - timedelta(days=40)).isoformat(), 1200.0),
+            _history_point((today - timedelta(days=10)).isoformat(), 1500.0),
+            _history_point(today.isoformat(), 1600.0),
         ]
-        empty = pd.DataFrame(
-            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
-        )
-        result = build_home(empty, history)
+        # Needs a non-empty df/all_time_df -- an empty one short-circuits before
+        # net_worth_history is even read (see the discrepancy test above).
+        df = _frame([_tx(today.isoformat(), 10.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, history)
         self.assertAlmostEqual(result["net_worth_mom_delta"], 1600.0 - 1200.0)
 
     def test_net_worth_mom_delta_is_none_with_a_single_trend_point(self) -> None:
-        history = [{"date": date.today().isoformat(), "net_worth": 500.0}]
-        empty = pd.DataFrame(
-            [], columns=["date", "month", "tx_type", "adjusted_amount", "description", "is_recurring"]
-        )
-        result = build_home(empty, history)
+        history = [_history_point(date.today().isoformat(), 500.0)]
+        df = _frame([_tx(date.today().isoformat(), 10.0, _EXPENSE)])
+        result = build_overview(df, pd.DataFrame([]), df, history)
         self.assertIsNone(result["net_worth_mom_delta"])
 
     def test_upcoming_recurring_projects_next_charge_from_median_interval(self) -> None:
@@ -723,7 +1073,7 @@ class HomeInsightsTests(unittest.TestCase):
             for d in occurrence_dates
         ]
         df = _frame(rows)
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
         self.assertIn("Music Streaming", upcoming)
         last_date = occurrence_dates[-1]
@@ -736,7 +1086,7 @@ class HomeInsightsTests(unittest.TestCase):
         df = _frame(
             [_tx(date.today().isoformat(), 9.99, _EXPENSE, description="One Timer", is_recurring=True)]
         )
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         descriptions = [row["description"] for row in result["upcoming_recurring"]]
         self.assertNotIn("One Timer", descriptions)
 
@@ -754,9 +1104,403 @@ class HomeInsightsTests(unittest.TestCase):
             for d in occurrence_dates
         ]
         df = _frame(rows)
-        result = build_home(df, [])
+        result = build_overview(df, pd.DataFrame([]), df, [])
         upcoming = {row["description"]: row for row in result["upcoming_recurring"]}
         self.assertEqual(upcoming["Skewed Gap Sub"]["typical_interval_days"], 30)
+
+
+class NetLinkedTransactionsUnitTests(unittest.TestCase):
+    """Direct unit tests for the `net_linked_transactions` function."""
+
+    def test_linked_pair_collapses_to_anchor_with_netted_amount(self) -> None:
+        """A linked pair (expense + reimbursement) collapses to one row.
+
+        Anchor (larger amount) keeps the netted amount/adjusted_amount; the other leg
+        is dropped.
+        """
+        # Expense: 3000 outflow (positive in Plaid sign convention)
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        # Reimbursement: -2000 inflow (negative in Plaid sign convention)
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        # Wire the mutual link
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        result = net_linked_transactions(df)
+
+        # Result should have exactly 1 row (the reimbursement leg is dropped)
+        self.assertEqual(len(result), 1)
+        anchor = result.iloc[0]
+
+        # The anchor is the expense (larger amount: 3000 > 2000)
+        self.assertEqual(anchor["transaction_hash"], "h-expense")
+        # Net amount: 3000 + (-2000) = 1000 (both expressed as Plaid amounts)
+        self.assertAlmostEqual(anchor["amount"], 1000.0)
+        self.assertAlmostEqual(anchor["adjusted_amount"], -1000.0)
+        # Anchor's original date and category stay unchanged
+        self.assertEqual(anchor["date"].strftime("%Y-%m-%d"), "2026-05-01")
+
+    def test_unlinked_row_with_partner_not_in_frame_stays_untouched(self) -> None:
+        """A row linking to a partner not in this frame is left completely untouched.
+
+        This is the "partner filtered out upstream" fallback case.
+        """
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        df = _frame([expense])
+        # Link to a partner that doesn't exist in this frame
+        df["linked_transaction_hash"] = "h-missing-partner"
+
+        result = net_linked_transactions(df)
+
+        # Row should still be present, unchanged
+        self.assertEqual(len(result), 1)
+        row = result.iloc[0]
+        self.assertEqual(row["transaction_hash"], "h-expense")
+        self.assertAlmostEqual(row["amount"], 3000.0)
+        self.assertAlmostEqual(row["adjusted_amount"], -3000.0)
+        self.assertEqual(row["linked_transaction_hash"], "h-missing-partner")
+
+    def test_unlinked_frame_with_column_null_returns_unchanged(self) -> None:
+        """An unlinked frame (column present but all null) is returned unchanged."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        df = _frame([expense])
+        # Add the column but leave it null
+        df["linked_transaction_hash"] = None
+
+        result = net_linked_transactions(df)
+
+        # Should return a DataFrame with the same values (copy semantics)
+        self.assertEqual(len(result), 1)
+        row = result.iloc[0]
+        self.assertAlmostEqual(row["amount"], 3000.0)
+
+    def test_frame_without_linked_transaction_hash_column_does_not_raise(self) -> None:
+        """A frame entirely lacking the `linked_transaction_hash` column doesn't raise."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        df = _frame([expense])
+        # Ensure the column doesn't exist
+        if "linked_transaction_hash" in df.columns:
+            df = df.drop(columns=["linked_transaction_hash"])
+
+        # Should not raise
+        result = net_linked_transactions(df)
+
+        # Should return the frame unchanged (same values)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result.iloc[0]["amount"], 3000.0)
+
+    def test_two_independent_linked_pairs_are_each_netted_correctly(self) -> None:
+        """Multiple independent linked pairs in the same frame are each netted correctly.
+
+        Proves the function doesn't accidentally cross-link non-partners.
+        """
+        # Pair 1: expense + reimbursement
+        expense1 = _tx("2026-05-01", 1000.0, _EXPENSE, transaction_hash="h-exp1")
+        reimbursement1 = _tx("2026-05-02", 800.0, _INCOME, transaction_hash="h-reimb1")
+
+        # Pair 2: expense + reimbursement
+        expense2 = _tx("2026-05-03", 2000.0, _EXPENSE, transaction_hash="h-exp2")
+        reimbursement2 = _tx("2026-05-04", 1500.0, _INCOME, transaction_hash="h-reimb2")
+
+        df = _frame([expense1, reimbursement1, expense2, reimbursement2])
+
+        # Wire pair 1 links
+        df.loc[df["transaction_hash"] == "h-exp1", "linked_transaction_hash"] = "h-reimb1"
+        df.loc[df["transaction_hash"] == "h-reimb1", "linked_transaction_hash"] = "h-exp1"
+
+        # Wire pair 2 links
+        df.loc[df["transaction_hash"] == "h-exp2", "linked_transaction_hash"] = "h-reimb2"
+        df.loc[df["transaction_hash"] == "h-reimb2", "linked_transaction_hash"] = "h-exp2"
+
+        result = net_linked_transactions(df)
+
+        # Should have 2 rows (both reimbursements dropped)
+        self.assertEqual(len(result), 2)
+
+        # Check pair 1: net = 1000 + (-800) = 200
+        pair1 = result[result["transaction_hash"] == "h-exp1"].iloc[0]
+        self.assertAlmostEqual(pair1["amount"], 200.0)
+        self.assertAlmostEqual(pair1["adjusted_amount"], -200.0)
+
+        # Check pair 2: net = 2000 + (-1500) = 500
+        pair2 = result[result["transaction_hash"] == "h-exp2"].iloc[0]
+        self.assertAlmostEqual(pair2["amount"], 500.0)
+        self.assertAlmostEqual(pair2["adjusted_amount"], -500.0)
+
+    def test_function_does_not_mutate_input_dataframe(self) -> None:
+        """The function copies before mutating; the input frame is unchanged."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        original_amount = df[df["transaction_hash"] == "h-expense"]["amount"].iloc[0]
+
+        # Wire the link
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        # Call the function
+        result = net_linked_transactions(df)
+
+        # Input df should be unchanged
+        self.assertAlmostEqual(
+            df[df["transaction_hash"] == "h-expense"]["amount"].iloc[0],
+            original_amount,
+        )
+        # Result should have the netted value
+        self.assertAlmostEqual(result[result["transaction_hash"] == "h-expense"]["amount"].iloc[0], 1000.0)
+
+    def test_income_leg_larger_than_expense_leg_still_anchors_on_expense(self) -> None:
+        """A reimbursement larger in magnitude than its linked expense must not flip
+        the anchor to the income leg -- that would silently drop real income and
+        inflate expenses (the root cause of the -1935.5% savings-rate bug).
+        """
+        # Expense: 50 outflow. Reimbursement: -3000 inflow (larger magnitude).
+        expense = _tx("2026-05-01", 50.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 3000.0, _INCOME, transaction_hash="h-reimbursement")
+        df = _frame([expense, reimbursement])
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        result = net_linked_transactions(df)
+
+        # The expense leg is clamped to 0 (fully covered), not left as a large
+        # positive "expense" carrying the reimbursement's magnitude.
+        anchor = result[result["transaction_hash"] == "h-expense"].iloc[0]
+        self.assertEqual(anchor["tx_type"], "expense")
+        self.assertAlmostEqual(anchor["amount"], 0.0)
+        self.assertAlmostEqual(anchor["adjusted_amount"], 0.0)
+
+        # The excess (3000 - 50 = 2950) survives as income, not lost or
+        # miscounted as expense.
+        income_rows = result[result["tx_type"] == "income"]
+        self.assertEqual(len(income_rows), 1)
+        self.assertAlmostEqual(income_rows.iloc[0]["amount"], -2950.0)
+        self.assertAlmostEqual(income_rows.iloc[0]["adjusted_amount"], 2950.0)
+
+    def test_over_reimbursement_excess_is_dated_to_the_reimbursement_not_the_expense(self) -> None:
+        """The synthetic excess-income row keeps the reimbursement's own date, since
+        that's when the extra cash actually arrived."""
+        expense = _tx("2026-05-01", 50.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-06-15", 3000.0, _INCOME, transaction_hash="h-reimbursement")
+        df = _frame([expense, reimbursement])
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        result = net_linked_transactions(df)
+
+        income_row = result[result["tx_type"] == "income"].iloc[0]
+        self.assertEqual(income_row["date"].strftime("%Y-%m-%d"), "2026-06-15")
+        self.assertEqual(income_row["month"], "2026-06")
+
+    def test_reimbursed_total_attr_reflects_expense_reduction(self) -> None:
+        """`reimbursed_total` (via `.attrs`) is the amount actually applied to
+        reduce expenses -- the full reimbursement when it's smaller than the
+        expense, or the full expense amount when the reimbursement over-covers it.
+        """
+        # Normal case: 2000 expense reduced by an 800 reimbursement.
+        expense1 = _tx("2026-05-01", 2000.0, _EXPENSE, transaction_hash="h-exp1")
+        reimb1 = _tx("2026-05-02", 800.0, _INCOME, transaction_hash="h-reimb1")
+        # Over-reimbursed case: 50 expense fully covered by a 3000 reimbursement.
+        expense2 = _tx("2026-05-03", 50.0, _EXPENSE, transaction_hash="h-exp2")
+        reimb2 = _tx("2026-05-04", 3000.0, _INCOME, transaction_hash="h-reimb2")
+
+        df = _frame([expense1, reimb1, expense2, reimb2])
+        df.loc[df["transaction_hash"] == "h-exp1", "linked_transaction_hash"] = "h-reimb1"
+        df.loc[df["transaction_hash"] == "h-reimb1", "linked_transaction_hash"] = "h-exp1"
+        df.loc[df["transaction_hash"] == "h-exp2", "linked_transaction_hash"] = "h-reimb2"
+        df.loc[df["transaction_hash"] == "h-reimb2", "linked_transaction_hash"] = "h-exp2"
+
+        result = net_linked_transactions(df)
+
+        # 800 (fully applied) + 50 (expense fully covered) = 850
+        self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 850.0)
+
+    def test_reimbursed_total_attr_is_zero_when_nothing_linked(self) -> None:
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE, transaction_hash="h1")])
+        result = net_linked_transactions(df)
+        self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 0.0)
+
+    def test_no_op_path_does_not_mutate_input_frames_attrs(self) -> None:
+        """The early-return "nothing linked" path must copy before setting `.attrs` --
+        an empty/no-op upstream filter can hand back the exact same frame object that
+        backs dataload.load_frames()'s shared 60-second cache, and mutating a shared
+        frame's `.attrs` in place would leak into that cache."""
+        df = _frame([_tx("2026-05-01", 100.0, _EXPENSE, transaction_hash="h1")])
+        self.assertNotIn("reimbursed_total", df.attrs)
+
+        result = net_linked_transactions(df)
+
+        self.assertAlmostEqual(result.attrs.get("reimbursed_total", 0.0), 0.0)
+        self.assertNotIn("reimbursed_total", df.attrs)
+
+    def test_same_tx_type_pair_still_uses_magnitude_based_anchor(self) -> None:
+        """Two linked rows of the same tx_type (outside the reimbursement use case)
+        keep the original magnitude-based anchor selection -- this fix only changes
+        behavior for expense+income pairs."""
+        big_expense = _tx("2026-05-01", 500.0, _EXPENSE, transaction_hash="h-big")
+        small_expense = _tx("2026-05-02", 100.0, _EXPENSE, transaction_hash="h-small")
+        df = _frame([big_expense, small_expense])
+        df.loc[df["transaction_hash"] == "h-big", "linked_transaction_hash"] = "h-small"
+        df.loc[df["transaction_hash"] == "h-small", "linked_transaction_hash"] = "h-big"
+
+        result = net_linked_transactions(df)
+
+        self.assertEqual(len(result), 1)
+        anchor = result.iloc[0]
+        self.assertEqual(anchor["transaction_hash"], "h-big")
+        self.assertAlmostEqual(anchor["amount"], 600.0)
+
+
+class BuildLedgerLinkedTransactionHashTests(unittest.TestCase):
+    """Test that `build_ledger` includes the `linked_transaction_hash` field."""
+
+    def test_ledger_includes_linked_transaction_hash_when_set(self) -> None:
+        """build_ledger output includes linked_transaction_hash field when set."""
+        df = _frame(
+            [
+                _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h1"),
+                _tx("2026-05-02", 2000.0, _INCOME, transaction_hash="h2"),
+            ]
+        )
+        # Add required columns (prepare_transactions doesn't add pfc_detailed/category_source)
+        df["pfc_detailed"] = None
+        df["category_source"] = None
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h1", "linked_transaction_hash"] = "h2"
+        df.loc[df["transaction_hash"] == "h2", "linked_transaction_hash"] = "h1"
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 2)
+
+        # Find each result by hash
+        h1_result = next(r for r in result if r["hash"] == "h1")
+        h2_result = next(r for r in result if r["hash"] == "h2")
+
+        # Both should have linked_transaction_hash set
+        self.assertEqual(h1_result["linked_transaction_hash"], "h2")
+        self.assertEqual(h2_result["linked_transaction_hash"], "h1")
+
+    def test_ledger_includes_linked_transaction_hash_when_null(self) -> None:
+        """build_ledger output includes linked_transaction_hash (as None) when unlinked."""
+        df = _frame([_tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h1")])
+        # Add required columns
+        df["pfc_detailed"] = None
+        df["category_source"] = None
+        df["linked_transaction_hash"] = None
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0]["linked_transaction_hash"])
+
+    def test_ledger_includes_linked_transaction_hash_with_pfc_values(self) -> None:
+        """build_ledger includes both linked_transaction_hash and pfc fields."""
+        df = _frame(
+            [
+                _tx("2026-05-01", 10.0, _EXPENSE, transaction_hash="h1"),
+                _tx("2026-05-02", 20.0, _EXPENSE, transaction_hash="h2"),
+            ]
+        )
+        # Add columns with some values populated (matching existing test pattern)
+        pfc_map = {"h1": "FOOD_AND_DRINK_RESTAURANTS", "h2": None}
+        source_map = {"h1": "plaid", "h2": None}
+        df["pfc_detailed"] = df["transaction_hash"].map(pfc_map)
+        df["category_source"] = df["transaction_hash"].map(source_map)
+        df["linked_transaction_hash"] = None
+        df["linked_transaction_hash"] = None
+
+        result = build_ledger(df)
+        self.assertEqual(len(result), 2)
+        # build_ledger sorts by date descending, so result[0] is h2 (2026-05-02)
+        h1_result = next(r for r in result if r["hash"] == "h1")
+        h2_result = next(r for r in result if r["hash"] == "h2")
+        # h1 row has pfc fields populated
+        self.assertEqual(h1_result["pfc_detailed"], "FOOD_AND_DRINK_RESTAURANTS")
+        self.assertEqual(h1_result["category_source"], "plaid")
+        # h2 row has None for pfc fields
+        self.assertIsNone(h2_result["pfc_detailed"])
+        self.assertIsNone(h2_result["category_source"])
+        # Both should have linked_transaction_hash (None in this case)
+        self.assertIsNone(h1_result["linked_transaction_hash"])
+        self.assertIsNone(h2_result["linked_transaction_hash"])
+
+
+class NetLinkedTransactionsIntegrationTests(unittest.TestCase):
+    """Integration tests for net_linked_transactions in the API response path."""
+
+    def test_overview_reflects_netted_amount_for_linked_pair(self) -> None:
+        """The /overview response shows the netted amount, not the gross double-count.
+
+        When an expense and reimbursement are linked, build_overview is called on
+        the result of `net_linked_transactions(exclude_duplicate_rows(filtered))`,
+        so the aggregates (income, expenses, etc.) should reflect the net.
+        """
+        # Expense: 3000 outflow
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        # Reimbursement: 2000 inflow
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        # Apply the same transformations as get_overview does
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+
+        # Build overview on the netted frame
+        result = build_overview(netted, pd.DataFrame([]))
+
+        # The expense should be netted to 1000 (3000 - 2000), not double-counted
+        # As a single row with amount=1000, adjusted_amount=-1000, tx_type="expense"
+        # Income: 0 (the reimbursement was dropped)
+        # Expenses: 1000 (the netted amount)
+        self.assertAlmostEqual(result["income"], 0.0)
+        self.assertAlmostEqual(result["expenses"], 1000.0)
+        self.assertAlmostEqual(result["net_flow"], -1000.0)
+
+    def test_cash_flow_reflects_netted_amounts(self) -> None:
+        """The /cash-flow response also applies net_linked_transactions."""
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, transaction_hash="h-expense")
+        reimbursement = _tx("2026-05-05", 2000.0, _INCOME, transaction_hash="h-reimbursement")
+
+        df = _frame([expense, reimbursement])
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        # Apply the same transformations as get_cash_flow does
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+        result = build_cash_flow(netted)
+
+        # Expenses should be 1000 (the netted amount)
+        self.assertAlmostEqual(result["expenses"], 1000.0)
+        self.assertAlmostEqual(result["income"], 0.0)
+
+    def test_budget_reflects_netted_amounts(self) -> None:
+        """The /budget response also applies net_linked_transactions."""
+        # Create a linked expense/reimbursement pair for May
+        expense = _tx("2026-05-01", 3000.0, _EXPENSE, category="Shopping", transaction_hash="h-expense")
+        reimbursement = _tx(
+            "2026-05-05", 2000.0, _INCOME, category="Shopping", transaction_hash="h-reimbursement"
+        )
+
+        df = _frame([expense, reimbursement])
+        df["linked_transaction_hash"] = None
+        df.loc[df["transaction_hash"] == "h-expense", "linked_transaction_hash"] = "h-reimbursement"
+        df.loc[df["transaction_hash"] == "h-reimbursement", "linked_transaction_hash"] = "h-expense"
+
+        netted = net_linked_transactions(exclude_duplicate_rows(df))
+        result = build_budget(netted, [])
+
+        # Month should be "2026-05"
+        self.assertEqual(result["month"], "2026-05")
+        # Shopping category should show 1000 spent (the netted amount)
+        shopping_item = next((item for item in result["items"] if item["category"] == "Shopping"), None)
+        self.assertIsNotNone(shopping_item)
+        self.assertAlmostEqual(shopping_item["spent"], 1000.0)
 
 
 if __name__ == "__main__":

@@ -286,19 +286,23 @@ class DatabaseClient:
             self._execute_many(sql, rows)
 
     def get_net_worth_history(self) -> list[dict[str, Any]]:
-        """Daily net worth from `account_balance_snapshots`, joined against the accounts
-        table's CURRENT type (an account's type is treated as effectively static --
-        Plaid doesn't change it after linking, so joining on today's `accounts` row is
-        fine even for a historical snapshot). Signed the same way
+        """Daily net worth (plus its components) from `account_balance_snapshots`, joined
+        against the accounts table's CURRENT type (an account's type is treated as
+        effectively static -- Plaid doesn't change it after linking, so joining on today's
+        `accounts` row is fine even for a historical snapshot). Signed the same way
         `api/viewmodels.py::build_net_worth` signs the live figure: depository and
         investment balances are assets, credit balances are a liability subtracted off.
+        `liquid_cash` is the depository-only subset of `assets` (excludes investment
+        balances) -- Phase 23 added it so the Overview trend chart can show "cash on hand"
+        separately from total assets, without a second query.
         """
         sql = """
         SELECT
             s.snapshot_date,
             SUM(CASE WHEN a.account_type IN ('depository', 'investment') THEN s.balance_current ELSE 0 END)
                 AS assets,
-            SUM(CASE WHEN a.account_type = 'credit' THEN s.balance_current ELSE 0 END) AS liabilities
+            SUM(CASE WHEN a.account_type = 'credit' THEN s.balance_current ELSE 0 END) AS liabilities,
+            SUM(CASE WHEN a.account_type = 'depository' THEN s.balance_current ELSE 0 END) AS liquid_cash
         FROM account_balance_snapshots s
         JOIN accounts a ON a.account_key = s.account_key
         GROUP BY s.snapshot_date
@@ -312,8 +316,11 @@ class DatabaseClient:
             {
                 "date": snapshot_date.isoformat(),
                 "net_worth": float((assets or 0) - (liabilities or 0)),
+                "assets": float(assets or 0),
+                "liabilities": float(liabilities or 0),
+                "liquid_cash": float(liquid_cash or 0),
             }
-            for snapshot_date, assets, liabilities in rows
+            for snapshot_date, assets, liabilities, liquid_cash in rows
         ]
 
     def count_by_source(self) -> dict[str, dict[str, int]]:
@@ -512,6 +519,421 @@ class DatabaseClient:
         """
         self._execute_many(sql, [(category, monthly_limit)])
 
+    def get_savings_goals(self, include_archived: bool = False) -> list[dict]:
+        """Goals with their linked account keys attached."""
+        sql = """
+        SELECT id, name, target_amount::double precision, target_date,
+               baseline_amount::double precision, started_on, is_archived
+        FROM savings_goals
+        """
+        if not include_archived:
+            sql += " WHERE NOT is_archived"
+        sql += " ORDER BY COALESCE(target_date, DATE '9999-12-31'), name"
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+                cur.execute("SELECT goal_id, account_key FROM savings_goal_accounts")
+                links = cur.fetchall()
+
+        by_goal: dict[int, list[str]] = {}
+        for goal_id, account_key in links:
+            by_goal.setdefault(goal_id, []).append(account_key)
+
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "target_amount": r[2],
+                "target_date": r[3],
+                "baseline_amount": r[4],
+                "started_on": r[5],
+                "is_archived": r[6],
+                "account_keys": sorted(by_goal.get(r[0], [])),
+            }
+            for r in rows
+        ]
+
+    def create_savings_goal(
+        self,
+        name: str,
+        target_amount: float,
+        target_date: dt.date | None,
+        account_keys: list[str],
+        baseline_amount: float,
+    ) -> int:
+        """Create a goal and link its accounts in one transaction.
+
+        `baseline_amount` is captured by the caller from the accounts' current
+        balances, so progress starts from zero rather than counting money that
+        was already there.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO savings_goals (name, target_amount, target_date, baseline_amount)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (name, target_amount, target_date, baseline_amount),
+                )
+                goal_id = cur.fetchone()[0]
+                for key in account_keys:
+                    cur.execute(
+                        """
+                        INSERT INTO savings_goal_accounts (goal_id, account_key)
+                        VALUES (%s, %s)
+                        ON CONFLICT (goal_id, account_key) DO NOTHING
+                        """,
+                        (goal_id, key),
+                    )
+            conn.commit()
+        return goal_id
+
+    def update_savings_goal(self, goal_id: int, **fields) -> None:
+        """Update a goal's editable fields, and its account links when given.
+
+        `account_keys` is replaced wholesale rather than merged: the UI presents
+        it as a set of checkboxes, so an omitted key means "unlinked".
+        """
+        account_keys = fields.pop("account_keys", None)
+        allowed = {"name", "target_amount", "target_date", "baseline_amount", "is_archived"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                if updates:
+                    assignments = ", ".join(f"{key} = %s" for key in updates)
+                    cur.execute(
+                        f"UPDATE savings_goals SET {assignments}, updated_at = NOW() WHERE id = %s",
+                        (*updates.values(), goal_id),
+                    )
+                if account_keys is not None:
+                    cur.execute("DELETE FROM savings_goal_accounts WHERE goal_id = %s", (goal_id,))
+                    for key in account_keys:
+                        cur.execute(
+                            "INSERT INTO savings_goal_accounts (goal_id, account_key) VALUES (%s, %s)",
+                            (goal_id, key),
+                        )
+            conn.commit()
+
+    def delete_savings_goal(self, goal_id: int) -> bool:
+        """Delete a goal. Its account links go with it (ON DELETE CASCADE)."""
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM savings_goals WHERE id = %s", (goal_id,))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted > 0
+
+    def get_goal_balance_history(self, account_keys: list[str]) -> list[dict]:
+        """Combined daily balance of `account_keys`, oldest first.
+
+        Feeds `analytics.goals.pace`. Days where only some of the accounts have
+        a snapshot still sum what exists -- partial coverage is better than a
+        gap, and the pace only reads the first and last rows anyway.
+        """
+        if not account_keys:
+            return []
+        sql = """
+        SELECT snapshot_date, SUM(balance_current)::double precision
+        FROM account_balance_snapshots
+        WHERE account_key = ANY(%s)
+        GROUP BY snapshot_date
+        ORDER BY snapshot_date
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (account_keys,))
+                rows = cur.fetchall()
+        return [{"snapshot_date": r[0], "balance": r[1] or 0.0} for r in rows]
+
+    def get_anomalies(self, period: str | None = None) -> list[dict]:
+        """Detected anomalies, newest period first, excluding dismissed ones."""
+        sql = """
+        SELECT a.kind, a.subject, a.period, a.severity, a.explanation, a.detected_at
+        FROM anomalies a
+        LEFT JOIN anomaly_feedback f
+               ON f.kind = a.kind AND f.subject = a.subject AND f.period = a.period
+        WHERE f.kind IS NULL
+        """
+        params: list = []
+        if period is not None:
+            sql += " AND a.period = %s"
+            params.append(period)
+        # Explicit rank, NOT `severity DESC`: the column is TEXT, and
+        # descending lexicographic order puts 'medium' above 'high'.
+        sql += (
+            " ORDER BY a.period DESC,"
+            " CASE a.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,"
+            " a.subject"
+        )
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or None)
+                rows = cur.fetchall()
+        return [
+            {
+                "kind": r[0],
+                "subject": r[1],
+                "period": r[2].strip(),
+                "severity": r[3],
+                "explanation": r[4],
+                "detected_at": r[5].isoformat() if r[5] else None,
+            }
+            for r in rows
+        ]
+
+    def get_anomaly_feedback(self) -> list[dict]:
+        """Every dismissal, as {kind, subject, period}."""
+        sql = "SELECT kind, subject, period FROM anomaly_feedback"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [{"kind": r[0], "subject": r[1], "period": r[2].strip()} for r in rows]
+
+    def upsert_anomalies(self, anomalies: list[dict]) -> int:
+        """Persist detected anomalies.
+
+        `detected_at` is deliberately NOT updated on conflict: the alert's text
+        and severity stay current as the month develops, but when it first
+        tripped is history and shouldn't move.
+        """
+        if not anomalies:
+            return 0
+        sql = """
+        INSERT INTO anomalies (kind, subject, period, severity, explanation)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (kind, subject, period) DO UPDATE
+        SET severity    = EXCLUDED.severity,
+            explanation = EXCLUDED.explanation,
+            updated_at  = NOW()
+        """
+        params = [(a["kind"], a["subject"], a["period"], a["severity"], a["explanation"]) for a in anomalies]
+        self._execute_many(sql, params)
+        return len(params)
+
+    def dismiss_anomaly(self, kind: str, subject: str, period: str) -> None:
+        """Dismiss one anomaly for one period. Never silences later periods."""
+        sql = """
+        INSERT INTO anomaly_feedback (kind, subject, period)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (kind, subject, period) DO NOTHING
+        """
+        self._execute_many(sql, [(kind, subject, period)])
+
+    def restore_anomaly(self, kind: str, subject: str, period: str) -> None:
+        """Undo a dismissal, so the anomaly is visible again."""
+        sql = "DELETE FROM anomaly_feedback WHERE kind = %s AND subject = %s AND period = %s"
+        self._execute_many(sql, [(kind, subject, period)])
+
+    def set_outlier_flags(self, transaction_hashes: list[str]) -> int:
+        """Point `transactions.is_outlier` at the rows behind live anomalies.
+
+        A compatibility shim, not a feature. The frozen Streamlit dashboard
+        reads `is_outlier`/`outlier_score` (app/dashboard.py:339, :787,
+        :1195-1209) and the freeze forbids editing it, so if Phase 34 simply
+        stopped writing that column its anomalies view would sit permanently
+        empty. Flagging the transactions that actually drive a current anomaly
+        keeps that view showing relevant rows.
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE transactions SET is_outlier = FALSE WHERE is_outlier")
+                if transaction_hashes:
+                    cur.execute(
+                        "UPDATE transactions SET is_outlier = TRUE WHERE transaction_hash = ANY(%s)",
+                        (transaction_hashes,),
+                    )
+                    flagged = cur.rowcount
+                else:
+                    flagged = 0
+            conn.commit()
+        return flagged
+
+    def update_recurring_for_stream(self, stream_id: str, recurring: bool) -> int:
+        """Set `is_recurring` on every transaction belonging to a stream.
+
+        Phase 31's fix for "the same charge can be checked recurring over and
+        over": the flag is per-row, so each occurrence was independently
+        checkable and the Overview list then showed near-duplicates. Toggling a
+        stream moves every member row at once.
+
+        Membership is by `merchant_key`, which is what the stream is grouped on
+        in the first place — so this stays correct for streams from Plaid and
+        from local derivation alike. Returns the number of rows changed.
+        """
+        sql = """
+        UPDATE transactions
+        SET is_recurring = %s
+        WHERE transaction_hash = ANY(%s)
+        """
+        hashes = self.transaction_hashes_for_stream(stream_id)
+        if not hashes:
+            return 0
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (recurring, hashes))
+                changed = cur.rowcount
+            conn.commit()
+        return changed
+
+    def transaction_hashes_for_stream(self, stream_id: str) -> list[str]:
+        """Hashes of the transactions belonging to a stream.
+
+        `merchant_key` is derived in Python (`analytics.categorizer.merchant_key`),
+        not stored as a column, so membership is resolved here rather than in SQL:
+        fetch the stream's key and the candidate rows' merchant fields, then match
+        using the same normalizer the categorizer uses. Doing it in SQL would mean
+        reimplementing that normalization in two places.
+        """
+        from analytics.categorizer import merchant_key as _merchant_key
+
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT merchant_key FROM recurring_streams WHERE stream_id = %s",
+                    (stream_id,),
+                )
+                row = cur.fetchone()
+                if not row or not row[0]:
+                    return []
+                target = row[0]
+
+                cur.execute("SELECT transaction_hash, merchant_name, description FROM transactions")
+                return [r[0] for r in cur.fetchall() if _merchant_key(r[1], str(r[2] or "")) == target]
+
+    def get_recurring_streams(self, active_only: bool = True) -> list[dict]:
+        """Return detected recurring streams (Phase 30)."""
+        sql = """
+        SELECT stream_id, merchant_key, description, category, cadence, direction,
+               last_amount::double precision, last_date, predicted_next_date,
+               status, source, is_active
+        FROM recurring_streams
+        """
+        if active_only:
+            sql += " WHERE is_active"
+        sql += " ORDER BY predicted_next_date NULLS LAST, description"
+
+        columns = (
+            "stream_id",
+            "merchant_key",
+            "description",
+            "category",
+            "cadence",
+            "direction",
+            "last_amount",
+            "last_date",
+            "predicted_next_date",
+            "status",
+            "source",
+            "is_active",
+        )
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [dict(zip(columns, row, strict=True)) for row in rows]
+
+    def upsert_recurring_streams(self, streams: list[dict]) -> int:
+        """Insert or refresh detected streams, keyed on `stream_id`.
+
+        Idempotent across pipeline runs: re-detecting the same stream updates it
+        in place rather than adding a second row. That is why `stream_id` must be
+        stable — `analytics.recurring` derives it from `merchant_key`, and the
+        Plaid path uses Plaid's own id.
+        """
+        if not streams:
+            return 0
+        sql = """
+        INSERT INTO recurring_streams (
+            stream_id, merchant_key, description, category, cadence, direction,
+            last_amount, last_date, predicted_next_date, status, source, is_active
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (stream_id) DO UPDATE SET
+            merchant_key        = EXCLUDED.merchant_key,
+            description         = EXCLUDED.description,
+            category            = EXCLUDED.category,
+            cadence             = EXCLUDED.cadence,
+            direction           = EXCLUDED.direction,
+            last_amount         = EXCLUDED.last_amount,
+            last_date           = EXCLUDED.last_date,
+            predicted_next_date = EXCLUDED.predicted_next_date,
+            status              = EXCLUDED.status,
+            source              = EXCLUDED.source,
+            is_active           = EXCLUDED.is_active,
+            updated_at          = NOW()
+        """
+        params = [
+            (
+                s["stream_id"],
+                s["merchant_key"],
+                s["description"],
+                s.get("category"),
+                s.get("cadence"),
+                s["direction"],
+                s.get("last_amount"),
+                s.get("last_date"),
+                s.get("predicted_next_date"),
+                s.get("status"),
+                s.get("source", "local"),
+                s.get("is_active", True),
+            )
+            for s in streams
+        ]
+        self._execute_many(sql, params)
+        return len(params)
+
+    def get_budget_periods(self) -> list[dict]:
+        """Return every explicitly-set budget cap: {category, period, monthly_limit}.
+
+        Returns only the months a cap was actually set in -- months that merely
+        *inherit* one have no row. Resolving a given month is
+        `analytics.budget_periods.resolve_caps`'s job, not SQL's.
+        """
+        sql = """
+        SELECT category, period, monthly_limit::double precision
+        FROM budget_periods
+        ORDER BY category, period
+        """
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        # `period` is CHAR(7), which Postgres blank-pads; strip so string
+        # comparison in resolve_caps stays exact.
+        return [{"category": r[0], "period": r[1].strip(), "monthly_limit": r[2]} for r in rows]
+
+    def upsert_budget_period(self, category: str, period: str, monthly_limit: float) -> None:
+        """Set the cap for one category in one month, leaving other months alone."""
+        sql = """
+        INSERT INTO budget_periods (category, period, monthly_limit)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (category, period) DO UPDATE
+        SET monthly_limit = EXCLUDED.monthly_limit,
+            updated_at    = NOW()
+        """
+        self._execute_many(sql, [(category, period, monthly_limit)])
+
+    def delete_budget_period(self, category: str, period: str) -> bool:
+        """Clear the explicit cap for one category in one month.
+
+        The month then falls back to *inheriting* the most recent earlier cap,
+        which is not the same as being capped at 0. Returns whether a row was
+        actually removed.
+        """
+        sql = "DELETE FROM budget_periods WHERE category = %s AND period = %s"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (category, period))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted > 0
+
     def set_manual_credit_limit(self, account_key: str, limit: float | None) -> None:
         """Set (or clear, with limit=None) the manually-entered credit limit for an
         account. Does not touch updated_at, which is used elsewhere as a Plaid balance
@@ -539,6 +961,32 @@ class DatabaseClient:
                 cur.execute(sql)
                 rows = cur.fetchall()
         return {merchant_key: category for merchant_key, category in rows}
+
+    def get_transaction_pfc_details(self) -> dict[str, tuple[str | None, str | None]]:
+        """transaction_hash -> (pfc_detailed, category_source) for every transaction.
+
+        Pure data access for the API's optional PFC-detail columns, kept out of
+        app/dashboard.py::load_financial_data (frozen) per the precedent in
+        api/dataload.py's module docstring."""
+        sql = "SELECT transaction_hash, pfc_detailed, category_source FROM transactions"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {row[0]: (row[1], row[2]) for row in rows}
+
+    def get_transaction_links(self) -> dict[str, str | None]:
+        """transaction_hash -> linked_transaction_hash for every transaction.
+
+        Pure data access for the API's linked-transaction netting (net_linked_transactions
+        in api/viewmodels.py), kept out of app/dashboard.py::load_financial_data (frozen)
+        per the same precedent as get_transaction_pfc_details."""
+        sql = "SELECT transaction_hash, linked_transaction_hash FROM transactions"
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return {row[0]: row[1] for row in rows}
 
     def set_merchant_category(self, merchant_key: str, category: str, source: str = "user") -> None:
         """Insert or update merchant memory for merchant_key. This is what lets the cascade
@@ -661,6 +1109,66 @@ class DatabaseClient:
         """
         sql = "UPDATE transactions SET is_duplicate = %s, updated_at = NOW() WHERE transaction_hash = %s"
         self._execute_many(sql, [(is_duplicate, transaction_hash)])
+
+    def link_transactions(self, hash_a: str, hash_b: str) -> None:
+        """Link two transactions symmetrically (e.g. an expense and its insurance
+        reimbursement), so the dashboard can later net them into one true-cost figure.
+        Reversible via unlink_transaction. Survives pipeline re-runs (upsert_transactions
+        never touches this column, same as user_category/is_recurring/is_duplicate).
+
+        Raises ValueError if hash_a == hash_b, or if either row is already linked to a
+        DIFFERENT partner (must be unlinked first).
+        """
+        if hash_a == hash_b:
+            raise ValueError("Cannot link a transaction to itself.")
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT transaction_hash, linked_transaction_hash FROM transactions "
+                    "WHERE transaction_hash IN (%s, %s)",
+                    (hash_a, hash_b),
+                )
+                rows = {row[0]: row[1] for row in cur.fetchall()}
+                for h in (hash_a, hash_b):
+                    other = hash_b if h == hash_a else hash_a
+                    existing = rows.get(h)
+                    if existing is not None and existing != other:
+                        raise ValueError(f"Transaction {h} is already linked to {existing}; unlink it first.")
+                cur.execute(
+                    "UPDATE transactions SET linked_transaction_hash = %s, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (hash_b, hash_a),
+                )
+                cur.execute(
+                    "UPDATE transactions SET linked_transaction_hash = %s, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (hash_a, hash_b),
+                )
+            conn.commit()
+
+    def unlink_transaction(self, transaction_hash: str) -> None:
+        """Clear a link on both sides. Safe to call on an already-unlinked transaction
+        (no-op)."""
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT linked_transaction_hash FROM transactions WHERE transaction_hash = %s",
+                    (transaction_hash,),
+                )
+                row = cur.fetchone()
+                partner = row[0] if row else None
+                cur.execute(
+                    "UPDATE transactions SET linked_transaction_hash = NULL, updated_at = NOW() "
+                    "WHERE transaction_hash = %s",
+                    (transaction_hash,),
+                )
+                if partner:
+                    cur.execute(
+                        "UPDATE transactions SET linked_transaction_hash = NULL, updated_at = NOW() "
+                        "WHERE transaction_hash = %s",
+                        (partner,),
+                    )
+            conn.commit()
 
     def rehash_transactions(self) -> tuple[int, int]:
         """Recompute transaction_hash for every row using the current build_transaction_hash
@@ -956,9 +1464,9 @@ class DatabaseClient:
         transaction_id after an Item re-link: that hashes differently and lands as a second
         row. reconcile_transactions() trims those against the count Plaid itself reports.
 
-        Columns the user owns — user_category, is_recurring, is_duplicate — are deliberately
-        absent from both the INSERT list and the conflict-update list, so a pipeline run can
-        never clear a manual edit. Keep them out when adding columns here.
+        Columns the user owns — user_category, is_recurring, is_duplicate, linked_transaction_hash —
+        are deliberately absent from both the INSERT list and the conflict-update list, so a
+        pipeline run can never clear a manual edit. Keep them out when adding columns here.
 
         `pending` / `pending_transaction_id` (migration 019) round-trip Plaid's pending-
         authorization lineage. `pending` is left as None/NULL when the source record doesn't

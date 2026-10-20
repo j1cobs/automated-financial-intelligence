@@ -15,8 +15,10 @@
  *      re-categorising several rows in a row) into one round of refetches instead of one
  *      per edit.
  *
- * `recurring` never invalidates analytics: it changes nothing outside the ledger row
- * itself (`api/viewmodels.py` doesn't read `is_recurring` for any aggregate).
+ * `recurring` used to skip the analytics invalidation, on the grounds that no aggregate
+ * read `is_recurring`. That stopped being true -- `build_overview` reads it for the
+ * Committed/Recurring Spend card (`api/viewmodels.py:800`) -- so it now invalidates like
+ * the others, or that card keeps showing a figure the toggle has already changed.
  *
  * Ledger cache surgery uses `queryClient.setQueriesData({ queryKey: ledgerQueryKey }, ...)`
  * rather than `setQueryData` with an exact key, for the same reason `invalidateQueries`
@@ -35,11 +37,24 @@ import {
   budgetQueryKey,
   ledgerQueryKey,
   anomaliesQueryKey,
+  goalsQueryKey,
+  forecastQueryKey,
 } from './queries';
 import type { CategoryUpdateResponse, LedgerItem, LedgerResponse } from './types';
 
 /** Every analytics endpoint a ledger edit can change the numbers of. */
-const ANALYTICS_QUERY_KEYS = [overviewQueryKey, cashFlowQueryKey, budgetQueryKey, anomaliesQueryKey] as const;
+const ANALYTICS_QUERY_KEYS = [
+  overviewQueryKey,
+  cashFlowQueryKey,
+  budgetQueryKey,
+  anomaliesQueryKey,
+  // The forecast derives its budget line from the caps and its balances from
+  // the accounts, and goals derive progress from those same balances -- both
+  // render beside the things that change them, so omitting either leaves
+  // pre-edit numbers on screen with no remount to trigger a refetch.
+  forecastQueryKey,
+  goalsQueryKey,
+] as const;
 
 /** Coalescing window for the debounced analytics invalidation below. */
 const ANALYTICS_INVALIDATE_DEBOUNCE_MS = 500;
@@ -72,7 +87,7 @@ type LedgerSnapshot = Array<[QueryKey, LedgerResponse | undefined]>;
 function patchLedgerRow(
   queryClient: QueryClient,
   hash: string,
-  patch: Partial<Pick<LedgerItem, 'category' | 'is_recurring' | 'is_duplicate'>>,
+  patch: Partial<Pick<LedgerItem, 'category' | 'is_recurring' | 'is_duplicate' | 'linked_transaction_hash'>>,
 ): LedgerSnapshot {
   const snapshot = queryClient.getQueriesData<LedgerResponse>({ queryKey: ledgerQueryKey });
   queryClient.setQueriesData<LedgerResponse>({ queryKey: ledgerQueryKey }, (old) => {
@@ -110,13 +125,28 @@ export function useSetCreditLimit() {
 export function useUpsertBudget() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ category, monthlyLimit }: { category: string; monthlyLimit: number }) =>
+    mutationFn: ({
+      category,
+      monthlyLimit,
+      month,
+    }: {
+      category: string;
+      monthlyLimit: number;
+      /** 'YYYY-MM'. Omitted means the current calendar month — never "all
+       *  months", which is the flat-table behaviour Phase 28 replaced. The
+       *  field is `month`, not `period`: the filter bar already owns `period`
+       *  and its values are presets like 'all_time'. */
+      month?: string;
+    }) =>
       apiFetch<void>(`/budgets/${encodeURIComponent(category)}`, {
         method: 'PUT',
-        body: { monthly_limit: monthlyLimit },
+        body: month ? { monthly_limit: monthlyLimit, month } : { monthly_limit: monthlyLimit },
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: budgetQueryKey });
+      // GET /forecast holds categories to their caps, and the chart sits above
+      // these rows in the same tab.
+      void queryClient.invalidateQueries({ queryKey: forecastQueryKey });
     },
   });
 }
@@ -164,15 +194,38 @@ export function useUpdateRecurring() {
       if (context) restoreLedgerSnapshot(queryClient, context.snapshot);
     },
     onSettled: () => {
-      // `is_recurring` is read nowhere in api/viewmodels.py's aggregates (only in
-      // `build_ledger`), so it affects the ledger row and nothing else -- analytics is
-      // deliberately never invalidated here.
-      //
-      // This holds only while that stays true. PLAN.md Phase 15 Fix 12 proposes a
-      // "committed monthly spend" figure derived from `is_recurring`; the day any
-      // aggregate reads that column, this must invalidate analytics like the other two
-      // mutations, or toggling Recurring will leave the new figure silently stale.
+      // This used to skip analytics on the grounds that no aggregate read
+      // `is_recurring`. That stopped being true: `build_overview` reads it for
+      // the Committed/Recurring Spend card (api/viewmodels.py:800), which is
+      // exactly the case the old comment warned about. Without this, toggling
+      // Recurring left that card showing a figure that no longer matched.
       void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+/** Toggle recurring for a whole detected stream (Phase 31).
+ *
+ * The per-row mutation above still applies to transactions belonging to no
+ * stream. This one exists because `is_recurring` is per-row: every occurrence
+ * of the same charge was independently checkable, so the same bill could be
+ * flagged over and over and Upcoming then listed near-duplicates.
+ *
+ * No optimistic patch here: one click changes an unknown number of rows, so
+ * there is nothing honest to write into the cache up front. The ledger is
+ * refetched instead. */
+export function useUpdateStreamRecurring() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ streamId, recurring }: { streamId: string; recurring: boolean }) =>
+      apiFetch<{ updated_count: number }>(`/streams/${encodeURIComponent(streamId)}/recurring`, {
+        method: 'PATCH',
+        body: { recurring },
+      }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
     },
   });
 }
@@ -199,6 +252,118 @@ export function useUpdateDuplicate() {
       // read is potentially stale too -- debounced along with category edits.
       void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
       invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+export function useLinkTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ hash, otherHash }: { hash: string; otherHash: string }) =>
+      apiFetch<void>(`/transactions/${encodeURIComponent(hash)}/link`, {
+        method: 'POST',
+        body: { other_hash: otherHash },
+      }),
+    onMutate: async ({ hash, otherHash }) => {
+      await queryClient.cancelQueries({ queryKey: ledgerQueryKey });
+      const snapshot = patchLedgerRow(queryClient, hash, { linked_transaction_hash: otherHash });
+      return { snapshot };
+    },
+    onError: (_err, _vars, context) => {
+      if (context) restoreLedgerSnapshot(queryClient, context.snapshot);
+    },
+    onSettled: () => {
+      // Linking changes which rows are netted into aggregates (linked pairs are
+      // excluded from analytics), so every analytics read is potentially stale
+      // too -- debounced along with category and duplicate edits.
+      void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+export function useUnlinkTransaction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (hash: string) =>
+      apiFetch<void>(`/transactions/${encodeURIComponent(hash)}/link`, { method: 'DELETE' }),
+    onMutate: async (hash) => {
+      await queryClient.cancelQueries({ queryKey: ledgerQueryKey });
+      const snapshot = patchLedgerRow(queryClient, hash, { linked_transaction_hash: null });
+      return { snapshot };
+    },
+    onError: (_err, _vars, context) => {
+      if (context) restoreLedgerSnapshot(queryClient, context.snapshot);
+    },
+    onSettled: () => {
+      // Unlinking changes which rows are netted into aggregates, so every
+      // analytics read is potentially stale too -- debounced along with category
+      // and duplicate edits.
+      void queryClient.invalidateQueries({ queryKey: ledgerQueryKey });
+      invalidateAnalyticsDebounced(queryClient);
+    },
+  });
+}
+
+/** Dismiss one anomaly for one period (Phase 34).
+ *
+ * Period-scoped on purpose: dismissing September's Dining drift because of a
+ * birthday must not silence October's. An alert that never comes back goes
+ * quiet exactly as it becomes useful. */
+export function useDismissAnomaly() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { kind: string; subject: string; period: string }) =>
+      apiFetch<void>('/anomalies/dismiss', { method: 'POST', body }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: anomaliesQueryKey });
+    },
+  });
+}
+
+/** Fetch live balances on demand (Phase 35).
+ *
+ * Invalidates every analytics key rather than just one: a balance change moves
+ * net worth, the emergency-fund figure and goal progress at once. */
+export function useRefreshBalances() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<{ accounts_refreshed: number; accounts_failed: number }>('/accounts/refresh-balances', {
+        method: 'POST',
+      }),
+    onSettled: () => {
+      for (const key of ANALYTICS_QUERY_KEYS) {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }
+    },
+  });
+}
+
+/** Savings-goal writes (Phase 33). Each invalidates the goals list; goal
+ *  numbers derive from account balances, which no goal write changes, so
+ *  nothing else needs refetching. */
+export function useCreateGoal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      name: string;
+      target_amount: number;
+      target_date: string | null;
+      account_keys: string[];
+    }) => apiFetch<unknown>('/goals', { method: 'POST', body }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: goalsQueryKey });
+    },
+  });
+}
+
+export function useDeleteGoal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (goalId: number) => apiFetch<void>(`/goals/${goalId}`, { method: 'DELETE' }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: goalsQueryKey });
     },
   });
 }

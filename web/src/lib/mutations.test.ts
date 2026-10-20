@@ -41,8 +41,16 @@ const ledgerData: LedgerResponse = {
       description: 'Grocery Store',
       amount: -50.25,
       category: 'Uncategorized',
+      tx_type: 'expense',
       is_recurring: false,
       is_duplicate: false,
+      pfc_detailed: null,
+      category_source: null,
+      linked_transaction_hash: null,
+
+      stream_id: null,
+
+      stream_description: null,
     },
   ],
 };
@@ -220,7 +228,12 @@ describe('useUpdateRecurring', () => {
     expect(data?.transactions[0].is_recurring).toBe(false);
   });
 
-  it('never invalidates any analytics query, even after the debounce window', async () => {
+  // Was "never invalidates any analytics query". That rested on no aggregate
+  // reading `is_recurring`, which stopped being true: build_overview reads it
+  // for the Committed/Recurring Spend card (api/viewmodels.py:800). Without
+  // this invalidation that card kept showing a figure the toggle had
+  // already changed.
+  it('invalidates analytics, because an aggregate now reads is_recurring', async () => {
     const client = makeClient();
     seedLedger(client);
     mockedApiFetch.mockResolvedValue(undefined);
@@ -237,7 +250,7 @@ describe('useUpdateRecurring', () => {
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ledgerQueryKey });
     for (const key of [overviewQueryKey, cashFlowQueryKey, budgetQueryKey, anomaliesQueryKey]) {
-      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: key });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
     }
   });
 });

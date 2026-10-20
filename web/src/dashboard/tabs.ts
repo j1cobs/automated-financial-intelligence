@@ -1,4 +1,4 @@
-/** Shared tab identifiers -- lives outside Dashboard.tsx so HomeTab.tsx can
- *  type its drill-down navigation callback without importing the component
- *  that renders it (would create a module cycle: Dashboard imports HomeTab). */
-export type TabId = 'home' | 'overview' | 'cashflow' | 'budget' | 'transactions';
+/** Shared tab identifiers -- lives outside Dashboard.tsx so tabs can
+ *  type their drill-down navigation callback without importing the component
+ *  that renders them (would create a module cycle: Dashboard imports tabs). */
+export type TabId = 'overview' | 'cashflow' | 'budget' | 'transactions';

@@ -48,6 +48,7 @@ export interface DashboardFilters {
   search: string | null;
   outliers_only: boolean;
   duplicates_only: boolean;
+  recurring_only: boolean;
   /**
    * Inclusive day-level bounds (ISO `YYYY-MM-DD`), narrowing WITHIN whatever
    * `period`/`months` already selects -- NOT a replacement for month-level
@@ -70,6 +71,7 @@ export const DEFAULT_FILTERS: DashboardFilters = {
   search: null,
   outliers_only: false,
   duplicates_only: false,
+  recurring_only: false,
   date_from: null,
   date_to: null,
 };
@@ -110,6 +112,9 @@ export function toSearchParams(filters: DashboardFilters): URLSearchParams {
   }
   if (filters.outliers_only) {
     params.set('outliers_only', 'true');
+  }
+  if (filters.recurring_only) {
+    params.set('recurring_only', 'true');
   }
   if (filters.duplicates_only) {
     params.set('duplicates_only', 'true');
@@ -160,6 +165,7 @@ export function fromSearchParams(params: URLSearchParams): DashboardFilters {
     search: params.get('search') || null,
     outliers_only: parseBool(params.get('outliers_only')),
     duplicates_only: parseBool(params.get('duplicates_only')),
+    recurring_only: parseBool(params.get('recurring_only')),
     date_from: params.get('date_from') || null,
     date_to: params.get('date_to') || null,
   };
@@ -303,6 +309,14 @@ export function activeFilterChips(filters: DashboardFilters, options?: FilterOpt
     });
   }
 
+  if (filters.recurring_only) {
+    chips.push({
+      id: 'recurring_only',
+      label: 'Recurring only',
+      remove: (f) => ({ ...f, recurring_only: false }),
+    });
+  }
+
   return chips;
 }
 
@@ -332,5 +346,6 @@ export function countActiveFilters(filters: DashboardFilters): number {
   if (filters.search) count += 1;
   if (filters.outliers_only) count += 1;
   if (filters.duplicates_only) count += 1;
+  if (filters.recurring_only) count += 1;
   return count;
 }

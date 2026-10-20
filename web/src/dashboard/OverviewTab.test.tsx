@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, screen, fireEvent, within } from '@testing-library/react';
-import { OverviewTab } from './OverviewTab';
+import { BarChart } from 'recharts';
+import { OverviewTab, renderDriftLabel, FloatingTooltipContent } from './OverviewTab';
 import { FilterProvider } from '../lib/FilterContext';
-import type { OverviewResponse } from '../lib/types';
+import type { OverviewResponse, MonthOverMonthItem } from '../lib/types';
 import type { UseQueryResult, UseMutationResult } from '@tanstack/react-query';
 
 // OverviewTab reads `useFilters()` directly (Fix 14 cross-filtering), so it
@@ -19,12 +20,15 @@ function renderOverviewTab() {
 // Mock the queries module
 vi.mock('../lib/queries', () => ({
   useOverview: vi.fn(),
+  useAnomalies: vi.fn(() => ({ data: { anomalies: [] }, isPending: false, isError: false })),
 }));
 
 // Mock the mutations module — useSetCreditLimit() is the credit-limit editor's
 // only dependency outside props.
 vi.mock('../lib/mutations', () => ({
   useSetCreditLimit: vi.fn(),
+  useDismissAnomaly: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useRefreshBalances: vi.fn(() => ({ mutate: vi.fn(), isPending: false, isError: false, data: undefined })),
 }));
 
 // Recharts' ResponsiveContainer measures its parent via ResizeObserver, which
@@ -34,6 +38,9 @@ vi.mock('recharts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('recharts')>();
   return {
     ...actual,
+    // Wrapped in a spy so a test can read the props OverviewTab passes to each
+    // BarChart (e.g. barCategoryGap); those props aren't visible in the jsdom SVG.
+    BarChart: vi.fn((props: object) => React.createElement(actual.BarChart, props as never)),
     ResponsiveContainer: ({
       children,
     }: {
@@ -159,6 +166,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: 0.1538,
         baseline_months: 3,
         sparkline: [12000, 13500, 15000],
+        comparison_kind: 'trailing_average',
       },
       avg_monthly_expense: {
         key: 'avg_monthly_expense',
@@ -167,6 +175,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: 0.055,
         baseline_months: 3,
         sparkline: [6800, 7100, 7385],
+        comparison_kind: 'trailing_average',
       },
       avg_monthly_net: {
         key: 'avg_monthly_net',
@@ -175,6 +184,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: 0.269,
         baseline_months: 3,
         sparkline: [5200, 6400, 7615],
+        comparison_kind: 'trailing_average',
       },
       savings_rate: {
         key: 'savings_rate',
@@ -183,6 +193,7 @@ const mockOverviewData: OverviewResponse = {
         delta_pct: null,
         baseline_months: 0,
         sparkline: [],
+        comparison_kind: 'trailing_average',
       },
     },
     top_categories: [
@@ -191,10 +202,22 @@ const mockOverviewData: OverviewResponse = {
       { category: 'Entertainment', amount: 400 },
     ],
     month_over_month: [
-      { category: 'Groceries', period: 'this_month', amount: 1200 },
-      { category: 'Groceries', period: 'last_month', amount: 1100 },
-      { category: 'Utilities', period: 'this_month', amount: 300 },
-      { category: 'Utilities', period: 'last_month', amount: 280 },
+      {
+        category: 'Groceries',
+        this_month: 1200,
+        last_month: 1100,
+        usual: 1000,
+        this_month_drift_pct: 0.2,
+        last_month_drift_pct: 0.1,
+      },
+      {
+        category: 'Utilities',
+        this_month: 300,
+        last_month: 280,
+        usual: null,
+        this_month_drift_pct: null,
+        last_month_drift_pct: null,
+      },
     ],
     emergency_fund_months: 4.5,
     income_breakdown: [
@@ -205,6 +228,59 @@ const mockOverviewData: OverviewResponse = {
       { month: '2026-01', savings_rate: 0.45, income: 15000, expenses: 8250 },
       { month: '2026-02', savings_rate: null, income: 0, expenses: 500 },
       { month: '2026-03', savings_rate: 0.6, income: 15000, expenses: 6000 },
+    ],
+    net_worth_trend_daily: [
+      { date: '2026-08-27', net_worth: 495000, assets: 745000, liabilities: 250000, liquid_cash: 70000 },
+      { date: '2026-08-28', net_worth: 500000, assets: 750000, liabilities: 250000, liquid_cash: 75000 },
+    ],
+    net_worth_trend_monthly: [
+      {
+        month: '2026-07',
+        net_worth: 480000,
+        savings_rate: 0.5,
+        credit_utilization_pct: 0.2,
+        emergency_fund_months: 4.0,
+      },
+      {
+        month: '2026-08',
+        net_worth: 500000,
+        savings_rate: 0.6,
+        credit_utilization_pct: 0.25,
+        emergency_fund_months: 4.5,
+      },
+    ],
+    net_worth_mom_delta: 20000,
+    recurring_items: [
+      { description: 'Netflix', amount: 15.99 },
+      { description: 'Gym Membership', amount: 40 },
+    ],
+    top_merchants: [
+      { description: 'Amazon', amount: 2400 },
+      { description: 'Costco', amount: 1800 },
+    ],
+    cash_flow_projection: {
+      month: '2026-08',
+      spent_so_far: 5000,
+      income_so_far: 10000,
+      projected_expenses: 8000,
+      projected_income: 15000,
+      days_elapsed: 20,
+      days_in_month: 31,
+    },
+    biggest_expense_this_month: {
+      description: 'Rent',
+      amount: 2200,
+      date: '2026-08-01',
+    },
+    upcoming_recurring: [
+      {
+        description: 'Netflix',
+        amount: 15.99,
+        next_expected_date: '2026-09-01',
+        typical_interval_days: 30,
+        status: 'mature',
+        stream_id: 'local:NETFLIX',
+      },
     ],
   },
 };
@@ -289,8 +365,11 @@ describe('OverviewTab', () => {
     renderOverviewTab();
 
     expect(screen.queryByText('No data available')).not.toBeInTheDocument();
-    const netWorthLabel = screen.getByText('Net Worth');
-    const netWorthTile = netWorthLabel.closest('div');
+    // "Net Worth" also appears as a legend entry in the Net Worth Trend chart now,
+    // so pick the KPI tile's <p> label specifically, not the chart legend's <span>.
+    const netWorthLabel = screen.getAllByText('Net Worth').find((el) => el.tagName === 'P');
+    expect(netWorthLabel).toBeDefined();
+    const netWorthTile = netWorthLabel!.closest('div');
     expect(netWorthTile).not.toBeNull();
     expect(netWorthTile).toHaveTextContent('$0');
   });
@@ -304,7 +383,8 @@ describe('OverviewTab', () => {
 
     renderOverviewTab();
 
-    expect(screen.getByText('Net Worth')).toBeInTheDocument();
+    // "Net Worth" also appears as a legend entry in the Net Worth Trend chart now.
+    expect(screen.getAllByText('Net Worth').some((el) => el.tagName === 'P')).toBe(true);
     expect(screen.getByText('$500,000')).toBeInTheDocument();
 
     expect(screen.getByText('Total Assets')).toBeInTheDocument();
@@ -313,9 +393,15 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Total Liabilities')).toBeInTheDocument();
     expect(screen.getByText('$250,000')).toBeInTheDocument();
 
-    expect(screen.getByText('Savings Rate')).toBeInTheDocument();
+    // "Savings Rate" also appears as a legend entry in the Net Worth Trend chart now,
+    // and its Monthly tab's percent axis can coincidentally tick at the same value
+    // (60.0%) -- scope to the KPI tile itself rather than a page-wide query.
+    const savingsRateLabel = screen.getAllByText('Savings Rate').find((el) => el.tagName === 'P');
+    expect(savingsRateLabel).toBeDefined();
+    const savingsRateTile = savingsRateLabel!.closest('div');
+    expect(savingsRateTile).not.toBeNull();
     // 0.6 must render as 60.0%, not 6000.0% (double-scaling bug).
-    expect(screen.getByText('60.0%')).toBeInTheDocument();
+    expect(within(savingsRateTile!).getByText('60.0%')).toBeInTheDocument();
     expect(screen.queryByText('6000.0%')).not.toBeInTheDocument();
   });
 
@@ -358,7 +444,7 @@ describe('OverviewTab', () => {
     expect(screen.getAllByText('not enough complete months').length).toBe(3);
   });
 
-  it('renders savings rate trend chart with a footnote for hidden null months', () => {
+  it('renders the Net Worth Trend chart with its month-over-month delta', () => {
     mockedUseOverview.mockReturnValue({
       data: mockOverviewData,
       isLoading: false,
@@ -367,44 +453,8 @@ describe('OverviewTab', () => {
 
     renderOverviewTab();
 
-    expect(screen.getByText('Savings Rate Trend')).toBeInTheDocument();
-    // One month (2026-02) has savings_rate: null in the fixture.
-    expect(screen.getByText('1 month hidden — no recorded income.')).toBeInTheDocument();
-  });
-
-  it('renders no brush/zoom control on the savings rate trend chart -- a short, filter-bounded series has no use for one', () => {
-    mockedUseOverview.mockReturnValue({
-      data: mockOverviewData,
-      isLoading: false,
-      error: null,
-    } as unknown as UseQueryResult<OverviewResponse, Error>);
-
-    const { container } = renderOverviewTab();
-
-    const heading = screen.getByText('Savings Rate Trend');
-    const card = heading.closest('.rounded-lg') as HTMLElement;
-    expect(card.querySelector('.recharts-brush')).toBeNull();
-    expect(container).toContainElement(card);
-  });
-
-  it('does not crash and shows no footnote when no months are null', () => {
-    const noNullMonths: OverviewResponse = {
-      ...mockOverviewData,
-      overview: {
-        ...mockOverviewData.overview,
-        savings_rate_trend: [{ month: '2026-01', savings_rate: 0.5, income: 15000, expenses: 7500 }],
-      },
-    };
-    mockedUseOverview.mockReturnValue({
-      data: noNullMonths,
-      isLoading: false,
-      error: null,
-    } as unknown as UseQueryResult<OverviewResponse, Error>);
-
-    renderOverviewTab();
-
-    expect(screen.getByText('Savings Rate Trend')).toBeInTheDocument();
-    expect(screen.queryByText(/hidden — no recorded income/)).not.toBeInTheDocument();
+    expect(screen.getByText('Financial Trends')).toBeInTheDocument();
+    expect(screen.getByText('+$20,000 since last month')).toBeInTheDocument();
   });
 
   it('renders asset mix chart', () => {
@@ -747,7 +797,7 @@ describe('OverviewTab', () => {
     expect(screen.getByText('Income Sources')).toBeInTheDocument();
   });
 
-  it('renders month-over-month by category as a grouped bar chart', () => {
+  it('renders month-over-month by category as a grouped bar chart with a Usual series and drift labels', () => {
     mockedUseOverview.mockReturnValue({
       data: mockOverviewData,
       isLoading: false,
@@ -757,6 +807,392 @@ describe('OverviewTab', () => {
     renderOverviewTab();
 
     expect(screen.getByText('Month-over-Month by Category')).toBeInTheDocument();
+    // Legend now has a third "Usual" series alongside "This month"/"Last month".
+    // The drift-percentage `<LabelList>` text nodes (e.g. "+20%") are real SVG
+    // content produced only once Recharts' bar-entry animation completes --
+    // like this file's other bar charts (Top Categories, Asset Mix), that
+    // never happens under jsdom's fake timers, so -- consistent with how
+    // those charts are tested elsewhere in this file -- this only asserts on
+    // the chart's static content (heading, legend), not animated bar geometry.
+    expect(screen.getByText('Usual')).toBeInTheDocument();
+    expect(screen.getByText('This month')).toBeInTheDocument();
+    expect(screen.getByText('Last month')).toBeInTheDocument();
+  });
+
+  it('does not cap the Owner Balances list at a fixed 420px height (the masonry ceiling replaces it)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const card = screen.getByText('Owner Balances').closest('div');
+    expect(card).not.toBeNull();
+    expect(card!.querySelector('.max-h-\\[420px\\]')).toBeNull();
+    expect(within(card!).getByText('Alice')).toBeInTheDocument();
+  });
+
+  it('renders the Owner Balances legend in the card header, outside the scrolling body', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const card = screen.getByText('Owner Balances').closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    for (const label of ['Depository', 'Investment', 'Credit']) {
+      expect(withinCard.getByText(label)).toBeInTheDocument();
+      expect(withinCard.getByText(label).closest('.overflow-y-auto')).toBeNull();
+    }
+    // Positive control: the owner lists do sit inside the scroll body.
+    expect(withinCard.getByText('Alice').closest('.overflow-y-auto')).not.toBeNull();
+  });
+
+  it('renders the Month-over-Month legend in the card header, outside the scrolling body, with no Recharts legend', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const card = screen.getByText('Month-over-Month by Category').closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    for (const label of ['Last month', 'This month', 'Usual']) {
+      expect(withinCard.getByText(label)).toBeInTheDocument();
+      expect(withinCard.getByText(label).closest('.overflow-y-auto')).toBeNull();
+    }
+    // The legend moved out of Recharts into the card header.
+    expect(card!.querySelector('.recharts-legend-wrapper')).toBeNull();
+    // Positive control: the chart itself sits inside the scroll body.
+    expect(card!.querySelector('.overflow-y-auto .recharts-wrapper')).not.toBeNull();
+  });
+
+  it('portals the scrolling bar chart tooltips out of the card body and fixes them at the hovered point', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    for (const title of ['Top Expense Categories', 'Month-over-Month by Category']) {
+      const card = screen.getByText(title).closest('div');
+      expect(card).not.toBeNull();
+      // The chart scrolls inside the card body, but its tooltip doesn't live
+      // there, so the body's overflow can't clip it.
+      expect(card!.querySelector('.overflow-y-auto .recharts-wrapper')).not.toBeNull();
+      expect(card!.querySelector('.recharts-tooltip-wrapper')).toBeNull();
+    }
+    // One portaled wrapper per scrolling chart, mounted straight on <body>.
+    const wrappers = Array.from(document.body.querySelectorAll(':scope > .recharts-tooltip-wrapper'));
+    expect(wrappers).toHaveLength(2);
+    for (const wrapper of wrappers) expect(wrapper).toHaveStyle({ position: 'fixed' });
+  });
+
+  describe('FloatingTooltipContent', () => {
+    // Stands in for the element a chart fills, scrolled so its origin sits at
+    // (100, -300) on screen: the top of the chart is out of view.
+    const anchor = {
+      getBoundingClientRect: () => ({ left: 100, top: -300 }) as DOMRect,
+    } as HTMLElement;
+    const payload = [{ name: 'Last month', value: 120, dataKey: 'last_month' }];
+
+    beforeEach(() => {
+      vi.stubGlobal('innerWidth', 1000);
+      vi.stubGlobal('innerHeight', 800);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('fixes the tooltip at the hovered point in viewport coordinates, opening down-right in the top-left', () => {
+      render(
+        <FloatingTooltipContent
+          anchor={anchor}
+          coordinate={{ x: 50, y: 400 }}
+          active
+          payload={payload as never}
+          label="Groceries"
+        />,
+      );
+      const tooltip = screen.getByTestId('floating-tooltip');
+      // 100 + 50 + 12, -300 + 400 + 12
+      expect(tooltip).toHaveStyle({
+        position: 'fixed',
+        left: '162px',
+        top: '112px',
+        transform: 'translate(0, 0)',
+      });
+      expect(within(tooltip).getByText('Groceries')).toBeInTheDocument();
+    });
+
+    it('flips the tooltip up and to the left past the viewport centre, so it never runs off the edge', () => {
+      render(
+        <FloatingTooltipContent
+          anchor={anchor}
+          coordinate={{ x: 700, y: 1000 }}
+          active
+          payload={payload as never}
+        />,
+      );
+      const tooltip = screen.getByTestId('floating-tooltip');
+      // 100 + 700 - 12, -300 + 1000 - 12
+      expect(tooltip).toHaveStyle({ left: '788px', top: '688px', transform: 'translate(-100%, -100%)' });
+    });
+
+    it('renders nothing until the chart element and a hovered point exist', () => {
+      const { container } = render(<FloatingTooltipContent anchor={null} coordinate={{ x: 1, y: 1 }} />);
+      expect(container).toBeEmptyDOMElement();
+    });
+  });
+
+  it('gives the month-over-month chart tighter bar spacing (barCategoryGap 6, barGap 3)', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    const momChartProps = vi
+      .mocked(BarChart)
+      .mock.calls.map(([props]) => props as { data?: unknown; barCategoryGap?: number; barGap?: number })
+      .find((props) => props.data === mockOverviewData.overview!.month_over_month);
+    expect(momChartProps).toBeDefined();
+    expect(momChartProps!.barCategoryGap).toBe(6);
+    expect(momChartProps!.barGap).toBe(3);
+  });
+
+  describe('renderDriftLabel', () => {
+    // Regression coverage for a real bug: Recharts v3's `LabelList` `content`
+    // callback does NOT forward a `payload` field (only x/y/width/height/value/
+    // index/viewBox survive its internal SVG-attribute filter), so an earlier
+    // version of this function that read `props.payload` silently returned
+    // `null` for every single row -- the drift percentages never rendered at
+    // all, with no error, in any browser. These tests exercise the function
+    // directly (bypassing Recharts entirely) so a future regression back to a
+    // `payload`-based lookup fails loudly here instead of shipping invisible.
+    const rows: MonthOverMonthItem[] = [
+      {
+        category: 'Groceries',
+        this_month: 1200,
+        last_month: 1100,
+        usual: 1000,
+        this_month_drift_pct: 0.2,
+        last_month_drift_pct: -0.05,
+      },
+      {
+        category: 'Utilities',
+        this_month: 300,
+        last_month: 280,
+        usual: null,
+        this_month_drift_pct: null,
+        last_month_drift_pct: null,
+      },
+    ];
+
+    it('looks the row up by index and renders a signed, rounded percentage', () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 0 },
+        rows,
+        'this_month_drift_pct',
+        '#123456',
+      );
+      expect(label).not.toBeNull();
+      render(<svg>{label}</svg>);
+      expect(screen.getByText('+20%')).toBeInTheDocument();
+    });
+
+    it('renders a negative percentage without a leading plus sign', () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 0 },
+        rows,
+        'last_month_drift_pct',
+        '#123456',
+      );
+      render(<svg>{label}</svg>);
+      expect(screen.getByText('-5%')).toBeInTheDocument();
+    });
+
+    it("positions the label past the bar's end, not centered inside it", () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 0 },
+        rows,
+        'this_month_drift_pct',
+        '#123456',
+      );
+      // x + width + gap, not x + width / 2 -- past the bar, not inside it.
+      expect(label?.props.x).toBeGreaterThan(10 + 100);
+    });
+
+    it('renders nothing for a row with no baseline (null drift)', () => {
+      const label = renderDriftLabel(
+        { x: 10, y: 20, width: 100, height: 24, index: 1 },
+        rows,
+        'this_month_drift_pct',
+        '#123456',
+      );
+      expect(label).toBeNull();
+    });
+
+    it('renders nothing when geometry or index is missing (mid-transition Recharts call)', () => {
+      expect(
+        renderDriftLabel({ width: 100, height: 24, index: 0 }, rows, 'this_month_drift_pct', '#123'),
+      ).toBeNull();
+      expect(
+        renderDriftLabel({ x: 10, y: 20, width: 100, height: 24 }, rows, 'this_month_drift_pct', '#123'),
+      ).toBeNull();
+    });
+  });
+
+  it('renders the 5th KPI tile (Projected Month-End Spend) when a cash flow projection is present', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    expect(screen.getByText('Projected Month-End Spend')).toBeInTheDocument();
+    expect(screen.getByText('$8,000')).toBeInTheDocument();
+    expect(screen.getByText('day 20 of 31')).toBeInTheDocument();
+  });
+
+  it('does not render the 5th KPI tile when cash_flow_projection is null', () => {
+    const noProjection: OverviewResponse = {
+      ...mockOverviewData,
+      overview: { ...mockOverviewData.overview, cash_flow_projection: null },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: noProjection,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    renderOverviewTab();
+
+    expect(screen.queryByText('Projected Month-End Spend')).not.toBeInTheDocument();
+  });
+
+  it('renders the Biggest Expense This Month card, with an empty-state fallback', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    const { rerender } = renderOverviewTab();
+
+    expect(screen.getByText('Biggest Expense This Month')).toBeInTheDocument();
+    expect(screen.getByText('Rent')).toBeInTheDocument();
+    expect(screen.getByText('$2,200')).toBeInTheDocument();
+
+    const noExpense: OverviewResponse = {
+      ...mockOverviewData,
+      overview: { ...mockOverviewData.overview, biggest_expense_this_month: null },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: noExpense,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    rerender(
+      <FilterProvider>
+        <OverviewTab />
+      </FilterProvider>,
+    );
+
+    expect(screen.getByText('No expenses recorded this month.')).toBeInTheDocument();
+  });
+
+  it('renders the Upcoming Recurring Charges card, with an empty-state fallback', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    const { rerender } = renderOverviewTab();
+
+    const heading = screen.getByText('Upcoming Recurring Charges');
+    const card = heading.closest('div');
+    expect(card).not.toBeNull();
+    const withinCard = within(card!);
+    expect(withinCard.getByText('Netflix')).toBeInTheDocument();
+    // formatCurrency rounds to whole dollars.
+    expect(withinCard.getByText('$16')).toBeInTheDocument();
+
+    const noUpcoming: OverviewResponse = {
+      ...mockOverviewData,
+      overview: { ...mockOverviewData.overview, upcoming_recurring: [] },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: noUpcoming,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    rerender(
+      <FilterProvider>
+        <OverviewTab />
+      </FilterProvider>,
+    );
+
+    expect(screen.getByText('No recurring charges with a predictable cadence yet.')).toBeInTheDocument();
+  });
+
+  it('renders Top Merchants and Committed/Recurring Spend lists, with empty-state fallbacks', () => {
+    mockedUseOverview.mockReturnValue({
+      data: mockOverviewData,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    const { rerender } = renderOverviewTab();
+
+    const merchantsHeading = screen.getByText('Top Merchants (Trailing 12 Months)');
+    const merchantsCard = merchantsHeading.closest('div');
+    expect(merchantsCard).not.toBeNull();
+    expect(within(merchantsCard!).getByText('Amazon')).toBeInTheDocument();
+
+    const recurringHeading = screen.getByText('Committed / Recurring Spend');
+    const recurringCard = recurringHeading.closest('div');
+    expect(recurringCard).not.toBeNull();
+    expect(within(recurringCard!).getByText('Netflix')).toBeInTheDocument();
+
+    const noneOfEither: OverviewResponse = {
+      ...mockOverviewData,
+      overview: { ...mockOverviewData.overview, top_merchants: [], recurring_items: [] },
+    };
+    mockedUseOverview.mockReturnValue({
+      data: noneOfEither,
+      isLoading: false,
+      error: null,
+    } as unknown as UseQueryResult<OverviewResponse, Error>);
+
+    rerender(
+      <FilterProvider>
+        <OverviewTab />
+      </FilterProvider>,
+    );
+
+    expect(screen.getByText('Not enough expense history yet.')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Nothing flagged recurring yet — mark a transaction recurring in the Transactions tab.',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('renders an emergency fund progress bar with the explanatory caption', () => {

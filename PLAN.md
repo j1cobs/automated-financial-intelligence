@@ -2162,7 +2162,17 @@ If ever adopted:
 
 ---
 
-## Phase 7 — DEFERRED: ML activation
+## Phase 7 — DEFERRED: ML activation — SUPERSEDED
+
+> **Superseded, both halves — do not revive this phase.** The *classifier* half was resolved by
+> **Phase 18** (Plaid PFC + merchant-memory cascade), which replaced the TF-IDF/SVM plan with a
+> deterministic three-layer cascade. The *outlier* half is resolved by **Phase 34**, which retires
+> `analytics/outlier_detector.py` rather than wiring it up: an Isolation Forest with a fixed
+> `contamination=0.03` flags ~3% of rows no matter how normal the month was, and its score cannot be
+> explained to the user. Phase 34 replaces it with explainable rules (category drift via MAD, recurring
+> price creep) plus a period-scoped feedback memory. See `docs/adr/0007-anomaly-detection-without-ml.md`.
+>
+> The checklist below is kept for the historical record only.
 
 Explicitly out of initial publish scope. Do after Phases 1-6 land and the repo is public.
 
@@ -4665,6 +4675,86 @@ backfill limitation, and why layer 3 is deferred).
 
 ---
 
+## Phase 25 — Overview tab: masonry layout + trends/drift-label bug fixes — DONE (2026-09-23)
+
+> **Numbering note:** this file's last logged phase was 18, but `OverviewTab.tsx`/`NetWorthTrendChart.tsx` code
+> comments already referenced Phase 23 (Home tab retirement, folded into `build_overview`) and Phase 24 (the
+> former "Net Worth Trend" chart retitled "Financial Trends") as shipped, undocumented here. This entry is
+> numbered 25 to stay consistent with that existing code-comment sequence rather than pretend Phases 19-24 don't
+> exist; their actual content is not reconstructed here.
+
+Driven by direct use of the live dashboard (`/grill-with-docs` interview + a Chrome pass against the real deployed
+data), not a design brief. Six independent fixes to `OverviewTab.tsx` and its two closest collaborators:
+
+1. **Financial Trends chart split into 3 single-axis tabs** (`NetWorthTrendChart.tsx`): Daily / Net Worth / Rates,
+   replacing the old Daily/Monthly toggle whose Monthly tab overlaid 4 metrics on 3 simultaneous y-axes (dollars,
+   percent, a month-count) — an axis for a currently-hidden line stayed rendered regardless, and overlaying a
+   dollar *level* (net worth) against *rates* (savings rate, credit utilization) on shared gridlines implied a
+   comparability that isn't real. Normalizing/indexing all 4 onto one axis was considered and explicitly rejected
+   (see decisions below) in favor of keeping every axis honest. `emergency_fund_months` is dropped from this chart
+   entirely — it already has its own live-value card elsewhere on the tab.
+2. **Month-over-Month drift-percentage labels fixed — a real, total-failure bug, not a display nuance.**
+   `renderDriftLabel`'s `content` callback on `<LabelList>` read `props.payload`, which Recharts v3 never
+   populates for custom `content` callbacks (only `x`/`y`/`width`/`height`/`value`/`index`/`viewBox` survive its
+   internal SVG-attribute filter — `payload` isn't a valid SVG attribute name, so it's silently dropped, no error).
+   The result: the "+18%"/"-5%" vs-usual labels never rendered, for any category, on any real data, ever — confirmed
+   live before the fix (zero `<text>` nodes for the values, despite non-null `drift_pct` in the API response) and
+   after (every bar shows its label). Fixed by looking the row up via `index` into the chart's own `data` array
+   instead. Labels also moved from centered-inside-the-bar (suppressed under a width threshold) to just past the
+   bar's end, so a short bar (a small-dollar category) still gets a visible label. 5 new unit tests exercise
+   `renderDriftLabel` directly, bypassing Recharts, so a regression back to `payload` fails loudly instead of
+   shipping invisible again.
+3. **`MetricInfoBadge` (`MetricTile.tsx`) now closes on outside click** — previously only closed via its own
+   toggle button or Escape; a `containerRef`-scoped `mousedown` listener was ported from the identical pattern
+   already used in `MultiSelectPopover.tsx`.
+4. **Income Sources now reads the trailing-12-month window** (`api/viewmodels.py::build_overview`,
+   `income_src_df`), matching its sibling "top N" cards (Top Merchants, Top Categories, Month-over-Month). It
+   previously read the period-filtered `df`, silently following whatever the FilterBar's period picker was set
+   to (default: last 3 months) while every other card on the row ignored the filter — confirmed live: switching
+   this fixed the card from 3 rows to 7.
+5. **Committed/Recurring Spend and Upcoming Recurring Charges got clarifying subtitles** — they read as
+   near-duplicates from their titles alone; the former is an all-time total per description, the latter a
+   forward-looking next-charge-date projection from the median gap between past occurrences. (The related
+   `recurring_monthly_spend` metric definition in `metricInfo.ts`/`polarity.ts` is dead scaffolding from a
+   pre-Phase-23 Home-tab tile that was deliberately dropped as a product feature, not revived here — left as-is,
+   out of scope.)
+6. **New `MasonryColumns.tsx` layout component** — the 10 non-full-width cards (Biggest Expense, Upcoming
+   Recurring, Top Merchants, Committed/Recurring Spend, Emergency Fund, Asset Mix, Top Categories,
+   Month-over-Month, Owner Balances, Income Sources) no longer sit in fixed `grid-cols-2` row pairs; they flow
+   into a single pool balanced across two columns by real measured height (`ResizeObserver`-driven, greedy
+   assignment to whichever column's running total is currently smaller), so an unrelated pairing (e.g. Owner
+   Balances' 11+ rows next to Income Sources' 3) no longer leaves a block of dead whitespace under the shorter
+   card. Credit Utilization moved out of its old spot mid-list to sit full-width directly under Financial Trends,
+   ahead of the masonry pool, so the pool stays one unbroken sequence instead of splitting around it.
+
+**Decisions locked (from the `/grilling` interview):**
+
+| Question | Decision |
+|---|---|
+| Fix the drift labels' width threshold, or the whole rendering path? | The threshold wasn't the real bug — `payload` was always `undefined`; fixed via `index` lookup instead |
+| Combine all 4 trend metrics on one normalized/indexed axis? | **Rejected** — normalization solves the technical axis-conflation problem but sacrifices at-a-glance readability (the axis stops meaning "dollars"/"percent"), which is worse for a casual personal dashboard than the problem it fixes |
+| Equal-height row pairs (`items-stretch`) for every masonry-pool pair? | **Rejected** — user wants columns to end at the same total height without stretching/shrinking individual cards; solved via a balancing layout, not per-pair stretching |
+| Masonry balance implementation: CSS multi-column vs. JS-measured? | **JS-measured, greedy-by-running-height** — CSS `columns` fills the left column fully before spilling into the right (column-major), which would visually separate related cards (e.g. Biggest Expense from Upcoming Recurring) more than the row layout it replaces |
+| Wire up the dead `recurring_monthly_spend` metric while touching this area? | **No** — it requires new backend aggregation logic (no existing computation to surface), out of scope for a layout/clarity pass |
+
+### Verification
+
+- Python: `python -m unittest discover -s tests -v` — 434/434 passing, including a new
+  `test_income_breakdown_uses_trailing_12_months_not_the_period_filter` in `tests/test_api_viewmodels.py`.
+- Web: `cd web && npm run test -- --run` passes cleanly per file (308 tests across 21 files, including 5 new
+  `renderDriftLabel` regression tests in `OverviewTab.test.tsx`); the full-suite parallel run has pre-existing
+  5-second-timeout flakiness under machine load, reproduced identically on `dev` before this phase's changes —
+  not introduced here.
+- `npx tsc -b` and `npm run lint` — clean except pre-existing `CashFlowTab.tsx` unused-variable errors and
+  `AuthContext.tsx`/`TransactionsTab.tsx` warnings, all unrelated to and untouched by this phase.
+- `npm run format:check` — clean except pre-existing `package.json`/`package-lock.json` warnings, untouched here.
+- Live-verified in Chrome against the real dashboard: Financial Trends' 3 tabs render correctly with single
+  axes; Month-over-Month bars show visible signed percentages on every row; Credit Utilization sits directly
+  under Financial Trends; Income Sources shows 7 rows with a "Trailing 12 Months" subtitle (was 3, filter-driven,
+  before the fix); the masonry pool balances into two columns with no large dead-space gap.
+
+---
+
 ## Appendix A — Potential adjustments: dashboard interactivity (future, non-blocking)
 
 > Not on the publish-critical path. These extend the dashboard from "read + light edit" toward a working
@@ -4831,3 +4921,488 @@ cells the user actually changed trigger a DB write — no new pattern to invent.
     x-axis label per account holder, and a reachable keyboard-only tooltip on every KPI tile. Diffing it
     against `streamlit run streamlit_app.py` at matching filters shows **only** the five intended
     divergences tabulated at the end of Phase 15.
+
+---
+
+## Phase 26-35 — Budget as the central tool, recurring streams, explainable anomalies
+
+> **Status:** designed, not yet implemented. Produced by a `/grill-with-docs` interview followed by a
+> second `/grilling` pass run against the resulting plan itself. That second pass found three defects in
+> the first draft (a migration that resurrected deleted caps, a dismissal rule that silenced future
+> periods, and a drift statistic that fired a false alert at the start of every month) plus one
+> data-loss path (mirroring budget caps into a table Streamlit writes). All four are corrected below.
+>
+> Phases 26-35 are commit-sized and **degrade rather than hard-block**, so a delayed Phase 30 does not
+> stall the work behind it.
+
+### Why this work
+
+Three problem areas surfaced from direct use of the live dashboard:
+
+1. **Transversal UI defects.** No shared `Button` component, so ~12 inline-Tailwind buttons lack
+   `cursor-pointer`/hover; "Clear all" renders twice simultaneously on desktop; the "More filters"
+   popover has Escape handling but no outside-click dismissal; ledger columns overlap when the Plaid
+   category-detail column is shown.
+2. **The Budget tab cannot structurally become the central tool.** `budgets` is one row per category with
+   a single `monthly_limit` and **no month dimension** — "budget for October" is inexpressible. The goal
+   is for Budget to be the primary instrument for anyone controlling their finances, including planning a
+   property purchase — but generalised, so any goal works the same way.
+3. **Recurring and anomaly detection are hollow.** `is_recurring` is a bare per-row boolean with no series
+   concept. `analytics/outlier_detector.py` has been written and unwired since Phase 1.
+
+### Decisions locked
+
+| Question | Decision |
+|---|---|
+| Budget model | Per-month caps with history + forward cash-flow forecast. **No** envelope/YNAB rollover. |
+| Unset month | Inherits the most recent month with an explicit cap (carry-forward). |
+| Cap granularity | Canonical categories only; rows expand to show `pfc_detailed` breakdown. |
+| Cap key set | Constrained to the **18 canonical names** in migration 023. `user_category` gains validation. |
+| Unmappable free text | Preserved untouched and **reported**, never rewritten or moved to `OTHER`. |
+| Forecast basis | Recurring streams + trailing median per category. Cap-based line as a dashed comparison. |
+| Forecast starting balance | `account_type == 'depository'` only. Credit and investment excluded. |
+| Statistical window | Adaptive up to 6 months; **minimum 3 complete months** before emitting anything. |
+| Goals | Generic savings goals, **not** house-specific. Multiple concurrent. Section inside Budget. |
+| Goal progress | Linked account balances minus a baseline captured at goal start. |
+| Goal pace basis | **Hard switch** at 12 weeks of snapshots, always labelled with its basis. |
+| Goal account overlap | Allowed, but flagged, with contested amounts shown per goal. |
+| Recurring source of truth | Plaid `/transactions/recurring/get`, local `merchant_key()` derivation as fallback. |
+| Existing `is_recurring` flags | Preserved as manual overrides that win over Plaid. Pipeline never clears a user flag. |
+| Anomaly approach | Deterministic rules + user-feedback memory. **Isolation Forest retired, not wired up.** |
+| Drift statistic | Same-day-of-month cumulative vs prior months. **No projection-to-EOM.** |
+| Dismissal scope | Keyed `(kind, subject, period)` — this period only. |
+| Severity rule | Drift >=2.5 MAD medium, >=4 MAD high. Creep >=10%/$3 medium, >=25%/$15 high. |
+| Streamlit compatibility | Mirror `is_outlier` only. **`budgets` left entirely alone** — Streamlit writes it. |
+| Extra Plaid | Balance refresh only. Enrich, Liabilities, Assets, Income all out of scope. |
+
+### Why no ML
+
+**Rules plus a feedback memory, not a model.** The Isolation Forest has three disqualifying properties on
+this data: it produces a score that cannot be explained ("0.83" is not actionable); it is unsupervised
+with a fixed `contamination=0.03`, so it flags ~3% of rows no matter how normal the month was; and on
+personal finance it converges on permanently flagging rent and large legitimate purchases. Category drift
+is a robust z-score against a trailing median and price creep is a subtraction — both explain themselves
+in a sentence.
+
+Where learning belongs is the **feedback loop**: a dismissed alert stays dismissed for that period. This
+mirrors Phase 18's categorizer, where `merchant_categories` is a user-correction memory feeding a
+deterministic cascade. **This supersedes the outlier half of Phase 7**; the classifier half was already
+resolved by Phase 18.
+
+### Constraints discovered during grilling
+
+Four facts that invalidated parts of the first draft:
+
+- **`app/dashboard.py` reads AND writes `budgets`** (`:1116` reads, **`:1186` calls `db.upsert_budget`**).
+  Mirroring caps into it would have silently discarded any budget saved from Streamlit on the next
+  pipeline run. It is left alone entirely.
+- **Streamlit also reads `is_outlier`/`outlier_score`** (`:339`, `:787`, `:1195-1209`). Retiring the
+  detector without a shim would leave its anomalies view permanently empty.
+- **The effective category is `COALESCE(t.user_category, t.category)`** (`app/dashboard.py:339`) and
+  `update_transaction_category` accepts **arbitrary free text** — no enum, no validation. "Primary PFC
+  categories" was not a closed set.
+- **`days_back` defaults to 90** (`pipeline/runner.py:50`). A "trailing 6-month median" had no guarantee
+  of six months behind it.
+
+One assumption held: `activeFilterChips` and `countActiveFilters` (`web/src/lib/filters.ts:217`, `:319`)
+fire under identical conditions, so removing one "Clear all" leaves nothing unclearable.
+
+### Plaid product research (verified 2026-09-23)
+
+| Product | Existing tokens work? | Canada | Verdict |
+|---|---|---|---|
+| `/transactions/recurring/get` | Yes — add-on to Transactions | Yes | **Adopt** (entitlement unverified — probe first) |
+| `/accounts/balance/get` | Yes — add-on to any product | Yes | **Adopt** (Phase 35) |
+| `/liabilities/get` | No — update-mode consent per Item | "Canada coverage is limited" | Out of scope |
+| `/transactions/enrich` | Yes — stateless | n/a | Out of scope (billed per transaction) |
+| Assets / Bank Income / Payroll Income / Statements | No | Unconfirmed; US lending stack | **Out of scope** |
+
+Plaid will not supply lender-grade asset or income reports in Canada, so the goal tracker is built from
+our own transaction and balance history.
+
+### Phase 26 — UI affordance pass
+
+Pure frontend. Create `web/src/components/Button.tsx` (variants `primary|secondary|ghost|danger`, each
+with `cursor-pointer`, hover, `focus-visible`, `disabled:cursor-not-allowed`), migrate the ~12 call sites
+in `FilterBar.tsx`, `TransactionsTab.tsx`, `BudgetTab.tsx` and `MetricTile.tsx`. Delete the duplicate
+"Clear all" in the controls row, keeping the chip-row one. Port the `containerRef`-scoped `mousedown`
+listener from `MultiSelectPopover.tsx` to the More-filters popover — the same port Phase 25 made for
+`MetricInfoBadge`.
+
+### Phase 27 — Ledger column isolation
+
+Two distinct bugs behind one symptom. **(A)** the plain table (`TransactionsTab.tsx:916`, used whenever
+the ledger is under 50 rows) has no `colgroup` and no fixed layout at all. **(B)** `LedgerColgroup`
+declares widths summing to **103%** normally and **114%** with the Plaid-detail column, so fixed layout
+silently shrinks every column ~12% when detail is enabled. Fix with one exported column spec (two width
+sets, each summing to exactly 100%) applied to **both** tables, `truncate` plus `title` on every cell, and
+horizontal scroll below the `sm` breakpoint rather than crushing columns on a phone.
+
+### Phase 28 — Budget schema: per-month caps with carry-forward
+
+Migration `026_budget_periods.sql` adds `budget_periods (category, period, monthly_limit)` with
+`UNIQUE (category, period)`. **The seed must be guarded on an empty table** — every `.sql` re-runs on
+every `ensure_schema()` call, so an unguarded seed resurrects a cap the user deliberately cleared.
+`analytics/budget_periods.py::resolve_caps` is pure and DB-free; **absent != 0** (absent means "no budget
+set", 0 means "committed to spending nothing"). `CategoryUpdate.category` becomes a `Literal` over the 18
+canonical names, with a companion pass that maps unambiguous free text and **reports rather than
+rewrites** everything else.
+
+### Phase 29 — Budget tab UI
+
+Month selector driving `?period=`; rows are canonical categories expanding to their `pfc_detailed`
+breakdown (there is no primary-to-detailed table; group on the column already on `transactions`);
+inherited caps visually distinct and naming their source month. No emojis.
+
+### Phase 30 — Recurring streams
+
+`scripts/probe_plaid_recurring.py` first, honouring the **scrubbed-logging rule** (`status_code` /
+`error_type` / `error_code` only, never `response.text`, never an account mask). Migration
+`027_recurring_streams.sql`. `PlaidIngestor.fetch_recurring_streams()` is a new method **alongside** the
+`BaseIngestor` seam, not a change to it (Phase 17 discipline); if the probe fails,
+`analytics/recurring.py::derive_streams` produces the identical table shape from `merchant_key()`.
+
+### Phase 31 — Upcoming recurring + the duplicate-flag fix
+
+Precedence: user override > stream membership > not recurring. The pipeline never clears a user flag.
+Checking recurring on a row in a stream toggles the **stream**; the two cases must **look different before
+you click**. Upcoming Recurring Charges reads `predicted_next_date` instead of guessing from median gaps.
+
+### Phase 32 — Forward cash-flow forecast
+
+`analytics/forecast.py`, pure. Behaviour series (streams + trailing medians) solid, cap-held series
+dashed — the gap between them is the value of sticking to budget. Starting balance is **depository only**.
+Refuses to project below 3 complete months of history.
+
+### Phase 33 — Savings goals
+
+Migration `028_savings_goals.sql`. Progress is linked-account balances minus a baseline captured at goal
+start. `pace()` returns `(amount, basis, weeks_of_history)` and **hard-switches** from `cashflow` to
+`balance` at 12 weeks — `account_balance_snapshots` only began collecting ~2026-08-25, so `cashflow` is
+the live answer today. **Never surface a pace without its basis.** Account overlap between goals is
+allowed but flagged with contested amounts.
+
+### Phase 34 — Anomaly detection: explainable rules + feedback memory
+
+Migration `029_anomalies.sql` adds `anomalies` (`UNIQUE (kind, subject, period)`, idempotent by the same
+discipline as `transaction_hash`) and `anomaly_feedback` (period-scoped). Two pure detectors: category
+drift via **MAD against the same day-of-month** in prior months, and price creep on a dual
+percent-and-dollar threshold. Re-detection updates severity and explanation while preserving
+`detected_at`. The Isolation Forest and its tests are deleted; a **compatibility shim keeps `is_outlier`
+written** (top 3 contributors per drift anomaly, latest transaction per creep stream) because the frozen
+Streamlit app reads it and may not be edited.
+
+### Phase 35 — On-demand balance refresh
+
+`PlaidIngestor.refresh_balances()` via `/accounts/balance/get` — no re-link, existing tokens work. Upserts
+today's `account_balance_snapshots` row in place.
+
+### Documentation
+
+Four ADRs (`0005` budget periods, `0006` recurring streams, `0007` anomaly detection without ML,
+`0008` goal progress from balances); `CONTEXT.md` glossary additions; `CLAUDE.md` corrections — including
+that the migration count is already **025** before this work, not 023 as currently stated, and that
+`budgets` is now Streamlit-owned and must not be written by the new path.
+
+### Verification
+
+Per phase, the named test file and its cases must exist and pass, then `python -m unittest discover -s
+tests -v` and `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`.
+
+1. `python main.py` — clean run; one `pipeline_runs` row; streams and anomalies populate.
+2. Every button shows a pointer and hover; exactly one "Clear all"; More-filters closes on outside click.
+3. Toggle category detail — no column overlap on either ledger path; horizontal scroll on a narrow viewport.
+4. Set October's cap, confirm September unchanged; clear a cap and confirm it falls back to inherited, not $0.
+5. Run the pipeline twice — the 026 seed does not resurrect a cleared cap.
+6. A hand-flagged charge still reads recurring; Upcoming lists each stream exactly once.
+7. Two goals with different target dates — horizon extends to the furthest; pace is labelled `cashflow`;
+   a shared account shows the contested warning on both.
+8. Dismiss an anomaly, re-run `python main.py` — it stays dismissed **for that period** and returns the next.
+9. The Streamlit dashboard still shows anomalies via the shim.
+10. Refresh balances — today's snapshot updates in place rather than adding a second row.
+
+### Phase 36 — Overview masonry: columns that end flush
+
+> **Status:** done (commits 95fc6e8, 3833f66, c6fd8f3, dedb36f).
+
+#### Context
+
+The `MasonryColumns` re-observe fix (re-observe cards after every column assignment) works and is tested, but
+the Overview tab's two columns still don't end at the same height. That's built into the approach: a greedy
+split of whole cards can only get within one card's height of even, never to exactly even. The goal: both
+columns start **and end** on the same line, cards show their full content when it fits, scrolling happens only
+when a card has a lot of content, there's **as little white space as possible** inside cards, and any white
+space that is left is spread symmetrically. The layout must stay visually close to today's; only small height
+adjustments are allowed.
+
+##### Baseline (measured live in Claude in Chrome, 2026-10-19, current working tree incl. the uncommitted fix)
+
+Two-column widths (viewports 1680×824, 1284×714 and 1040×715 all measured identically; card heights in px, gap 24):
+
+| Left column | h | Right column | h |
+|---|---|---|---|
+| Biggest Expense This Month | 98 | Upcoming Recurring Charges | 144 |
+| Top Merchants (Trailing 12 Months) | 332 | Committed / Recurring Spend | 170 |
+| Asset Mix | 198 | Emergency Fund | 174 |
+| Month-over-Month by Category | 558 (15 categories × 32 = 480 chart → overhead 78) | Top Expense Categories | 418 |
+| Income Sources | 296 | Owner Balances | 522 (598 content in a 420 cap → overhead 102) |
+| **bottom** | **1578** | **bottom** | **1524** (**54 px short**) |
+
+Stacked: at 784×714 the heights are 98/144/332/170/174/198/418/558/522/296 (code order); at 500×714 they're
+86/132/320/158/162/186/406/546/510/284.
+
+**Expected result.** Month-over-Month becomes 15 × 48 + 32 = 752 px of chart (natural card ~840), so it's clipped
+at the ceiling and scrolls. The split is unchanged (verified by hand against the greedy rule below):
+- **1680×824** (ceiling 577): left = 98+332+198+**577**+296 + 4·24 = 1597; right = 144+170+174+418+**577** + 96 = 1579.
+  The right column is short by 18, so Owner (clipped) grows by 18 → **595**. Flush; Owner scrolls 105 px instead of 178.
+- **1284×714 / 1040×715** (ceiling 560): left = 1580, right = 1562 → Owner **578**. Flush; Owner scrolls 122 px.
+- **Stacked at 714 tall:** MoM 560 (scrolls), Owner 560; everything else unchanged.
+- Month-over-Month's card stays within 19 px of today's height at every size; its bars go from ~8 px to ~12 px.
+
+##### Decisions (settled in the grilling sessions)
+
+| Topic | Rule |
+|---|---|
+| Mechanism | Same greedy split as today, then **stretch** the shorter column until the bottoms meet. No S/M/L/XL buckets (the number of visible cards varies from 5 to 10, so buckets can't guarantee an even split) |
+| Which cards scroll | Any pool card whose content passes the ceiling. No per-card flag |
+| Ceiling | `max(round(CEILING_RATIO * window.innerHeight), CEILING_FLOOR)`, with `CEILING_RATIO = 0.7` and `CEILING_FLOOR = 560`; recomputed on window `resize`. The floor guarantees no card shows less than today (Owner Balances = 522) |
+| Minimum visible body | Lists/text `MIN_BODY_LIST = 120` px; charts `MIN_BODY_CHART = 250` px, so a scrolling chart is never compressed |
+| Filling the shorter column, in order | 1) its clipped cards grow back toward their full content; 2) its **elastic** charts grow, up to `ELASTIC_MAX_GROWTH = 0.25` (125% of their natural chart height); 3) the **taller** column's clipped cards **shrink** (scroll a bit more), never below `CEILING_FLOOR` (560), which lowers the target; 4) only then is what's left **spread evenly across every card** in the shorter column |
+| Elastic cards | Top Expense Categories and Month-over-Month by Category. Asset Mix is not elastic |
+| Chart spacing | Month-over-Month: **48 px per category** (3 bars of ~12 px each, 3 px between bars, 6 px between categories), up from 32. Top Expense Categories: **32 px unchanged** |
+| White space inside a stretched card | Distributed into **equal slots**: above the first element, between each pair (on top of the normal gap) and below the last. A single-element card ends up vertically centered |
+| MoM legend | Moves out of the chart into the card's `headerExtra` (an HTML swatch legend like Owner Balances'), so it stays visible while the chart scrolls; the $ axis stays at the chart's bottom |
+| Animation | None: heights snap before paint (no CSS transition) |
+| Commits | 3 blocks, the user commits each: **A** planner + tests; **B** `MasonryColumns` / `ScrollBody` / `Stack` + tests; **C** `OverviewTab` conversions + chart spacing + `PLAN.md` |
+| Below `lg` | Stacked; ceiling and minimum body still apply; no stretching |
+| What scrolls | The card **body** only; title, caption and `headerExtra` (the Owner Balances legend) stay fixed |
+| Owner Balances `max-h-[420px]` | Removed; the ceiling replaces it |
+| Split rule | Unchanged greedy, in order, `<=` tie goes left, but on **wanted** heights |
+
+#### Implementation
+
+##### Step 1: pure planner `web/src/dashboard/masonryLayout.ts` (new)
+
+```ts
+export const CEILING_RATIO = 0.7;
+export const CEILING_FLOOR = 560;
+export const MIN_BODY_LIST = 120;
+export const MIN_BODY_CHART = 250;
+export const ELASTIC_MAX_GROWTH = 0.25;
+
+export interface CardMeasure {
+  /** Card height minus its scroll body: title, caption, headerExtra, padding, border. Integer px (ceil). */
+  overhead: number;
+  /** Natural body content height. Integer px (ceil). For elastic cards, the declared chart height. */
+  content: number;
+  /** Smallest body height before the card may scroll. */
+  minBody: number;
+  /** Body can usefully fill extra height (charts). */
+  elastic: boolean;
+  /** No ScrollBody registered: measured as a whole, never clipped, grown, shrunk or given a height. */
+  fixed: boolean;
+}
+
+export interface LayoutPlan {
+  /** Indices per column; stacked mode = one column in original order, plus an empty second column. */
+  columns: number[][];
+  /** Allotted card height per index; null = leave unsized (fixed card). */
+  heights: (number | null)[];
+}
+
+export function ceilingFor(viewportHeight: number): number; // max(round(0.7 * vh), CEILING_FLOOR)
+
+export function planLayout(
+  cards: CardMeasure[],
+  opts: { twoColumn: boolean; ceiling: number; floor: number; gap: number },
+): LayoutPlan;
+
+export function samePlan(a: LayoutPlan, b: LayoutPlan): boolean; // replaces sameAssignment in MasonryColumns
+```
+
+Algorithm (all integer px). `distribute(amount, cards, cap)` is a shared water-fill helper: repeat { `S` = cards
+not at their cap; stop if `S` is empty or `amount == 0`; `share = floor(amount / |S|)`; if `share == 0`, give 1 px to
+each card of `S` in order until `amount == 0`; else give each `min(share, room)` }; it returns what it couldn't place.
+1. `natural_i = overhead_i + content_i`.
+   `wanted_i = fixed ? natural_i : min(natural_i, max(ceiling, overhead_i + minBody_i))`.
+2. Stacked (`!twoColumn`): `columns = [[0..n-1], []]`, `heights_i = fixed ? null : wanted_i`. Done.
+3. Two-column split: walk the cards in order, put each into column 0 if `total0 <= total1`, otherwise column 1,
+   and add `wanted_i` to that total.
+4. `T_c = sum(heights in c) + gap * max(0, len_c - 1)`, with `heights_i = wanted_i` to start (fixed cards keep `natural_i`
+   for the sums but return `null`). `s` = the shorter column, `t` = the taller one, `D = T_t - T_s`. If `D <= 0`, done.
+5. **Grow clipped (s):** non-fixed cards in `s` with `natural_i > height_i`, in order: `g = min(D, natural_i - height_i)`;
+   `height_i += g`; `D -= g`.
+6. **Grow elastic (s):** `distribute(D, elastic non-fixed cards in s, cap = overhead_i + ceil(content_i * (1 + ELASTIC_MAX_GROWTH)))`.
+7. **Shrink taller (t):** `distribute(D, non-fixed cards in t with natural_i > height_i, room = height_i - max(floor, overhead_i + minBody_i))`,
+   applied as a **reduction** of `height_i` (only cards with positive room take part). Every pixel removed from `t`
+   lowers `D` by one pixel.
+8. **Spread (s):** if `D > 0`, `distribute(D, non-fixed cards in s, cap = ∞)` (equal shares; the remainder goes 1 px
+   each to the first cards). If `s` has no non-fixed card, leave it (legacy fallback only).
+9. Return `{ columns, heights }`. The function is deterministic: same input, equal plan.
+
+##### Step 2: `web/src/dashboard/masonryLayout.test.ts` (new, written first, TDD)
+
+Cases, each asserting exact numbers:
+- `ceilingFor(824) == 577`, `ceilingFor(714) == 560`, `ceilingFor(1080) == 756`;
+- stacked: `heights == wanted`, original order, no stretching;
+- a card over the ceiling is clipped to `ceiling`; a card under it keeps its natural height;
+- a chart (`minBody 250`) whose `overhead + 250` is above the ceiling gets `overhead + 250`;
+- the split matches the old greedy rule when nothing is clipped (Baseline numbers → `[0,2,5,7,9]` / `[1,3,4,6,8]`);
+- order of filling: clipped grow, then elastic up to 125%, then the taller column shrinks (not below the floor),
+  then the spread; each stage is tested in isolation with measures where only that stage applies;
+- caps: a clipped card never grows past `natural`; an elastic card never past its 125% cap; a shrunk card never
+  below `max(floor, overhead + minBody)`;
+- **flush bottoms**: `sum(heights in col) + gaps` is exactly equal for 5, 7, 9 and 10 cards with random measures
+  (seeded PRNG, 200 iterations, all non-fixed);
+- all fixed: the old behavior, `heights` all null;
+- `samePlan`: true for equal plans, false when one height differs by 1 px;
+- Baseline replays: 1680×824 (ceiling 577) → Owner 595, MoM 577, flush; 1284×714 (ceiling 560) → Owner 578, flush.
+
+##### Step 3: `web/src/dashboard/MasonryColumns.tsx`
+
+Builds on the uncommitted re-observe fix; keep its docstring's reasoning and update it to describe the new
+rules.
+
+- **Slot context** (exported):
+  ```ts
+  interface BodyRegistration {
+    outer: HTMLDivElement;          // the scroll container
+    stack: HTMLElement | null;      // the Stack whose children are measured; null for elastic bodies
+    minBody: number;
+    elasticHeight?: number;
+  }
+  interface SlotApi { register(r: BodyRegistration | null): void }
+  export const MasonrySlotContext = createContext<SlotApi | null>(null);
+  export function useInMasonrySlot(): boolean { return useContext(MasonrySlotContext) !== null; }
+  ```
+  `bodyRefs = useRef<(BodyRegistration | null)[]>([])`; `const [bodyVersion, setBodyVersion] = useState(0)`.
+  `slotApis = useMemo(() => Array.from({length: itemCount}, (_, i) => ({ register: (r) => { bodyRefs.current[i] = r; setBodyVersion(v => v + 1); } })), [itemCount])`.
+  Trim `bodyRefs.current.length = itemCount` next to the existing `itemRefs` trim.
+- **`ScrollBody` and `Stack`** (both exported from this file, so the contract lives with its consumer):
+  ```tsx
+  /** The card body: scrolls when allotted less than its content. Elastic = a chart that fills extra height. */
+  export function ScrollBody({ children, minBody = MIN_BODY_LIST, elasticHeight }:
+    { children: ReactNode; minBody?: number; elasticHeight?: number }) {
+    const slot = useContext(MasonrySlotContext);
+    const outer = useRef<HTMLDivElement>(null);
+    const [stack, setStack] = useState<HTMLElement | null>(null);   // set by the Stack below via StackRefContext
+    useLayoutEffect(() => {
+      if (!slot || !outer.current) return;
+      slot.register({ outer: outer.current, stack: elasticHeight === undefined ? stack : null, minBody, elasticHeight });
+      return () => slot.register(null);
+    }, [slot, stack, minBody, elasticHeight]);
+    if (!slot) return <>{children}</>;                       // outside the pool: renders exactly as today
+    return (
+      <div ref={outer} className="min-h-0 flex-1 overflow-y-auto">
+        {elasticHeight !== undefined
+          ? <div style={{ height: '100%', minHeight: elasticHeight }}>{children}</div>
+          : <div className="flex min-h-full flex-col"><StackRefContext.Provider value={setStack}>{children}</StackRefContext.Provider></div>}
+      </div>
+    );
+  }
+
+  /** The measured, evenly-spaced content of a non-elastic body. Children are the rows. */
+  export function Stack({ as: Tag = 'div', className = 'gap-1.5', children }:
+    { as?: 'div' | 'ul'; className?: string; children: ReactNode }) {
+    const setStack = useContext(StackRefContext);           // null outside a ScrollBody in a slot
+    if (!setStack) return <Tag className={`flex flex-col ${className}`}>{children}</Tag>;
+    return <Tag ref={setStack} className={`flex flex-1 flex-col justify-evenly ${className}`}>{children}</Tag>;
+  }
+  ```
+  - **Elastic:** the inner div fills the body when the card is stretched (`height: 100%`) and keeps the chart's
+    natural height when the body is smaller (`minHeight`), so the body scrolls instead of compressing the chart.
+  - **Stack:** `flex-1 justify-evenly` turns any extra height into equal slots above, between (on top of the `gap`)
+    and below the rows, and centers a single child. Outside a slot it's a plain flex column with the same gap, so
+    it looks the same as today's `space-y-*`.
+- **Measure** in `rebalance` (replaces the current height loop), per index `i`:
+  - `reg = bodyRefs.current[i]`, `wrapper = itemRefs.current[i]`;
+  - no `reg` → `{ fixed: true, overhead: ceil(wrapper rect height), content: 0, minBody: 0, elastic: false }`;
+  - `reg` with `elasticHeight` → `content = elasticHeight`;
+  - `reg` with a `stack` → `content = ceil(sum(child rect heights of stack) + rowGap(stack) * (childCount - 1))`.
+    Row heights don't change when the Stack is stretched, so the measure is stable whatever height was allotted;
+  - for both: `overhead = ceil(wrapper rect height - reg.outer.clientHeight)`, `minBody = reg.minBody`,
+    `elastic = reg.elasticHeight !== undefined`, `fixed = false`;
+  - `gap = parseFloat(getComputedStyle(rootRef.current).rowGap) || 0` (add `rootRef` on the outer div in both
+    render branches); `ceiling = ceilingFor(window.innerHeight)`;
+  - `next = planLayout(measures, { twoColumn: isTwo, ceiling, floor: CEILING_FLOOR, gap })`; commit only if
+    `!samePlan(planRef.current, next)`.
+- **State:** replace `columns` / `columnsRef` with `plan` / `planRef` (`LayoutPlan`); the initial plan is
+  `{ columns: [[0..n-1], []], heights: all null }`.
+- **Effects:**
+  - the measuring layout effect re-runs on `[rebalance, bodyVersion]`;
+  - the observer effect (deps `[plan, twoColumn, rebalance, bodyVersion]`): one `ResizeObserver` watching every
+    **direct child of each `stack`**, plus the wrapper of each card with no `reg`; one `MutationObserver`
+    (`childList: true`) on each `stack`, so rows added or removed by a refetch re-plan even when a stretched Stack
+    doesn't change size. Elastic bodies and sized wrappers are never observed, since that would feed back;
+  - the existing `matchMedia` effect plus a `window` `resize` listener (same `rebalance`) for the ceiling.
+- **Render:** each wrapper is `<MasonrySlotContext.Provider value={slotApis[i]}><div ref=… style={plan.heights[i] != null ? { height: plan.heights[i]! } : undefined}>…</div></Provider>`
+  in both branches. Nothing else in the markup changes (same classes, same keys).
+
+##### Step 4: `web/src/dashboard/MasonryColumns.test.tsx`
+
+Keep all 8 existing tests unchanged. Their plain-div children are `fixed`, which exercises the old behavior.
+Add the following, using a helper `scrollCard(id, {overhead, rows, rowHeight, elastic?})` that renders
+`<ScrollBody><Stack>…rows…</Stack></ScrollBody>` and mocks `getBoundingClientRect` / `clientHeight` by `data-*` keys:
+- the wrappers get the planned `style.height` (two-column and stacked);
+- the shorter column's heights sum (plus gaps) to the taller column's;
+- content is measured from the Stack's rows (it doesn't change when the wrapper height changes);
+- the ResizeObserver watches the Stack rows, not the wrappers; resizing a row re-plans; appending a row re-plans
+  (MutationObserver);
+- an elastic body's inner div has `height:100%` and `minHeight == elasticHeight`;
+- `ScrollBody` and `Stack` outside `MasonryColumns` render with no extra wrappers / no `justify-evenly`;
+- no render loop when `observe()` fires immediately (the existing `fireOnObserve` pattern);
+- changing `window.innerHeight` and firing `resize` re-clips a tall card.
+
+##### Step 5: `web/src/dashboard/OverviewTab.tsx`
+
+- `Card` (`:300`): add props `headerExtra?: ReactNode`, `minBody?: number`, `elasticHeight?: number`. Read
+  `inSlot = useInMasonrySlot()`. Render:
+  - `headerExtra` → `<div className="mt-4">{headerExtra}</div>`, right after the caption;
+  - content wrapper class `${headerExtra ? 'mt-2' : 'mt-4'} ${inSlot ? 'flex min-h-0 flex-1 flex-col' : ''} ${contentClassName ?? ''}`,
+    containing `<ScrollBody minBody={minBody} elasticHeight={elasticHeight}>{children}</ScrollBody>`.
+  Outside the pool (Needs a Look, Credit Utilization) the rendering is unchanged, since `ScrollBody` and `Stack`
+  pass through.
+- Pool card content: every non-chart body becomes **one `Stack`** whose children are the rows. Empty states (the
+  `<p>` branches) go inside the same `Stack` as its single child:
+  - **Biggest Expense This Month:** `<Stack>` around the existing row `div` (or the empty `<p>`).
+  - **Upcoming Recurring / Top Merchants / Committed:** `<ul className="space-y-1.5">` → `<Stack as="ul" className="gap-1.5">`,
+    `li` rows unchanged.
+  - **Emergency Fund:** `<Stack className="gap-2.5">` with the 3 children (drop `mt-3` / `mt-2`; 10 px replaces 12/8).
+  - **Asset Mix:** `<Card title="Asset Mix">` + `<Stack>` around the `ResponsiveContainer` (height stays `ASSET_MIX_HEIGHT`); not elastic.
+  - **Owner Balances:** `<Card title="Owner Balances" headerExtra={legend}>`; drop the legend's `mb-2`; the list
+    becomes `<Stack className="gap-4">` of `OwnerBalanceMiniList` (drop `grid max-h-[420px] grid-cols-1 overflow-y-auto`).
+  - **Income Sources:** `<Card title="Income Sources" caption="Trailing 12 Months">` + `<Stack className="gap-1.5">` of `LabeledBarRow`.
+- Chart cards (elastic, no `Stack`):
+  - **Top Expense Categories:** `const topCategoriesChartHeight = Math.max(250, ov.top_categories.length * 32)`;
+    `<Card title="Top Expense Categories" caption={strings.crossFilter.categoryHint} minBody={MIN_BODY_CHART} elasticHeight={topCategoriesChartHeight}>`;
+    `ResponsiveContainer height="100%"`.
+  - **Month-over-Month by Category:** new constants `MOM_ROW_HEIGHT = 48` and `MOM_CHART_CHROME = 32` (x-axis only);
+    remove the Recharts `<Legend>` and pass `headerExtra` = an HTML legend (same markup as the Owner Balances swatch
+    legend: `categoricalColor(1)` Last month, `categoricalColor(0)` This month, `categoricalColor(2)` Usual); `const monthOverMonthChartHeight = Math.max(250, monthOverMonthRows.length * MOM_ROW_HEIGHT + MOM_CHART_CHROME)`;
+    `BarChart` gets `barCategoryGap={6}` and `barGap={3}`; `minBody={MIN_BODY_CHART}`,
+    `elasticHeight={monthOverMonthChartHeight}`, `ResponsiveContainer height="100%"`. `maxBarSize` stays `BAR_MAX_SIZE` (24).
+- Rewrite the comment above `<MasonryColumns>` (`:760`) and the Owner Balances comment (`:1035`) to describe the
+  ceiling and stretch rules instead of the 420 px cap.
+- `OverviewTab.test.tsx`: the `heading.closest('div')` lookups still reach the card div (the title stays a
+  direct child). Update only the assertions that break, if any. Add tests: the Owner Balances list has no
+  `max-h-[420px]`; its legend renders outside the scroll body; the MoM `BarChart` receives `barCategoryGap 6` /
+  `barGap 3`, and its legend renders outside the scroll body.
+
+##### Step 6: verification (see below), then hand over the commit message (the user commits)
+
+Commits: 3 blocks — A planner + tests; B MasonryColumns/ScrollBody/Stack + tests; C OverviewTab conversions, chart spacing, this phase entry.
+
+#### Verification
+
+1. `masonryLayout.test.ts`: red before the implementation, green after; includes the 200-iteration flush property.
+2. `MasonryColumns.test.tsx`: the 8 existing tests and the new ones all pass.
+3. All four web checks green.
+4. Live in Claude in Chrome (signed in), at each Baseline size:
+   - JS: `abs(leftColumn.lastElementChild.bottom - rightColumn.lastElementChild.bottom) <= 1` at every two-column size;
+   - same column assignment as the Baseline table; card heights equal the "Expected result" numbers (±1 px);
+   - Owner Balances never shorter than 522 px; it scrolls only when its content passes the ceiling;
+   - Month-over-Month: drift labels no longer overlap; the chart scrolls inside the card; body ≥ 250 px;
+   - stretched list cards show equal spacing above, between and below rows (zoom on one at 1680×824);
+   - stacked sizes: same order, no stretching, long cards capped at the ceiling;
+   - screenshots side by side with the "before" set: same arrangement, only the bottoms aligned and small height changes.
+5. Close the Claude tab-group tab when done.
