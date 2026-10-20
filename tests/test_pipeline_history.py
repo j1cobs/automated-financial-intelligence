@@ -20,7 +20,7 @@ import unittest
 import pandas as pd
 
 from analytics.recurring import derive_streams
-from app.dashboard import load_financial_data
+from database.frames import load_financial_data
 from pipeline.runner import _load_enriched_history
 from tests.pg_support import PostgresBackedTestCase
 

@@ -26,6 +26,7 @@ from api.viewmodels import (  # noqa: E402
     SYNC_STALE_DAYS,
     _build_last_period_metric,
     _build_metric,
+    _label_subtype,
     _weekly_series,
     build_budget,
     build_cash_flow,
@@ -1501,6 +1502,20 @@ class NetLinkedTransactionsIntegrationTests(unittest.TestCase):
         shopping_item = next((item for item in result["items"] if item["category"] == "Shopping"), None)
         self.assertIsNotNone(shopping_item)
         self.assertAlmostEqual(shopping_item["spent"], 1000.0)
+
+
+class LabelSubtypeTests(unittest.TestCase):
+    def test_known_subtype_en(self) -> None:
+        self.assertEqual(_label_subtype("tfsa", "en"), "TFSA")
+
+    def test_known_subtype_fr(self) -> None:
+        self.assertEqual(_label_subtype("checking", "fr"), "Compte-chèques")
+
+    def test_unknown_subtype_titlecased(self) -> None:
+        self.assertEqual(_label_subtype("brokerage", "en"), "Brokerage")
+
+    def test_none_subtype(self) -> None:
+        self.assertEqual(_label_subtype(None, "en"), "Other")
 
 
 if __name__ == "__main__":

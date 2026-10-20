@@ -4,7 +4,7 @@ Ports the section renderers in `app/dashboard.py` (`_section_net_worth`,
 `_section_overview`, `_section_cash_flow`, `_section_budget`, `_section_anomalies`,
 `_section_ledger`) from Streamlit widget calls to plain dict/list return values.
 Reuses (does not reimplement) the pure functions those renderers call — see the
-`from app.dashboard import ...` below — so the underlying business logic (net worth,
+`analytics.enrichment` imports below — so the underlying business logic (net worth,
 cash-flow, tx-type classification, credit-limit resolution) stays covered by the
 tests already in `tests/test_dashboard_classify.py` / `tests/test_dashboard_helpers.py`.
 
@@ -39,6 +39,7 @@ import pandas as pd
 
 from analytics.budget_periods import resolve_caps_detailed
 from analytics.categorizer import merchant_key
+from analytics.enrichment import effective_credit_limit, enrich_transactions
 from analytics.goals import (
     contested_amounts,
 )
@@ -52,11 +53,34 @@ from analytics.goals import (
     projection as goal_projection,
 )
 from analytics.recurring import upcoming_from_streams
-from app.dashboard import (
-    _effective_credit_limit,
-    _enrich_transactions,
-    _label_subtype,
-)
+
+_SUBTYPE_LABELS: dict[str, dict[str, str]] = {
+    "en": {
+        "rrsp": "RRSP",
+        "tfsa": "TFSA",
+        "fhsa": "FHSA",
+        "checking": "Chequing",
+        "savings": "Savings",
+        "credit card": "Credit card",
+        "paypal": "PayPal",
+    },
+    "fr": {
+        "rrsp": "REER",
+        "tfsa": "CELI",
+        "fhsa": "CELIAPP",
+        "checking": "Compte-chèques",
+        "savings": "Épargne",
+        "credit card": "Carte de crédit",
+        "paypal": "PayPal",
+    },
+}
+
+
+def _label_subtype(subtype: str | None, lang: str) -> str:
+    if not subtype:
+        return "Other"
+    return _SUBTYPE_LABELS.get(lang, _SUBTYPE_LABELS["en"]).get(subtype.lower(), subtype.title())
+
 
 _IDENTITY_COLS = ["official_name", "account_subtype", "account_type", "mask"]
 
@@ -252,7 +276,7 @@ def prepare_transactions(tx_df: pd.DataFrame) -> pd.DataFrame:
         return tx_df
     tx = tx_df.copy()
     tx["date"] = pd.to_datetime(tx["date"])
-    enriched = _enrich_transactions(tx)
+    enriched = enrich_transactions(tx)
     return _apply_category_driven_tx_type(enriched)
 
 
@@ -531,7 +555,7 @@ def build_net_worth(
     credit_utilization = []
     for _, row in credit_df.iterrows():
         current = float(row["balance_current"])
-        limit, is_manual = _effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
+        limit, is_manual = effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
         credit_utilization.append(
             {
                 "account_key": row["account_key"],
@@ -976,7 +1000,7 @@ def build_overview(
         total_credit_limit = 0.0
         if not acct_df.empty and "account_type" in acct_df.columns:
             for _, row in acct_df[acct_df["account_type"] == "credit"].iterrows():
-                limit, _ = _effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
+                limit, _ = effective_credit_limit(row["balance_limit"], row["manual_credit_limit"])
                 if limit:
                     total_credit_limit += float(limit)
 

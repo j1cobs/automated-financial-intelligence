@@ -9,11 +9,12 @@ import pandas as pd
 import psycopg
 
 from analytics.anomalies import detect_anomalies, suppress_dismissed
+from analytics.enrichment import enrich_transactions
 from analytics.models import build_models
 from analytics.recurring import derive_streams
-from app.dashboard import _enrich_transactions, load_financial_data
 from core.config import ConfigError, load_settings
 from database.db import DatabaseClient
+from database.frames import load_financial_data
 from ingestion.plaid_ingestor import PlaidIngestor
 
 LOGGER = logging.getLogger(__name__)
@@ -60,26 +61,26 @@ def _load_enriched_history(database: DatabaseClient) -> pd.DataFrame:
     baseline, so both are structurally incapable of working on a delta: they
     would return nothing every day forever while their unit tests passed.
 
-    Reuses the frozen `load_financial_data` + `_enrich_transactions` rather
+    Reuses the frozen `load_financial_data` + `enrich_transactions` rather
     than re-deriving `month`/`tx_type`/`adjusted_amount` here. That also
     supplies `transaction_hash`, which `PlaidIngestor._normalize` does not
     produce (the hash is computed inside `upsert_transactions`) and which the
     `is_outlier` shim needs to flag anything at all.
 
-    Precondition this helper must satisfy for `_enrich_transactions`: `date` is
+    Precondition this helper must satisfy for `enrich_transactions`: `date` is
     converted to datetime64 first. `load_financial_data` hands it back as object
-    dtype (datetime.date), which `_enrich_transactions` cannot handle.
+    dtype (datetime.date), which `enrich_transactions` cannot handle.
     """
     tx_df, _acct_df = load_financial_data(database.database_url)
     if tx_df is None or tx_df.empty:
         return pd.DataFrame()
-    # `_enrich_transactions` calls `.dt` immediately, so `date` must already be
+    # `enrich_transactions` calls `.dt` immediately, so `date` must already be
     # datetime64. psycopg returns datetime.date for a DATE column, so it arrives
     # as object dtype. Both other callers convert here too
     # (app/dashboard.py:1358, api/viewmodels.py:247); the frozen helper cannot be
     # made defensive itself.
     tx_df["date"] = pd.to_datetime(tx_df["date"])
-    enriched = _enrich_transactions(tx_df)
+    enriched = enrich_transactions(tx_df)
     # Duplicate-flagged rows are excluded from analytics everywhere else; an
     # anomaly built on a known double-post would be an artefact.
     return enriched[~enriched["is_duplicate"].fillna(False).astype(bool)]

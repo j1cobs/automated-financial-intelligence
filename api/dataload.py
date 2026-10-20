@@ -30,8 +30,8 @@ import time
 
 import pandas as pd
 
-from app.dashboard import load_financial_data
 from database.db import DatabaseClient
+from database.frames import load_financial_data
 
 from .viewmodels import prepare_transactions
 
