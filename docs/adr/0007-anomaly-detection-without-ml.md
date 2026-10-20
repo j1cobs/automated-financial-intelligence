@@ -4,6 +4,8 @@
 
 Accepted (2026-09-24). Supersedes the outlier half of PLAN.md Phase 7 ("DEFERRED: ML activation"); the classifier half was already superseded by ADR 0004. Implemented as PLAN.md Phase 34.
 
+Amended by ADR 0013 (2026-10-20): the Streamlit dashboard is gone, but `is_outlier` stays. The React outliers-only filter (`api/filters.py`) and the flagged counts in `api/viewmodels.py` read it, so it is no longer a shim; it is the flag on the rows behind a live anomaly. The "compatibility shim" consequence below, and its `app/dashboard.py` line references, are historical.
+
 ## Context
 
 `analytics/outlier_detector.py` was written in Phase 1 and never wired up. It grouped transactions by category and applied a z-score under 8 rows per group, an `IsolationForest(contamination=0.03, n_estimators=200)` above. `analytics/models.py::build_models()` returned `PlaceholderOutlierDetector` in both modes, so `pipeline/runner.py` stamped `outlier_score = 0.0` and `is_outlier = FALSE` on every row on every run. The columns, the index, the `/anomalies` endpoint and a Transactions-tab scatter chart were all built and working — against data that was uniformly zero.

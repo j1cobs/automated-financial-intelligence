@@ -4,6 +4,8 @@
 
 Accepted (2026-09-24). Implemented as PLAN.md Phase 28.
 
+Amended by ADR 0013 (2026-10-20): the Streamlit dashboard is gone, so `budgets` is no longer Streamlit-owned. It is a legacy table nothing reads or writes, kept only because migration 026's seed reads it on every boot. The "Streamlit-owned" consequence below, and the two dashboards' independent budget numbers, are historical.
+
 ## Context
 
 The user asked for the Budget tab to become the dashboard's primary instrument — something anyone wanting control of their finances could use to set, track, visualise and plan a budget. It could not become that, for a structural reason rather than a UI one.

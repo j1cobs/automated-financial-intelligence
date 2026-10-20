@@ -35,7 +35,7 @@ def mint_session_jwt(
 ) -> str:
     """Mint a signed JWT carrying the identity plus a fresh CSRF token claim.
 
-    Expiry is `SESSION_TIMEOUT_SECONDS` (shared with `app/`, currently 1h), set as the
+    Expiry is `SESSION_TIMEOUT_SECONDS` (from `core/auth_session.py`, currently 1h), set as the
     standard `exp` claim so `jwt.decode` enforces it server-side automatically — the 1h
     session limit is real, not just a client-side convention, since there is no server-side
     session table to revoke against.

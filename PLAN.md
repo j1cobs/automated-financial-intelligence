@@ -21,9 +21,10 @@
 2026-10-20: migrations 026-029, the budget/recurring/forecast/goals/anomalies modules with their tests,
 `refresh_balances`, ADRs 0005-0008) and 36. Phase 7 is superseded by ADR 0007, and Appendix A is superseded
 item by item (see "Ideas backlog").
-**Implemented, verification open:** Phase 15 (live end-to-end pass, O4).
-**Designed, not started:** Phase 55 (decommission Streamlit; lands first), then Phases 37-54 (Budget tab
-toolkit and generic Plans). Phase 56 (security hardening) is split across the order below by deploy cost.
+**Implemented, verification open:** Phase 15 (live end-to-end pass, O4) and Phase 55 (decommission Streamlit;
+owner checks 5-6 and 55d after deploy).
+**Designed, not started:** Phases 37-54 (Budget tab toolkit and generic Plans). Phase 56 (security hardening)
+is split across the order below by deploy cost.
 
 ### Recommended order of work
 
@@ -203,7 +204,20 @@ transactions → Phase 48; A10 recurring tagging → Phases 30-31.
 
 ## Phase 55 — Decommission Streamlit
 
-> **Status:** in progress (session S1, started 2026-10-20). The user decided on 2026-10-20: "we can decommission it". **Lands before
+> **Status (2026-10-20):** implemented in session S1 as three commits on `dev` (55a relocate, 55b delete,
+> 55c docs + ADR 0013). Verification 1-3 done; 4 is left to CI's `migrations` job; 5, 6 and 55d are owner
+> checks after deploy. Deviations from the text below:
+> - Suite: 617 tests before and after 55a; **598** after 55b. That is 617 − 10 (`test_app_auth`) − 7
+>   (`MobileStylesheetTests`, `StyleChartTests`) − 2 (legacy-budgets DB tests) + 1 (env-over-`.env` config
+>   test) − 1 (`test_api_data`'s "never reads the legacy table" test, which asserted nothing once the methods
+>   were gone).
+> - `app/dashboard.py` imported the moved helpers back at checkpoint A, so Streamlit still ran until 55b.
+> - The lock was regenerated on Python 3.13 without `--upgrade`: 27 packages dropped, no pin changed.
+> - Verification 2's Streamlit grep also excludes `database/migrations/`: migrations 016 and 026 mention
+>   Streamlit in comments that record why they were written, and they are left as history, like the ADRs.
+> - ADRs 0010 and 0012 never named the moved helpers, so only 0005 and 0007 got amendment notes.
+>
+> The user decided on 2026-10-20: "we can decommission it". **Lands before
 > Phase 37**, so Phases 37-54 build on code with no frozen module in the way. After this phase the React
 > dashboard is the only one: `web/` is deployed on Vercel, and `web/vercel.json` rewrites `/api/*` to the
 > FastAPI service on Render.
@@ -345,7 +359,8 @@ in this phase's status note until done.
 
 1. After 55a: `python -m unittest discover -s tests -v` is green with the **same test count** as before.
 2. After 55b: `git grep -n "from app\."` returns nothing. `git grep -n -i streamlit -- ':!docs/plan-archive.md'
-   ':!docs/research/' ':!docs/adr/' ':!PLAN.md'` returns nothing.
+   ':!docs/research/' ':!docs/adr/' ':!PLAN.md' ':!database/migrations/'` returns only the deliberate
+   pointers to ADR 0013 in `CLAUDE.md` and `README.md` (after 55c, for the docs).
 3. In a fresh venv, `pip install -r requirements.txt` installs neither `streamlit` nor `plotly`, and
    `pip install --require-hashes -r requirements.lock` succeeds.
 4. `tests/test_migrations_execute.py` against `MIGRATION_TEST_DATABASE_URL` shows `ensure_schema()` still runs

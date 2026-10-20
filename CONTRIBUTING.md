@@ -28,7 +28,6 @@ Commit both files together.
 ```bash
 python -m unittest discover -s tests -v      # tests
 python main.py                                # pipeline (needs Plaid + DB credentials)
-streamlit run streamlit_app.py                 # Streamlit dashboard (needs DB + Google OAuth credentials)
 python scripts/seed_sample_data.py             # demo data, no credentials needed beyond DATABASE_URL
 uvicorn api.main:app --reload                  # API for the React dashboard
 cd web && npm run dev                          # React dashboard (needs the API running)
@@ -53,13 +52,13 @@ soft-launch period.
 
 ## Conventions
 
-- **No personal data in the repo.** No hardcoded accounts, emails, tokens, or file paths. Every credential and tunable goes through `core/config.py::load_settings()`, sourced from environment variables, `.env`, or `.streamlit/secrets.toml`. New config belongs in `Settings` and `.env.example`, not inline.
-- **Layer boundaries are strict.** `ingestion/`, `database/`, `analytics/`, `app/`, `core/`, and `pipeline/` each own one responsibility. A change in one shouldn't need to reach into another. If it does, that's usually a sign the change belongs somewhere else.
-- **Run everything from the repo root.** `database/db.py` reads the migration files with a path relative to the working directory, and config loading does the same for `.env` / `.streamlit/secrets.toml`.
+- **No personal data in the repo.** No hardcoded accounts, emails, tokens, or file paths. Every credential and tunable goes through `core/config.py::load_settings()`, sourced from environment variables or `.env`. New config belongs in `Settings` and `.env.example`, not inline.
+- **Layer boundaries are strict.** `ingestion/`, `database/`, `analytics/`, `api/`, `core/`, and `pipeline/` each own one responsibility. A change in one shouldn't need to reach into another. If it does, that's usually a sign the change belongs somewhere else.
+- **Run everything from the repo root.** `database/db.py` reads the migration files with a path relative to the working directory, and config loading does the same for `.env`.
 
 ## Known issue
 
-`pd.read_sql` in `app/dashboard.py` is called on a raw `psycopg` connection, which pandas warns is only tested with SQLAlchemy connections. It works fine in practice; the warning is cosmetic and not on the priority list to silence right now.
+`pd.read_sql` in `database/frames.py` is called on a raw `psycopg` connection, which pandas warns is only tested with SQLAlchemy connections. It works fine in practice; the warning is cosmetic and not on the priority list to silence right now.
 
 ## Before opening a PR
 

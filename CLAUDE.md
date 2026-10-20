@@ -16,8 +16,9 @@ the full feature set described in the original design brief. What this means con
 - **Recurring charges are detected as streams** (`recurring_streams`, Phase 30), not inferred from the per-row
   `is_recurring` flag, which is now a user override that always wins. Streams currently come from local derivation;
   `scripts/probe_plaid_recurring.py` decides whether Plaid's add-on can take over and **has not been run yet**.
-- The dashboard implements all core views. Budget is the primary surface: per-month caps with carry-forward (Phase 28),
-  a forward cash-flow forecast (Phase 32) and savings goals (Phase 33) all live there.
+- The React dashboard (`web/` + `api/`) is the only dashboard; the Streamlit one was removed (see
+  `docs/adr/0013-decommission-streamlit.md`). It implements all core views. Budget is the primary surface:
+  per-month caps with carry-forward (Phase 28), a forward cash-flow forecast (Phase 32) and savings goals (Phase 33) all live there.
 - Scheduled automation is not active yet — the GitHub Actions workflow is defined but does not run automatically (see
   Automation).
 
@@ -29,9 +30,9 @@ in `docs/plan-archive.md` under the same numbers. Read the archive only for one 
 ## Conventions
 
 - **Decoupled from any specific user.** Never hardcode personal accounts, emails, tokens, or file paths. Every
-  credential and tunable is read through `core/config.py` from env / `.env` / `.streamlit/secrets.toml` so any user can
+  credential and tunable is read through `core/config.py` from env / `.env` so any user can
   deploy with their own secrets. New config belongs in `Settings`/`load_settings()` and `.env.example`, not inline.
-- **Lean, modular, single-responsibility.** Keep the layer boundaries strict (ingestion / database / analytics / app /
+- **Lean, modular, single-responsibility.** Keep the layer boundaries strict (ingestion / database / analytics / api /
   core / pipeline) — a change in one layer should not reach into another. Match the existing concise style.
 - **Ask, don't guess.** When a requirement or design decision is genuinely ambiguous, ask the user rather than making
   an uncertain assumption.
@@ -44,10 +45,10 @@ in `docs/plan-archive.md` under the same numbers. Read the archive only for one 
 
 - Install deps: `pip install -r requirements.txt` (requirements.txt is authoritative; pyproject.toml is minimal/incomplete)
 - Run pipeline: `python main.py`
-- Run the Streamlit dashboard (frozen reference implementation): `streamlit run streamlit_app.py`
 - Run the API for the React dashboard: `uvicorn api.main:app --reload` (defaults to port 8000)
-- Run the React dashboard: `cd web && npm run dev`. It needs the API running; point it at a
-  non-default API with `VITE_API_URL`.
+- Run the React dashboard: `cd web && npm run dev`. It needs the API running on port 8000: the browser only
+  talks to `/api`, which Vite proxies to `http://localhost:8000` (`web/vite.config.ts`) and Vercel rewrites to
+  the deployed API (`web/vercel.json`).
 - Web checks (all four must pass): `cd web && npm run test && npx tsc -b && npm run lint && npm run format:check`
 - Run all tests: `python -m unittest discover -s tests -v`
 - Run a single test: `python -m unittest tests.test_db_hash -v` (or `tests.test_db_hash.TestClass.test_method`)
@@ -60,7 +61,7 @@ in `docs/plan-archive.md` under the same numbers. Read the archive only for one 
   `python scripts/purge_sample_data.py` (dry run; add `--apply` to delete)
 
 Run all commands from the repo root: `database/db.py` globs the migrations via the relative path
-`database/migrations/`, and config loads `.env` / `.streamlit/secrets.toml` relative to the CWD.
+`database/migrations/`, and config loads `.env` relative to the CWD.
 
 ## Architecture
 
@@ -93,10 +94,11 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   (default, production) and `"placeholder"` (for tests/backward-compat); its `.outlier_detector` is a placeholder in
   **both** modes and permanently so, surviving only to zero the legacy `outlier_score`/`is_outlier` columns each run.
   `anomalies.py` (Phase 34), `recurring.py` (Phase 30), `budget_periods.py` (Phase 28), `goals.py` (Phase 33) and
-  `forecast.py` (Phase 32) are all pure and DB-free, so their rules are unit-testable without a database. When changing
-  the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and `pipeline/runner.py`'s classification block.
+  `forecast.py` (Phase 32) are all pure and DB-free, and so is `enrichment.py` (tx-type classification, internal-transfer
+  pairing, credit-limit helpers; `api/viewmodels.py` builds on it), so their rules are unit-testable without a database.
+  When changing the categorization strategy, check `core/config.py::CATEGORIZER_MODE` and `pipeline/runner.py`'s classification block.
 - `database/` — **The transactions date column is `transaction_date`.** `date` is only ever an *alias*,
-  introduced by `load_financial_data` (`app/dashboard.py:330`, `t.transaction_date AS date`) and carried by
+  introduced by `database/frames.py::load_financial_data` (`t.transaction_date AS date`, line 12) and carried by
   every DataFrame built from it — so `date`, `month` and `adjusted_amount` are analytics vocabulary and must
   never appear in SQL against the table. Migration 026 shipped with `MIN(t.date)` and took down every entry
   point that calls `ensure_schema()`. Because the repo mocks psycopg everywhere else, SQL is only ever
@@ -123,10 +125,11 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
   the table and re-fires the seed), `recurring_streams`, `savings_goals`/`savings_goal_accounts`, and
   `anomalies`/`anomaly_feedback`. `schema_seeds` records one-time **data** seeds; it is not a migration-version
   table, and the DDL still re-runs every call.
-  **`budgets` (migration 002) is now Streamlit-owned and must not be written by the new path.** `app/dashboard.py` both
-  reads it (`:1116`) and *writes* it (`:1186`), so mirroring resolved caps into it would silently discard budgets saved
-  from Streamlit. `transactions.is_outlier` is likewise kept written only as a compatibility shim for that frozen
-  dashboard — see `set_outlier_flags`.
+  **`budgets` (migration 002) is a legacy, inert table:** nothing reads or writes it, and it stays only because
+  migration 026's guarded seed does `... FROM budgets` and `ensure_schema()` re-runs every migration on every call, so
+  dropping it would break every entry point. `transactions.is_outlier` is still live: the pipeline flags the
+  transactions behind active anomalies via `set_outlier_flags`, and the outliers-only filter (`api/filters.py`) and the
+  flagged counts in `api/viewmodels.py` read it.
   Transaction identity, and the duplicate handling built on it, is the subtlest part of this layer:
   - `build_transaction_hash` hashes Plaid's `transaction_id` when the row has one, and falls back to
     `account_key|date|description|amount` only for rows without one (seed data, future non-Plaid sources). Upserts are
@@ -164,19 +167,10 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
     explicitly states are gone.
 - `core/` — shared, UI-agnostic helpers: `config.py` (`load_settings()`, `ConfigError`), `auth_session.py`,
   `google_oauth.py`.
-- `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
-  sign-out) and `dashboard.py` (DB reads + Plotly rendering). The transactions table is where the user sets
-  `is_duplicate`; a "Possible duplicates only" sidebar filter surfaces the candidates.
-  **Frozen as of Phase 15** (`docs/plan-archive.md`) — it stays as a reference implementation and fallback, but new
-  dashboard work goes into `web/`. Do not add features here; do not refactor it. Its *pure* helpers
-  (`_enrich_transactions`, `_classify_tx_type`, `_effective_credit_limit`, `_label_subtype`) are
-  deliberately still imported by `api/viewmodels.py` — the freeze forbids editing this module, not
-  reusing it.
 - `api/` — FastAPI backend for the React dashboard. `routers/auth.py` (Google OAuth + JWT session
-  cookie + CSRF) and `routers/data.py` (read endpoints returning pre-shaped view models, plus the 5
-  write paths). `viewmodels.py` builds those view models by reusing `app/dashboard.py`'s pure
-  functions rather than reimplementing them, so the business logic stays covered by the existing
-  dashboard tests. Two conventions matter here:
+  cookie + CSRF) and `routers/data.py` (read endpoints returning pre-shaped view models, plus the
+  write endpoints, each behind `RequireCsrfDep`). `viewmodels.py` builds those view models on the pure functions in
+  `analytics/enrichment.py` rather than reimplementing them. Conventions that matter here:
   - **Every ratio the API returns is a fraction**, not percentage points — a 60% savings rate is
     `0.6`. `pct` fields were already fractions while `savings_rate` was percentage points, and the
     frontend applied one formatter to both, so one was always wrong. Never reintroduce a `* 100`;
@@ -191,8 +185,8 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
     `dataload.invalidate(db.database_url)`**; without it an edit returns 204, the frontend refetches,
     and the API serves the pre-edit rows back for up to a minute, so the edit looks like it silently
     failed. `tests/test_api_dataload.py` enforces both rules.
-  - `filters.py` is a hand-written **port** of `app/dashboard.py::_build_sidebar_filters`, not a shared
-    module — the freeze forbids extracting it. It carries three load-bearing invariants (two frames,
+  - `filters.py` is the source of truth for dashboard filtering (it began as a port of the old Streamlit
+    sidebar filters). It carries three load-bearing invariants (two frames,
     enrich-before-filter, whole-month periods) documented in its docstring and pinned by
     `tests/test_api_filters.py`. Read that docstring before touching it.
 - `web/` — React + TypeScript dashboard (Vite, Tailwind v4, TanStack Query, Recharts). `lib/api.ts`
@@ -215,8 +209,8 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 
 ## Configuration
 
-`core/config.py::load_settings()` reads each key from, in precedence order: environment → `.streamlit/secrets.toml`
-→ default. `DATABASE_URL` is the only value `load_settings()` requires — it raises `ConfigError` if missing.
+`core/config.py::load_settings()` reads each key from, in precedence order: environment → `.env` → default
+(`.env` is loaded with `override=False`, so a real env var always wins). `DATABASE_URL` is the only value `load_settings()` requires — it raises `ConfigError` if missing.
 Plaid vars (`PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ACCESS_TOKENS`) are read optionally at config-load time and
 only enforced by `pipeline/runner.py::_build_ingestor` when the pipeline actually runs — this keeps the dashboard
 and `scripts/seed_sample_data.py` usable with no Plaid credentials at all. See `.env.example` and the README for
