@@ -12,7 +12,7 @@ the full feature set described in the original design brief. What this means con
 - **Anomaly detection is live, and is deliberately not ML.** `analytics/anomalies.py` (Phase 34) runs two explainable
   rules — category drift scored by MAD, and recurring price creep — plus a period-scoped feedback memory
   (`anomaly_feedback`). `analytics/outlier_detector.py` (Isolation Forest) was **deleted**, not activated; see
-  `docs/adr/0007-anomaly-detection-without-ml.md`. Do not revive it. Phase 7 in PLAN.md is superseded in both halves.
+  `docs/adr/0007-anomaly-detection-without-ml.md`. Do not revive it. Phase 7 (now in `docs/plan-archive.md`) is superseded in both halves.
 - **Recurring charges are detected as streams** (`recurring_streams`, Phase 30), not inferred from the per-row
   `is_recurring` flag, which is now a user override that always wins. Streams currently come from local derivation;
   `scripts/probe_plaid_recurring.py` decides whether Plaid's add-on can take over and **has not been run yet**.
@@ -22,6 +22,9 @@ the full feature set described in the original design brief. What this means con
   Automation).
 
 When extending, prefer wiring the existing real modules onto the live path over adding new parallel ones.
+
+`PLAN.md` holds **open work only** (ranked in its "Where things stand"); finished Phases 0-36 live verbatim
+in `docs/plan-archive.md` under the same numbers. Read the archive only for one phase's history or rationale.
 
 ## Conventions
 
@@ -164,7 +167,7 @@ ingest → classify/score → persist. `main.py` is a thin entry point that call
 - `app/` — Streamlit only. `streamlit_app.py` wires together `auth.py` (Google OAuth sign-in, 4-hour session expiry,
   sign-out) and `dashboard.py` (DB reads + Plotly rendering). The transactions table is where the user sets
   `is_duplicate`; a "Possible duplicates only" sidebar filter surfaces the candidates.
-  **Frozen as of PLAN.md Phase 15** — it stays as a reference implementation and fallback, but new
+  **Frozen as of Phase 15** (`docs/plan-archive.md`) — it stays as a reference implementation and fallback, but new
   dashboard work goes into `web/`. Do not add features here; do not refactor it. Its *pure* helpers
   (`_enrich_transactions`, `_classify_tx_type`, `_effective_credit_limit`, `_label_subtype`) are
   deliberately still imported by `api/viewmodels.py` — the freeze forbids editing this module, not
