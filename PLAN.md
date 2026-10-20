@@ -27,26 +27,57 @@ toolkit and generic Plans). Phase 56 (security hardening) is split across the or
 
 ### Recommended order of work
 
-Ranked by what unblocks the most, not by phase number.
+Ranked by what unblocks the most, not by phase number. **Session** is the implementation chunk: one Claude
+Code session, run under "Delegation rules" below, stopping uncommitted at each of its checkpoints. "Owner"
+rows are the user's own actions between sessions and are never delegated.
 
-| # | Work | Why here | Effort |
-|---|---|---|---|
-| 1 | **O1 — README screenshots** | The public README embeds four images that were never committed, so it renders broken. | ~30 min |
-| 2 | **O2 — Confirm scheduled automation is actually running** | Gates Phase 53 (digest), O5 (fallback removal), and the balance-basis goal pace (ADR 0008 needs 12 weeks of snapshots). Its status has flipped before without the docs noticing. | ~15 min |
-| 3 | **Phase 55 — Decommission Streamlit** | Removes the frozen module that Phases 37-54 would otherwise work around (the loader, the filters port, `budgets` ownership), plus two runtime dependencies. Relocate first, then delete. | M |
-| 4 | **Phase 56, part 1** — Items 1, 3, 4, 7, 17, 18 | Repo-only hardening with no deploy coordination. Since Phase 35 the public API holds the Plaid secret and every access token, so this should not wait behind the budget work. | S-M |
-| 5 | **Phase 37** — Budget quick wins | First of the foundations; small and visible (totals, over-by, pending, currency, notes, exclusions). | S-M |
-| 6 | **Phases 38-39** — line classes, ratios, subcategories | Plans and ratios depend on line classes; Subcategory caps are the most-requested monthly feature. | M each |
-| 7 | **O3 — Run `scripts/probe_plaid_recurring.py`** | Decides whether Plaid's add-on supplies recurring streams, including the *inflow* streams Phase 40 uses as Regular income. Run it before Phase 40. | ~15 min |
-| 8 | **Phases 40-42** — household and income, tags, sinking funds | The rest of the foundations Plans depend on. | M each |
-| 9 | **O4 — Phase 15 live verification pass** | Needs a signed-in owner session. Best done before Phase 45 changes the Budget tab's layout. | ~30 min |
-| 10 | **Phase 56, part 2** — Items 5, 6, 8-15 | One coordinated API + web deploy (cookie rename, headers) plus the owner's GitHub Environment setup. | M |
-| 11 | **Phases 43-46** — projection engine and Plans | The core of the spreadsheet replacement. | M-L each |
-| 12 | **Phases 47-52, 54** — breadth | Settlement, splits and manual accounts, cap extensions, review surfaces, debts, XLSX, setup wizard. | M each |
-| 13 | **Phase 56, part 3** — Item 2 (least-privilege DB roles) | Re-points every deploy's `DATABASE_URL`, and its grants must cover every table, so it waits until Phases 37-54 stop adding tables. | M |
-| 14 | **O5 — Remove the `/transactions/get` fallback** | Only after O2 shows sync running clean in production for about 2 weeks. | S |
-| 15 | **Phase 53** — email digest | Blocked on O2. | M |
-| 16 | **O6, O7, Phase 56 Item 16** — leftover verification, cleanups, personal-data scrub | Low risk, no user-visible change. Item 16 becomes a blocker if the repo is made public. | S |
+| # | Work | Why here | Effort | Session |
+|---|---|---|---|---|
+| 1 | **O1 — README screenshots** | The public README embeds four images that were never committed, so it renders broken. | ~30 min | Owner (with S1's 55c README pass) |
+| 2 | **O2 — Confirm scheduled automation is actually running** | Gates Phase 53 (digest), O5 (fallback removal), and the balance-basis goal pace (ADR 0008 needs 12 weeks of snapshots). Its status has flipped before without the docs noticing. | ~15 min | Owner |
+| 3 | **Phase 55 — Decommission Streamlit** | Removes the frozen module that Phases 37-54 would otherwise work around (the loader, the filters port, `budgets` ownership), plus two runtime dependencies. Relocate first, then delete. | M | S1 (checkpoints A, B, C) |
+| 4 | **Phase 56, part 1** — Items 1, 3, 4, 7, 17, 18 | Repo-only hardening with no deploy coordination. Since Phase 35 the public API holds the Plaid secret and every access token, so this should not wait behind the budget work. | S-M | S2 |
+| 5 | **Phase 37** — Budget quick wins | First of the foundations; small and visible (totals, over-by, pending, currency, notes, exclusions). | S-M | S3 |
+| 6 | **Phases 38-39** — line classes, ratios, subcategories | Plans and ratios depend on line classes; Subcategory caps are the most-requested monthly feature. | M each | S4 (38), S5 (39) |
+| 7 | **O3 — Run `scripts/probe_plaid_recurring.py`** | Decides whether Plaid's add-on supplies recurring streams, including the *inflow* streams Phase 40 uses as Regular income. Run it before Phase 40. | ~15 min | Owner, before S6 |
+| 8 | **Phases 40-42** — household and income, tags, sinking funds | The rest of the foundations Plans depend on. | M each | S6 (40), S7 (41), S8 (42) |
+| 9 | **O4 — Phase 15 live verification pass** | Needs a signed-in owner session. Best done before Phase 45 changes the Budget tab's layout. | ~30 min | Owner, before S12 |
+| 10 | **Phase 56, part 2** — Items 5, 6, 8-15 | One coordinated API + web deploy (cookie rename, headers) plus the owner's GitHub Environment setup. | M | S9 |
+| 11 | **Phases 43-46** — projection engine and Plans | The core of the spreadsheet replacement. | M-L each | S10 (43), S11 (44), S12 (45), S13 (46) |
+| 12 | **Phases 47-52, 54** — breadth | Settlement, splits and manual accounts, cap extensions, review surfaces, debts, XLSX, setup wizard. | M each | S14 (47), S15 (48), S16 (49), S17 (50), S18 (51 + 54), S19 (52) |
+| 13 | **Phase 56, part 3** — Item 2 (least-privilege DB roles) | Re-points every deploy's `DATABASE_URL`, and its grants must cover every table, so it waits until Phases 37-54 stop adding tables. | M | S20 |
+| 14 | **O5 — Remove the `/transactions/get` fallback** | Only after O2 shows sync running clean in production for about 2 weeks. | S | S21 (with S22 if both are unblocked) |
+| 15 | **Phase 53** — email digest | Blocked on O2. | M | S22 |
+| 16 | **O6, O7, Phase 56 Item 16** — leftover verification, cleanups, personal-data scrub | Low risk, no user-visible change. Item 16 becomes a blocker if the repo is made public. | S | S23 |
+
+### Delegation rules (every session)
+
+Decided 2026-10-20. Generalizes Phase 56's "Delegation" token rules to the whole plan; Phase 56 keeps its own
+table. Goal: spend tokens where judgment is load-bearing, and nowhere else. **A task's tier is set by what a
+plausible-but-wrong change costs**, not by its line count. Model IDs: Opus = `claude-opus-5-5`, Sonnet =
+`claude-sonnet-5-5`, Haiku = `claude-haiku-5-5`.
+
+| Tier | Gets | Examples |
+|---|---|---|
+| **Haiku** | Lookups, edits fully specified by the plan with a mechanical check (`git grep`, a diff), and test runs | Step 0 anchor checks; file deletions; comment/docstring rewording; running the suites and reporting verbatim |
+| **Sonnet** (default implementer) | Anything where a wrong-but-plausible edit passes review: migrations, DB methods, API routes, pure analytics modules (test-first), web UI | `ensure_schema()`-run DDL; Pydantic models + `web/src/lib/types.ts` in one step; config changes every process boots through |
+| **Opus** (the main session) | Briefing, one review of the whole diff per session, and implementing only work flagged high-risk | Phase 43's projection core, Phase 47's settlement, identity code (`_move_annotations`, manual-row hashing), Phase 56 Items 2 and 9-11 |
+
+Every session follows the same pipeline: **0** Haiku anchor check (re-confirm every file:line the phase cites on
+the current branch, report drift; later briefs come from its output) → **1-4** Sonnet implementation steps, each
+with its own files → **5** Haiku runs `python -m unittest discover -s tests -v` and the four web checks → **6**
+one Opus review of the whole diff in the main session. A phase's own delegation table is written into its
+section when its session starts (just in time, because anchors drift as earlier phases land).
+
+1. **Brief from the item, not the file.** Paste only that item's section and step 0's verified anchors. Never
+   hand an agent this whole plan. This is the single largest saving.
+2. **One writer per file.** A phase table's "Files" column is the lock; steps sharing a file run in order,
+   everything else may run in parallel.
+3. **Escalate, don't retry.** If a Haiku step fails its checks twice, re-run it on Sonnet with the failure output.
+4. **Never delegate owner actions** (dashboard toggles, secrets, role creation, deploy settings) or gates that
+   touch production.
+5. **Agents never commit.** Each checkpoint stops uncommitted with a recommended commit title and body; the user
+   commits before the next checkpoint starts.
 
 ---
 
@@ -172,7 +203,7 @@ transactions → Phase 48; A10 recurring tagging → Phases 30-31.
 
 ## Phase 55 — Decommission Streamlit
 
-> **Status:** designed, not started. The user decided on 2026-10-20: "we can decommission it". **Lands before
+> **Status:** in progress (session S1, started 2026-10-20). The user decided on 2026-10-20: "we can decommission it". **Lands before
 > Phase 37**, so Phases 37-54 build on code with no frozen module in the way. After this phase the React
 > dashboard is the only one: `web/` is deployed on Vercel, and `web/vercel.json` rewrites `/api/*` to the
 > FastAPI service on Render.
@@ -237,15 +268,23 @@ Move these verbatim, with behaviour identical, so only imports change:
   root `streamlit_app.py`.
 - Delete `tests/test_app_auth.py` (10 Streamlit sign-in tests), and `tests/test_dashboard_helpers.py` /
   `tests/test_dashboard_classify.py` once 55a has moved their cases (`MobileStylesheetTests` goes with
-  `mobile.css`).
+  `mobile.css`, and `StyleChartTests` goes with plotly; neither is moved).
 - Delete `DatabaseClient.get_budgets` / `upsert_budget` (`database/db.py:502`, `:511`). Only Streamlit calls
-  them; check with `git grep` and update `tests/test_db_upserts.py`. **Keep the `budgets` table** (item 3).
+  them; check with `git grep` and update `tests/test_db_upserts.py`. `tests/test_api_data.py` (`:142`, `:318`,
+  `:533`) also names them on its mock DB, to assert the API never touches `budgets`: drop those lines, since
+  the methods no longer exist. **Keep the `budgets` table** (item 3).
 - In `requirements.txt`, drop `streamlit` and `plotly` (only `app/dashboard.py` and its test import plotly).
   Regenerate `requirements.lock` with hashes using the Phase 1f procedure (archive).
 - In `core/config.py`, drop the `.streamlit/secrets.toml` layer, so precedence becomes environment → `.env` →
   default. Update the `ConfigError` text, `tests/test_config.py`, the docstrings in `api/deps.py` and
   `scripts/plaid_link.py`, and the `.gitignore` entry. The main checkout has no `.streamlit/secrets.toml`
   (existence checked 2026-10-20, contents never read).
+  - **Trap (step 0, 2026-10-20):** `_load_secrets_file` (`core/config.py:21-27`) calls `load_dotenv(".env",
+    override=False)` **only in its no-secrets-file branch**. Removing the function must keep that call,
+    unconditionally, or `.env` silently stops loading for every local run.
+  - `tests/test_config.py` has no literal `secrets.toml`; its coupling is the patch of
+    `core.config._load_secrets_file` in `test_env_over_secrets_precedence` (`:46-51`), which is rewritten
+    as an env-over-`.env` test.
 - Rewrite the "port of `_build_sidebar_filters`" framing in `api/filters.py`'s docstring: it is now the
   source of truth. Its three invariants and `tests/test_api_filters.py` stay as they are. Do the same for the
   "frozen"/"port of" wording in `api/viewmodels.py`, `api/dataload.py`, `pipeline/runner.py` and the
@@ -271,15 +310,36 @@ Move these verbatim, with behaviour identical, so only imports change:
   - `budgets` as Streamlit-owned (now: legacy, inert, kept for 026's seed);
   - `is_outlier` described as a Streamlit shim (now: the anomaly-row flag the React filter reads).
 - **ADR 0013 "Decommission Streamlit":** short. It supersedes the Phase 15 freeze and records why `budgets`
-  and `is_outlier` survive. Add status notes to ADR 0005 (`budgets` ownership) and ADR 0007 (the shim
-  wording), and update ADR 0010 / ADR 0012's references to `_classify_tx_type` /
-  `_detect_internal_transfers` to their new names.
+  and `is_outlier` survive. Add status notes to ADR 0005 (`budgets` ownership, `:49`) and ADR 0007 (the
+  shim wording, `:50`; its `:339` line reference is also stale). ADRs 0010 and 0012 never name the moved
+  helpers (step 0, 2026-10-20), so they need no edit.
 
 ### 55d — Owner actions (no code)
 
 - Delete the app on Streamlit Community Cloud, together with its secrets.
 - Remove the Streamlit Community Cloud URL and `http://localhost:8501/` from the Google OAuth client's
   authorized redirect URIs.
+
+### Delegation (session S1, written 2026-10-20)
+
+Runs under "Delegation rules" at the top of this file. Checkpoints A, B and C each stop uncommitted for the
+user to commit before the next begins.
+
+| Step | Work | Files (one writer per file) | Model | Why this tier |
+|---|---|---|---|---|
+| 0 | Anchor check: every file:line in this phase, the dependency closure of each moved helper, the test-count baseline | read-only | **Haiku** | Lookup only |
+| A1 | 55a: create `database/frames.py` and `analytics/enrichment.py`, move `_label_subtype` into `api/viewmodels.py`, repoint the four importers, and have `app/dashboard.py` import the moved names back so Streamlit still runs at checkpoint A. Move the tests | the two new modules, `api/viewmodels.py`, `api/dataload.py`, `pipeline/runner.py`, `app/dashboard.py`, `tests/test_enrichment.py` (new), `tests/test_api_viewmodels.py`, `tests/test_pipeline_history.py`, `tests/test_dashboard_*.py` | **Sonnet** | A missed constant or import breaks the daily pipeline, and the bodies must move byte-identical |
+| A2 | Full suite; the count must equal step 0's baseline | read-only | **Haiku** | Runs and reports only |
+| B1 | Delete `app/`, root `streamlit_app.py`, the Streamlit tests, `get_budgets` / `upsert_budget` and their test references; drop `streamlit` / `plotly` from `requirements.txt`; reword the "port"/"frozen" comments | everything in 55b except `core/config.py`, its tests and the lock | **Haiku** | Mechanical, checked by the two `git grep`s in Verification 2 |
+| B2 | Drop the `.streamlit/secrets.toml` layer | `core/config.py`, `tests/test_config.py`, `api/deps.py`, `scripts/plaid_link.py` (docstrings), `.gitignore` | **Sonnet** | Every process boots through config |
+| B3 | Regenerate `requirements.lock` with hashes (Phase 1f procedure) | `requirements.lock` | **Sonnet** | Resolver platform and Python version must match CI's |
+| C1 | 55c docs, after verifying the callback path and Vercel rewrites against the code | `docs/deployment.md`, `docs/setup-google-oauth.md`, `README.md`, `CONTRIBUTING.md`, `CLAUDE.md` | **Sonnet** | Every fact written has to be checked against the code |
+| C2 | ADR 0013, and the status notes on ADRs 0005 and 0007 | `docs/adr/` | **Opus** (main session) | Short, and needs the session's context |
+| — | Review of the whole Phase 55 diff | read-only | **Opus** (main session) | One review, at the end |
+
+Verification 4 (real Postgres) is left to CI's `migrations` job, since this phase changes no SQL. Verification
+5 (the pipeline run on a disposable database) and 6 (live sign-in) are owner checks after merge, and stay open
+in this phase's status note until done.
 
 ### Verification
 
